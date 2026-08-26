@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pharmacy Reckoner</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --paper: #F6F3EC;
+    --paper-raised: #FFFFFF;
+    --ink: #23262B;
+    --ink-soft: #5B6169;
+    --ink-faint: #8B9096;
+    --accent: #1F6F78;
+    --accent-soft: #DCEEEE;
+    --danger: #B23A32;
+    --danger-soft: #F6DEDB;
+    --warn: #96690F;
+    --warn-soft: #F3E6CB;
+    --ok: #3C7A55;
+    --ok-soft: #DCEBE0;
+    --line: #E4DFD3;
+    --line-strong: #D2CBB9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181B; --paper-raised: #1D2124; --ink: #ECEDEE; --ink-soft: #9BA1A7; --ink-faint: #6B7177;
+      --accent: #59BFBF; --accent-soft: #1C3435; --danger: #E2857C; --danger-soft: #3A2320;
+      --warn: #E3B972; --warn-soft: #372B15; --ok: #7FC79A; --ok-soft: #1E3226;
+      --line: #2B2F33; --line-strong: #383D42;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom));
+    min-height: 100vh;
+  }
+  header.top {
+    position: sticky; top: 0; z-index: 20;
+    background: var(--paper); border-bottom: 1px solid var(--line-strong);
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header.top h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 19px; margin: 0; font-weight: 600;
+  }
+  header.top .sub { font-size: 11px; color: var(--ink-soft); margin-top: 1px; }
+  .refresh-btn {
+    background: var(--accent-soft); color: var(--accent); border: none; border-radius: 20px;
+    padding: 7px 13px; font-size: 12.5px; font-weight: 600; font-family: inherit;
+  }
+
+  main { padding: 14px 14px 24px; max-width: 640px; margin: 0 auto; }
+  .view { display: none; }
+  .view.active { display: block; animation: fade .15s ease; }
+  @keyframes fade { from{opacity:0} to{opacity:1} }
+
+  /* Home stat grid */
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
+  .stat-card {
+    background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 14px; border-left: 3px solid var(--stripe, var(--line-strong));
+  }
+  .stat-card .n { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-variant-numeric: tabular-nums;
+    font-size: 21px; font-weight: 700; line-height: 1.1; }
+  .stat-card .l { font-size: 11.5px; color: var(--ink-soft); margin-top: 4px; line-height: 1.35; }
+
+  .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--ink-soft); margin: 20px 0 8px; }
+
+  .upload-box {
+    background: var(--paper-raised); border: 1px dashed var(--line-strong); border-radius: 10px;
+    padding: 16px; text-align: center; font-size: 13px; color: var(--ink-soft);
+  }
+  .upload-box input[type=file] { display: none; }
+  .upload-label {
+    display: inline-block; background: var(--accent); color: white; padding: 9px 18px;
+    border-radius: 20px; font-weight: 600; font-size: 13px; margin-top: 8px; cursor: pointer;
+  }
+  #upload-log { font-size: 12px; color: var(--ink-soft); margin-top: 10px; white-space: pre-wrap; text-align: left; }
+
+  /* Search */
+  .search-bar { position: relative; margin-bottom: 10px; }
+  .search-bar input {
+    width: 100%; font-family: inherit; font-size: 14px; padding: 10px 12px 10px 34px;
+    border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper-raised); color: var(--ink);
+  }
+  .search-bar svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--ink-faint); }
+  .result-count { font-size: 11.5px; color: var(--ink-faint); margin: -4px 0 10px 2px; }
+
+  /* Sub tabs (Issues section) */
+  .subtabs { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; }
+  .subtab {
+    flex: none; font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 12px;
+    border-radius: 20px; border: 1px solid var(--line-strong); background: var(--paper-raised); color: var(--ink-soft);
+  }
+  .subtab.active { background: var(--accent); border-color: var(--accent); color: white; }
+
+  /* Cards list */
+  .card-list { display: flex; flex-direction: column; gap: 8px; }
+  .card {
+    background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px;
+    border-left: 3px solid var(--card-stripe, var(--line-strong));
+  }
+  .card .row1 { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .card .name { font-size: 13.5px; font-weight: 600; line-height: 1.3; }
+  .card .meta { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+  .card .metrics { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 8px; }
+  .card .metric .k { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
+  .card .metric .v { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-variant-numeric: tabular-nums;
+    font-size: 13px; font-weight: 600; margin-top: 1px; }
+  .pill {
+    flex: none; font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 20px; white-space: nowrap;
+  }
+  .empty { text-align: center; padding: 40px 20px; color: var(--ink-faint); font-size: 13px; }
+  .loading { text-align: center; padding: 60px 20px; color: var(--ink-faint); font-size: 13px; }
+
+  /* Bottom nav */
+  nav.bottom {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+    background: var(--paper-raised); border-top: 1px solid var(--line-strong);
+    display: flex; padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav.bottom button {
+    flex: 1; background: none; border: none; font-family: inherit; padding: 8px 1px 7px;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    color: var(--ink-faint); font-size: 9.5px; font-weight: 600;
+  }
+  nav.bottom button.active { color: var(--accent); }
+  nav.bottom svg { width: 18px; height: 18px; }
+
+  .login-banner { background: var(--warn-soft); color: var(--warn); font-size: 12px; padding: 8px 14px; text-align: center; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>Ready Reckoner</h1>
+    <div class="sub" id="header-sub">Loading&hellip;</div>
+  </div>
+  <button class="refresh-btn" id="refresh-btn">Refresh</button>
+</header>
+
+<main>
+  <!-- HOME -->
+  <div class="view active" id="view-home">
+    <div class="loading" id="home-loading">Loading your data&hellip;</div>
+    <div id="home-content" style="display:none">
+      <div class="stat-grid" id="stat-grid"></div>
+      <div class="section-title">Add this month's files</div>
+      <div class="upload-box">
+        Drop June/July-style Sale &amp; Purchase XLS files here.<br>
+        <label class="upload-label">Choose files<input type="file" id="file-input" multiple accept=".xlsx"></label>
+        <div id="upload-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FORECAST -->
+  <div class="view" id="view-forecast">
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-forecast" placeholder="Search product…">
+    </div>
+    <div class="result-count" id="rc-forecast"></div>
+    <div class="card-list" id="list-forecast"></div>
+  </div>
+
+  <!-- STOCK (Over-Under) -->
+  <div class="view" id="view-stock">
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-stock" placeholder="Search product…">
+    </div>
+    <div class="result-count" id="rc-stock"></div>
+    <div class="card-list" id="list-stock"></div>
+  </div>
+
+  <!-- PROFIT -->
+  <div class="view" id="view-profit">
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-profit" placeholder="Search product…">
+    </div>
+    <div class="result-count" id="rc-profit"></div>
+    <div class="card-list" id="list-profit"></div>
+  </div>
+
+  <!-- ISSUES -->
+  <div class="view" id="view-issues">
+    <div class="subtabs">
+      <button class="subtab active" data-sub="ptr">PTR &gt; MRP</button>
+      <button class="subtab" data-sub="mrp">MRP Variance</button>
+      <button class="subtab" data-sub="scheme">Scheme Gaps</button>
+      <button class="subtab" data-sub="disc">Discount Gaps</button>
+    </div>
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-issues" placeholder="Search product or supplier…">
+    </div>
+    <div class="result-count" id="rc-issues"></div>
+    <div class="card-list" id="list-issues"></div>
+  </div>
+
+  <!-- BRANCH -->
+  <div class="view" id="view-branch">
+    <div class="subtabs" id="branch-tabs"></div>
+    <div class="stat-grid" id="branch-stats" style="margin-bottom:14px"></div>
+    <div class="section-title">Product forecast, this branch</div>
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-branch" placeholder="Search product…">
+    </div>
+    <div class="result-count" id="rc-branch"></div>
+    <div class="card-list" id="list-branch"></div>
+  </div>
+
+  <!-- LOOKUP -->
+  <div class="view" id="view-lookup">
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-lookup" placeholder="Type a product name…" autocomplete="off">
+    </div>
+    <div class="card-list" id="lookup-suggestions"></div>
+
+    <div id="lookup-detail" style="display:none">
+      <div class="section-title" id="lookup-title" style="margin-top:0"></div>
+      <div class="stat-grid" id="lookup-stats"></div>
+
+      <div class="section-title">Purchase history <span id="lookup-purch-count" style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
+      <div class="card-list" id="lookup-purchases"></div>
+
+      <div class="section-title">Sales history <span id="lookup-sales-count" style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
+      <div class="card-list" id="lookup-sales"></div>
+    </div>
+  </div>
+</main>
+
+<nav class="bottom">
+  <button class="nav-btn active" data-view="home">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+    Home
+  </button>
+  <button class="nav-btn" data-view="forecast">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/></svg>
+    Forecast
+  </button>
+  <button class="nav-btn" data-view="stock">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="13" rx="1"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+    Stock
+  </button>
+  <button class="nav-btn" data-view="profit">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 9.5c0-1 1-2 3-2s3 1 3 2-1 1.5-3 2-3 1-3 2 1 2 3 2 3-1 3-2"/></svg>
+    Profit
+  </button>
+  <button class="nav-btn" data-view="issues">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9L2.5 18a1 1 0 00.9 1.5h17.2a1 1 0 00.9-1.5L13.7 3.9a1 1 0 00-1.8 0z"/></svg>
+    Issues
+  </button>
+  <button class="nav-btn" data-view="branch">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21V8l9-5 9 5v13"/><path d="M9 21v-6h6v6"/></svg>
+    Branch
+  </button>
+  <button class="nav-btn" data-view="lookup">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    Lookup
+  </button>
+</nav>
+
+<script>
+let DATA = null;
+let currentSub = 'ptr';
+let currentBranch = null;
+
+function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
+function money(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return '₹' + Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
+function pct(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toFixed(1) + '%'; }
+
+async function loadData(force) {
+  document.getElementById('home-loading').style.display = 'block';
+  document.getElementById('home-content').style.display = 'none';
+  document.getElementById('home-loading').textContent = force ? 'Recalculating…' : 'Loading your data…';
+  try {
+    const res = await fetch('/api/data' + (force ? '?refresh=1' : ''));
+    if (!res.ok) {
+      const err = await res.json();
+      document.getElementById('home-loading').textContent = err.error || 'No data yet.';
+      return;
+    }
+    DATA = await res.json();
+    render();
+  } catch (e) {
+    document.getElementById('home-loading').textContent = 'Could not reach the server. Check the PC is on and you\'re on the same WiFi.';
+  }
+}
+
+function render() {
+  document.getElementById('home-loading').style.display = 'none';
+  document.getElementById('home-content').style.display = 'block';
+  const s = DATA.summary;
+  document.getElementById('header-sub').textContent =
+    `History: ${s.months.join(', ')} · Forecasting ${s.target_month}`;
+
+  const stats = [
+    ['var(--accent)', fmt(s.predicted_value) === '—' ? '—' : money(s.predicted_value), `Predicted sales, ${s.target_month}`],
+    ['var(--ok)', pct(s.overall_margin_pct), 'Overall gross margin'],
+    ['var(--ok)', money(s.gross_profit), 'Gross profit (all history)'],
+    ['var(--warn)', money(s.unknown_cost_revenue), 'Revenue with cost unknown'],
+    ['var(--danger)', s.ptr_high_count, `PTR &gt; MRP entries, ${s.latest_month}`],
+    ['var(--warn)', s.mrp_variance_count, 'Products w/ MRP variance 3x+'],
+    ['var(--warn)', s.scheme_shortfall_count, `Scheme gaps, ${s.latest_month}`],
+    ['var(--warn)', s.discount_shortfall_count, `Discount gaps, ${s.latest_month}`],
+    ['var(--danger)', s.over_purchased_count, 'Over-purchased products'],
+    ['var(--danger)', s.dead_stock_count, 'Dead stock products'],
+  ];
+  document.getElementById('stat-grid').innerHTML = stats.map(([color, n, l]) => `
+    <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
+  `).join('');
+
+  buildForecast();
+  buildStock();
+  buildProfit();
+  buildIssues();
+  buildBranchTabs();
+  initLookup();
+}
+
+function marginColor(m) {
+  if (m >= 25) return 'var(--ok)';
+  if (m >= 10) return 'var(--warn)';
+  return 'var(--danger)';
+}
+function marginBg(m) {
+  if (m >= 25) return 'var(--ok-soft)';
+  if (m >= 10) return 'var(--warn-soft)';
+  return 'var(--danger-soft)';
+}
+function trendColor(t) {
+  if (t === 'Growing') return ['var(--ok)', 'var(--ok-soft)'];
+  if (t === 'Declining' || t.includes('Stopped')) return ['var(--danger)', 'var(--danger-soft)'];
+  if (t === 'New (no sales until latest month)') return ['var(--accent)', 'var(--accent-soft)'];
+  return ['var(--ink-soft)', 'var(--line)'];
+}
+function statusColor(st) {
+  if (st === 'Over-purchased') return ['var(--danger)', 'var(--danger-soft)'];
+  if (st.includes('dead stock')) return ['var(--danger)', 'var(--danger-soft)'];
+  if (st === 'Under-purchased') return ['var(--warn)', 'var(--warn-soft)'];
+  if (st.includes('old stock')) return ['var(--accent)', 'var(--accent-soft)'];
+  if (st === 'Balanced') return ['var(--ok)', 'var(--ok-soft)'];
+  return ['var(--ink-faint)', 'var(--line)'];
+}
+
+function setupSearch(inputId, listId, rcId, data, filterFn, renderFn, emptyMsg) {
+  function draw(q) {
+    const filtered = q ? data.filter(r => filterFn(r, q.toLowerCase())) : data;
+    document.getElementById(rcId).textContent = `${filtered.length.toLocaleString('en-IN')} of ${data.length.toLocaleString('en-IN')}`;
+    const list = document.getElementById(listId);
+    const slice = filtered.slice(0, 150);
+    list.innerHTML = slice.length ? slice.map(renderFn).join('') : `<div class="empty">${emptyMsg}</div>`;
+  }
+  document.getElementById(inputId).addEventListener('input', e => draw(e.target.value.trim()));
+  draw('');
+}
+
+function buildForecast() {
+  const data = DATA.forecast;
+  setupSearch('search-forecast', 'list-forecast', 'rc-forecast', data,
+    (r, q) => r.Product.toLowerCase().includes(q),
+    r => {
+      const [c, bg] = trendColor(r.trend);
+      return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
+        <div class="row1"><div class="name">${r.Product}</div>
+          <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Predicted Qty</div><div class="v">${fmt(r.qty)}</div></div>
+          <div class="metric"><div class="k">Predicted Value</div><div class="v">${money(r.value)}</div></div>
+        </div></div>`;
+    }, 'No matching products.');
+}
+
+function buildStock() {
+  const data = DATA.over_under;
+  setupSearch('search-stock', 'list-stock', 'rc-stock', data,
+    (r, q) => r.Product.toLowerCase().includes(q),
+    r => {
+      const [c, bg] = statusColor(r.status);
+      return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
+        <div class="row1"><div class="name">${r.Product}</div>
+          <span class="pill" style="color:${c};background:${bg}">${r.status}</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Purchased</div><div class="v">${fmt(r.purch_qty)}</div></div>
+          <div class="metric"><div class="k">Sold</div><div class="v">${fmt(r.sold_qty)}</div></div>
+          <div class="metric"><div class="k">Value impact</div><div class="v">${money(r.value_impact)}</div></div>
+        </div></div>`;
+    }, 'No matching products.');
+}
+
+function buildProfit() {
+  const data = DATA.profit;
+  setupSearch('search-profit', 'list-profit', 'rc-profit', data,
+    (r, q) => r.Product.toLowerCase().includes(q),
+    r => {
+      const c = marginColor(r.margin_pct), bg = marginBg(r.margin_pct);
+      return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
+        <div class="row1"><div class="name">${r.Product}</div>
+          <span class="pill" style="color:${c};background:${bg}">${pct(r.margin_pct)}</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Qty Sold</div><div class="v">${fmt(r.qty_sold)}</div></div>
+          <div class="metric"><div class="k">Revenue</div><div class="v">${money(r.revenue)}</div></div>
+          <div class="metric"><div class="k">Gross Profit</div><div class="v">${money(r.gross_profit)}</div></div>
+        </div></div>`;
+    }, 'No matching products.');
+}
+
+const issueRenderers = {
+  ptr: {
+    data: () => DATA.ptr_high,
+    filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
+    render: r => `<div class="card" style="--card-stripe:var(--danger)">
+      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+        <span class="pill" style="color:var(--danger);background:var(--danger-soft)">+${money(r.excess)}/unit</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">MRP</div><div class="v">${money(r.MRP)}</div></div>
+        <div class="metric"><div class="k">PTR</div><div class="v">${money(r.ptr)}</div></div>
+        <div class="metric"><div class="k">Qty</div><div class="v">${fmt(r.Qty)}</div></div>
+      </div></div>`,
+    empty: 'No PTR-above-MRP entries.'
+  },
+  mrp: {
+    data: () => DATA.mrp_variance,
+    filter: (r, q) => r.Product.toLowerCase().includes(q),
+    render: r => `<div class="card" style="--card-stripe:var(--warn)">
+      <div class="row1"><div class="name">${r.Product}</div>
+        <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${Number(r.ratio).toFixed(1)}×</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Lowest MRP</div><div class="v">${money(r.lo)}</div></div>
+        <div class="metric"><div class="k">Highest MRP</div><div class="v">${money(r.hi)}</div></div>
+        <div class="metric"><div class="k">Lines</div><div class="v">${fmt(r.lines)}</div></div>
+      </div></div>`,
+    empty: 'No MRP variance found.'
+  },
+  scheme: {
+    data: () => DATA.scheme_shortfall,
+    filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
+    render: r => `<div class="card" style="--card-stripe:var(--warn)">
+      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+        <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${(r.free_ratio*100).toFixed(0)}% got</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Usual free %</div><div class="v">${(r.typical_ratio*100).toFixed(0)}%</div></div>
+        <div class="metric"><div class="k">Qty</div><div class="v">${fmt(r.qty)}</div></div>
+        <div class="metric"><div class="k">Shortfall</div><div class="v">${fmt(r.shortfall)} units</div></div>
+      </div></div>`,
+    empty: 'No scheme shortfalls this month.'
+  },
+  disc: {
+    data: () => DATA.discount_shortfall,
+    filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
+    render: r => `<div class="card" style="--card-stripe:var(--warn)">
+      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+        <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${money(r.value_lost)} lost</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Disc % received</div><div class="v">${pct(r.disc_pct)}</div></div>
+        <div class="metric"><div class="k">Usual disc %</div><div class="v">${pct(r.typical_disc)}</div></div>
+        <div class="metric"><div class="k">Qty</div><div class="v">${fmt(r.qty)}</div></div>
+      </div></div>`,
+    empty: 'No discount shortfalls this month.'
+  }
+};
+
+function buildIssues() {
+  const cfg = issueRenderers[currentSub];
+  setupSearch('search-issues', 'list-issues', 'rc-issues', cfg.data(), cfg.filter, cfg.render, cfg.empty);
+}
+
+function buildBranchTabs() {
+  const branches = DATA.branch_summary.map(b => b.Branch);
+  if (!currentBranch || !branches.includes(currentBranch)) currentBranch = branches[0];
+  const tabs = document.getElementById('branch-tabs');
+  tabs.innerHTML = branches.map(b => `<button class="subtab${b === currentBranch ? ' active' : ''}" data-branch="${b}">${b}</button>`).join('');
+  tabs.querySelectorAll('.subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentBranch = btn.dataset.branch;
+      tabs.querySelectorAll('.subtab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('search-branch').value = '';
+      buildBranch();
+    });
+  });
+  buildBranch();
+}
+
+function buildBranch() {
+  const info = DATA.branch_summary.find(b => b.Branch === currentBranch);
+  const months = DATA.summary.months;
+  const stats = [
+    ['var(--accent)', money(info.total_revenue), 'Total revenue (all history)'],
+    ['var(--ok)', pct(info.growth_pct), `Growth, ${months[0]} → ${months[months.length - 1]}`],
+    ['var(--ink-soft)', fmt(info.invoices), 'Invoices'],
+    ['var(--ink-soft)', fmt(info.patients), 'Unique patients'],
+  ];
+  document.getElementById('branch-stats').innerHTML = stats.map(([color, n, l]) => `
+    <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
+  `).join('');
+
+  const data = DATA.branch_forecast.filter(r => r.Branch === currentBranch);
+  setupSearch('search-branch', 'list-branch', 'rc-branch', data,
+    (r, q) => r.Product.toLowerCase().includes(q),
+    r => {
+      const [c, bg] = trendColor(r.trend);
+      return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
+        <div class="row1"><div class="name">${r.Product}</div>
+          <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Predicted Qty</div><div class="v">${fmt(r.qty)}</div></div>
+          <div class="metric"><div class="k">Predicted Value</div><div class="v">${money(r.value)}</div></div>
+        </div></div>`;
+    }, 'No matching products.');
+}
+
+function escAttr(s) { return String(s).replace(/"/g, '&quot;'); }
+
+function goToLookup(product) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelector('[data-view="lookup"]').classList.add('active');
+  document.getElementById('view-lookup').classList.add('active');
+  document.getElementById('lookup-suggestions').innerHTML = '';
+  loadProductDetail(product);
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-lookup]');
+  if (el) goToLookup(el.dataset.lookup);
+});
+
+// ---------------- Product Lookup ----------------
+let ALL_PRODUCTS = null;
+
+async function ensureProductList() {
+  if (ALL_PRODUCTS) return ALL_PRODUCTS;
+  const res = await fetch('/api/products');
+  ALL_PRODUCTS = await res.json();
+  return ALL_PRODUCTS;
+}
+
+async function initLookup() {
+  await ensureProductList();
+  const input = document.getElementById('search-lookup');
+  const sug = document.getElementById('lookup-suggestions');
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    document.getElementById('lookup-detail').style.display = 'none';
+    if (q.length < 2) { sug.innerHTML = ''; return; }
+    const matches = ALL_PRODUCTS.filter(p => p.toLowerCase().includes(q)).slice(0, 30);
+    sug.innerHTML = matches.length
+      ? matches.map(p => `<div class="card" style="cursor:pointer" data-product="${p.replace(/"/g, '&quot;')}"><div class="name">${p}</div></div>`).join('')
+      : `<div class="empty">No products match “${input.value}”.</div>`;
+    sug.querySelectorAll('.card').forEach(el => {
+      el.addEventListener('click', () => loadProductDetail(el.dataset.product));
+    });
+  });
+}
+
+async function loadProductDetail(name) {
+  const sug = document.getElementById('lookup-suggestions');
+  sug.innerHTML = `<div class="empty">Loading…</div>`;
+  document.getElementById('search-lookup').value = name;
+  try {
+    const res = await fetch('/api/product?name=' + encodeURIComponent(name));
+    if (!res.ok) {
+      const err = await res.json();
+      sug.innerHTML = `<div class="empty">${err.error || 'Not found.'}</div>`;
+      return;
+    }
+    const d = await res.json();
+    sug.innerHTML = '';
+    renderProductDetail(d);
+  } catch (e) {
+    sug.innerHTML = `<div class="empty">Could not load product history.</div>`;
+  }
+}
+
+function renderProductDetail(d) {
+  const s = d.summary;
+  document.getElementById('lookup-detail').style.display = 'block';
+  document.getElementById('lookup-title').textContent = s.product;
+
+  const stats = [
+    ['var(--accent)', s.avg_selling_price != null ? money(s.avg_selling_price) : '—', 'Avg selling price'],
+    ['var(--ink-soft)', s.avg_cost_per_unit != null ? money(s.avg_cost_per_unit) : '—', 'Avg cost per unit'],
+    ['var(--ok)', fmt(s.total_sold_qty), 'Total sold (units)'],
+    ['var(--ok)', money(s.total_sold_value), 'Total sale value'],
+    ['var(--warn)', fmt(s.total_purchased_units), 'Total purchased (units)'],
+    ['var(--warn)', money(s.total_purchase_value), 'Total purchase value'],
+  ];
+  document.getElementById('lookup-stats').innerHTML = stats.map(([color, n, l]) => `
+    <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
+  `).join('');
+
+  document.getElementById('lookup-purch-count').textContent = `(${d.purchases.length})`;
+  document.getElementById('lookup-sales-count').textContent = `(${d.sales.length})`;
+
+  const purchList = document.getElementById('lookup-purchases');
+  purchList.innerHTML = d.purchases.length ? d.purchases.slice(0, 150).map(r => `
+    <div class="card" style="--card-stripe:var(--warn)">
+      <div class="row1"><div class="name">${r.Supplier}<div class="meta">${r.Date} · Inv ${r['Inv.No']}</div></div>
+        <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${money(r.item_total)}</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Qty (packs)</div><div class="v">${fmt(r.Qty)}</div></div>
+        <div class="metric"><div class="k">Factor</div><div class="v">${fmt(r.Factor)}</div></div>
+        <div class="metric"><div class="k">PTR</div><div class="v">${money(r.ptr)}</div></div>
+        <div class="metric"><div class="k">MRP</div><div class="v">${money(r.MRP)}</div></div>
+        ${r['Free Qty'] ? `<div class="metric"><div class="k">Free Qty</div><div class="v">${fmt(r['Free Qty'])}</div></div>` : ''}
+      </div></div>`).join('') : '<div class="empty">No purchase records for this product.</div>';
+
+  const salesList = document.getElementById('lookup-sales');
+  salesList.innerHTML = d.sales.length ? d.sales.slice(0, 150).map(r => `
+    <div class="card" style="--card-stripe:var(--accent)">
+      <div class="row1"><div class="name">${r.Patient || '(no name)'}<div class="meta">${r.Date} · Inv ${r['Inv.No']} · ${r.Branch}</div></div>
+        <span class="pill" style="color:var(--accent);background:var(--accent-soft)">${money(r.item_total)}</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Qty</div><div class="v">${fmt(r.Qty)}</div></div>
+        <div class="metric"><div class="k">MRP</div><div class="v">${money(r.MRP)}</div></div>
+        <div class="metric"><div class="k">Disc %</div><div class="v">${pct(r['Disc Percentage'])}</div></div>
+      </div></div>`).join('') : '<div class="empty">No sales records for this product.</div>';
+}
+
+document.querySelectorAll('.subtab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.subtab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentSub = btn.dataset.sub;
+    document.getElementById('search-issues').value = '';
+    buildIssues();
+  });
+});
+
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('view-' + btn.dataset.view).classList.add('active');
+  });
+});
+
+document.getElementById('refresh-btn').addEventListener('click', () => loadData(true));
+
+document.getElementById('file-input').addEventListener('change', async (e) => {
+  const files = e.target.files;
+  if (!files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  const log = document.getElementById('upload-log');
+  log.textContent = 'Uploading…';
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    const out = await res.json();
+    log.textContent = (out.saved ? `Saved: ${out.saved.join(', ')}\n\n` : '') + (out.log || out.error || '');
+    loadData();
+  } catch (err) {
+    log.textContent = 'Upload failed: ' + err;
+  }
+});
+
+loadData();
+</script>
+</body>
+</html>

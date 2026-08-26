@@ -1,0 +1,29 @@
+# --- Secrets ---
+# Mobile server login (username/password) - auto-generated on first run, never commit
+server_config.json
+
+# --- Real business data ---
+# Sales/purchase registers contain patient names, supplier terms, and
+# financials. This is private business + customer data and must never be
+# pushed to a repo, public or private.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Generated reports also contain real figures (revenue, profit, margins)
+reports/**/*.xlsx
+
+# --- Logs ---
+server.log
+*.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- OS/editor cruft ---
+.DS_Store
+Thumbs.db
