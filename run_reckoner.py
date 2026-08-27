@@ -219,10 +219,17 @@ def build_demand_forecast(sales):
     monthly = sales.groupby(['Product', 'Source_Month']).agg(
         Qty=('Qty', 'sum'), Value=('Item Total', 'sum')).reset_index()
 
+    # Use the number of days actually COVERED by data for each month, not the
+    # calendar length of the month. If the latest month was uploaded before
+    # it finished (e.g. dropped in on the 25th), dividing by the full 30/31
+    # understates its true daily rate and throws off the growth trend.
+    dates = sales.copy()
+    dates['Date'] = pd.to_datetime(dates['Date'], format='mixed')
+    days_covered = dates.groupby('Source_Month')['Date'].apply(lambda d: d.dt.date.nunique())
+
     per_day = {}
     for m in months:
-        y, mo = map(int, m.split('-'))
-        d = days_in_month(y, mo)
+        d = max(1, days_covered.get(m, 1))
         sub = monthly[monthly['Source_Month'] == m].set_index('Product')
         per_day[m] = (sub['Qty'] / d)
 
