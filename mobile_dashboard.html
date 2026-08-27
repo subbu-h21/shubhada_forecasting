@@ -173,6 +173,11 @@
 
   <!-- STOCK (Over-Under) -->
   <div class="view" id="view-stock">
+    <div class="subtabs">
+      <button class="subtab active" data-stocksub="over">Over-Purchased</button>
+      <button class="subtab" data-stocksub="under">Under-Purchased</button>
+      <button class="subtab" data-stocksub="other">Other</button>
+    </div>
     <div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input type="text" id="search-stock" placeholder="Search product…">
@@ -275,6 +280,7 @@
 <script>
 let DATA = null;
 let currentSub = 'ptr';
+let currentStockSub = 'over';
 let currentBranch = null;
 
 function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
@@ -383,8 +389,27 @@ function buildForecast() {
     }, 'No matching products.');
 }
 
+const STOCK_GROUPS = {
+  over: {
+    statuses: ['Over-purchased', 'Purchased, never sold (dead stock)'],
+    sort: (a, b) => b.value_impact - a.value_impact,
+    label: 'Excess value',
+  },
+  under: {
+    statuses: ['Under-purchased'],
+    sort: (a, b) => a.value_impact - b.value_impact,
+    label: 'Shortfall value',
+  },
+  other: {
+    statuses: ['Balanced', 'Sold, never purchased (old stock)', 'No activity'],
+    sort: (a, b) => Math.abs(b.value_impact) - Math.abs(a.value_impact),
+    label: 'Value impact',
+  },
+};
+
 function buildStock() {
-  const data = DATA.over_under;
+  const grp = STOCK_GROUPS[currentStockSub];
+  const data = DATA.over_under.filter(r => grp.statuses.includes(r.status)).sort(grp.sort);
   setupSearch('search-stock', 'list-stock', 'rc-stock', data,
     (r, q) => r.Product.toLowerCase().includes(q),
     r => {
@@ -395,7 +420,7 @@ function buildStock() {
         <div class="metrics">
           <div class="metric"><div class="k">Purchased</div><div class="v">${fmt(r.purch_qty)}</div></div>
           <div class="metric"><div class="k">Sold</div><div class="v">${fmt(r.sold_qty)}</div></div>
-          <div class="metric"><div class="k">Value impact</div><div class="v">${money(r.value_impact)}</div></div>
+          <div class="metric"><div class="k">${grp.label}</div><div class="v">${money(Math.abs(r.value_impact))}</div></div>
         </div></div>`;
     }, 'No matching products.');
 }
@@ -631,13 +656,23 @@ function renderProductDetail(d) {
       </div></div>`).join('') : '<div class="empty">No sales records for this product.</div>';
 }
 
-document.querySelectorAll('.subtab').forEach(btn => {
+document.querySelectorAll('#view-issues .subtab').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.subtab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#view-issues .subtab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentSub = btn.dataset.sub;
     document.getElementById('search-issues').value = '';
     buildIssues();
+  });
+});
+
+document.querySelectorAll('#view-stock .subtab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#view-stock .subtab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentStockSub = btn.dataset.stocksub;
+    document.getElementById('search-stock').value = '';
+    buildStock();
   });
 });
 

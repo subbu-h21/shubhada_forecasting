@@ -567,7 +567,9 @@ def build_report(sales, purch, out_path):
     tab_notes = [
         'Demand Forecast - every product, predicted quantity & value for next month, trend flag.',
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
-        'Over-Under Purchased - purchases vs sales, all history, flags dead stock & over-buying.',
+        'Over-Purchased - bought well more than sold (incl. dead stock), biggest excess value first.',
+        'Under-Purchased - sold well more than bought, biggest shortfall value first.',
+        'Other Purchase Status - balanced, old-stock, and no-activity products, for reference.',
         'Profit & Margin - gross profit and margin % per product, pre-tax, all history. Products with no purchase record are listed separately (cost unknown).',
         'PTR Higher Than MRP - purchase rate above MRP this month - fix these entries.',
         'MRP Issues (missing/variance) - MRP=0 or same product priced very differently across bills.',
@@ -618,27 +620,54 @@ def build_report(sales, purch, out_path):
     autosize(ws, [16, 38, 16, 16, 16, 16])
     ws.freeze_panes = 'A3'
 
-    # ---- Over-Under Purchased ----
-    ws = wb.create_sheet('Over-Under Purchased')
+    # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
+    ou = over_under.rename(columns={'Sold_Qty': 'Total Sold Qty', 'Purch_Qty': 'Total Purchased Qty',
+                                     'Net_Qty': 'Net Qty', 'Sold_Value': 'Total Sale Value',
+                                     'Purch_Value': 'Total Purchase Value'})
+    base_cols = ['Product', 'Total Purchased Qty', 'Total Sold Qty', 'Net Qty', 'Rate',
+                 'Total Purchase Value', 'Total Sale Value']
+
+    over_df = ou[ou['Status'].isin(['Over-purchased', 'Purchased, never sold (dead stock)'])].copy()
+    over_df = over_df.rename(columns={'Net_Value_Approx': 'Excess Value (at cost)'})
+    over_df = over_df.sort_values('Excess Value (at cost)', ascending=False)
+    over_df = over_df[base_cols[:4] + ['Status'] + base_cols[4:] + ['Excess Value (at cost)']]
+
+    under_df = ou[ou['Status'] == 'Under-purchased'].copy()
+    under_df['Shortfall Value (at cost)'] = -under_df['Net_Value_Approx']
+    under_df = under_df.sort_values('Shortfall Value (at cost)', ascending=False)
+    under_df = under_df[base_cols + ['Shortfall Value (at cost)']]
+
+    other_df = ou[ou['Status'].isin(['Balanced', 'Sold, never purchased (old stock)', 'No activity'])].copy()
+    other_df = other_df.rename(columns={'Net_Value_Approx': 'Net Value (at cost)'})
+    other_df = other_df.sort_values('Total Sale Value', ascending=False)
+    other_df = other_df[base_cols[:4] + ['Status'] + base_cols[4:] + ['Net Value (at cost)']]
+
+    ws = wb.create_sheet('Over-Purchased')
     ws.sheet_view.showGridLines = False
-    STATUS_COLORS = {
-        'Over-purchased': PatternFill('solid', fgColor='FFC7CE'),
-        'Purchased, never sold (dead stock)': PatternFill('solid', fgColor='FF8080'),
-        'Under-purchased': PatternFill('solid', fgColor='FFEB9C'),
-        'Sold, never purchased (old stock)': PatternFill('solid', fgColor='D9E1F2'),
-        'Balanced': PatternFill('solid', fgColor='C6EFCE'),
-        'No activity': PatternFill('solid', fgColor='F2F2F2'),
-    }
-    df2 = over_under.rename(columns={'Sold_Qty': 'Total Sold Qty', 'Purch_Qty': 'Total Purchased Qty',
-                                      'Net_Qty': 'Net Qty', 'Net_Value_Approx': 'Surplus/Shortfall Value (at cost)',
-                                      'Sold_Value': 'Total Sale Value', 'Purch_Value': 'Total Purchase Value'})
-    df2 = df2[['Product', 'Total Purchased Qty', 'Total Sold Qty', 'Net Qty', 'Status', 'Rate',
-               'Surplus/Shortfall Value (at cost)', 'Total Purchase Value', 'Total Sale Value']]
-    write_df(ws, df2, money_cols=['Rate', 'Surplus/Shortfall Value (at cost)', 'Total Purchase Value', 'Total Sale Value'],
-             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'],
-             highlight_col='Status', highlight_map=STATUS_COLORS)
-    autosize(ws, [38, 16, 14, 12, 30, 12, 20, 16, 16])
-    ws.freeze_panes = 'A2'
+    ws['A1'] = 'Bought at least 1.5x what was sold (or bought with zero sales at all) - biggest excess first'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    write_df(ws, over_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Excess Value (at cost)'],
+             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
+    autosize(ws, [38, 16, 14, 12, 26, 12, 16, 16, 18])
+    ws.freeze_panes = 'A3'
+
+    ws = wb.create_sheet('Under-Purchased')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Sold at least 2x what was purchased - biggest shortfall first (likely running down stock bought before this history)'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    write_df(ws, under_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Shortfall Value (at cost)'],
+             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
+    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
+    ws.freeze_panes = 'A3'
+
+    ws = wb.create_sheet('Other Purchase Status')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Balanced, sold-with-no-purchase-record (old stock), and no-activity products - sorted by sale value'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    write_df(ws, other_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Net Value (at cost)'],
+             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
+    autosize(ws, [38, 16, 14, 12, 26, 12, 16, 16, 18])
+    ws.freeze_panes = 'A3'
 
     # ---- Profit & Margin ----
     ws = wb.create_sheet('Profit & Margin')
