@@ -399,6 +399,90 @@ def build_over_under(sales, purch):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 2a: Month-over-month purchasing discipline + footfall trend
+#
+# Unlike build_over_under() (all history to date, cumulative), this scores
+# EACH MONTH ON ITS OWN - that month's purchases vs that month's sales - so
+# you can see whether buying discipline is actually improving month after
+# month, not just what the all-time picture looks like.
+#
+# Goal directions: Over-purchased down, Under-purchased down, Balanced up,
+# Dead stock down, Footfall up. Next month is projected with the same
+# capped-growth trend method used for demand/footfall forecasting.
+# ---------------------------------------------------------------------------
+TREND_GOALS = {
+    'Over_Purchased': 'down', 'Under_Purchased': 'down',
+    'Balanced': 'up', 'Dead_Stock': 'down', 'Footfall': 'up',
+}
+
+
+def _trend_next(series):
+    series = [float(x) for x in series]
+    if len(series) < 2 or series[-2] == 0:
+        return max(0, round(series[-1]))
+    growth = max(-0.3, min(0.5, (series[-1] - series[-2]) / series[-2]))
+    return max(0, round(series[-1] * (1 + growth)))
+
+
+def build_monthly_trend(sales, purch, footfall_forecast):
+    months = sorted(set(sales['Source_Month'].unique()) | set(purch['Source_Month'].unique()))
+    rows = []
+    for m in months:
+        s_m = sales[sales['Source_Month'] == m]
+        p_m = purch[purch['Source_Month'] == m]
+        counts = {'Over_Purchased': 0, 'Under_Purchased': 0, 'Balanced': 0, 'Dead_Stock': 0}
+        if not s_m.empty or not p_m.empty:
+            ou = build_over_under(s_m, p_m)
+            vc = ou['Status'].value_counts()
+            counts = {
+                'Over_Purchased': int(vc.get('Over-purchased', 0)),
+                'Under_Purchased': int(vc.get('Under-purchased', 0)),
+                'Balanced': int(vc.get('Balanced', 0)),
+                'Dead_Stock': int(vc.get('Purchased, never sold (dead stock)', 0)),
+            }
+        counts['Month'] = m
+        # Raw monthly footfall total is biased low for a partial (still-in-progress)
+        # month - the same trap the demand/footfall forecasts already avoid. Track
+        # the average-per-day rate instead, which is comparable across months
+        # regardless of how many days of that month have been uploaded so far.
+        counts['Footfall_Total'] = int(s_m['Inv.No'].nunique())
+        days_covered = pd.to_datetime(s_m['Date'], format='mixed').dt.date.nunique() if len(s_m) else 1
+        counts['Footfall_Avg_Daily'] = round(counts['Footfall_Total'] / max(1, days_covered), 1)
+        rows.append(counts)
+
+    trend = pd.DataFrame(rows)[['Month', 'Over_Purchased', 'Under_Purchased', 'Balanced', 'Dead_Stock',
+                                 'Footfall_Total', 'Footfall_Avg_Daily']]
+
+    count_metrics = ['Over_Purchased', 'Under_Purchased', 'Balanced', 'Dead_Stock']
+    pred_rows = []
+    for metric in count_metrics:
+        series = trend[metric].tolist()
+        latest, prev = series[-1], (series[-2] if len(series) >= 2 else None)
+        predicted = _trend_next(series)
+        goal = TREND_GOALS[metric]
+        on_track = None if prev is None else (latest <= prev if goal == 'down' else latest >= prev)
+        pred_rows.append({'Metric': metric, 'Goal': goal, 'Latest': latest,
+                           'Previous': prev, 'Predicted_Next': predicted, 'On_Track': on_track})
+
+    # Footfall: "on track" compares the day-normalized rate (fair across partial
+    # months); the predicted total reuses build_footfall()'s own forecast, which
+    # is already day-covered-adjusted and summed across branches - no need to
+    # re-derive it here with a cruder method.
+    avg_daily = trend['Footfall_Avg_Daily'].tolist()
+    ff_prev_avg = avg_daily[-2] if len(avg_daily) >= 2 else None
+    ff_on_track = None if ff_prev_avg is None else (avg_daily[-1] >= ff_prev_avg)
+    pred_rows.append({'Metric': 'Footfall', 'Goal': 'up',
+                       'Latest': trend['Footfall_Total'].iloc[-1],
+                       'Previous': trend['Footfall_Total'].iloc[-2] if len(trend) >= 2 else None,
+                       'Predicted_Next': int(footfall_forecast['Predicted_Total_Footfall'].sum()),
+                       'On_Track': ff_on_track})
+
+    prediction = pd.DataFrame(pred_rows)
+    target_month = next_month_str(months[-1])
+    return trend, prediction, target_month
+
+
+# ---------------------------------------------------------------------------
 # Analysis 2b: Gross profit & margin, product-wise
 #
 # Cost is computed pre-tax (GST excluded on both sides, since it's a pass-
@@ -564,6 +648,7 @@ def build_report(sales, purch, out_path):
     forecast, target_month, all_months = build_demand_forecast(sales)
     branch_summary, branch_forecast = build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
+    monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     over_under = build_over_under(sales, purch)
     profit, profit_unknown = build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -614,6 +699,7 @@ def build_report(sales, purch, out_path):
         'Demand Forecast - every product, predicted quantity & value for next month, trend flag.',
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
+        'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
         'Over-Purchased - bought well more than sold (incl. dead stock), biggest excess value first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
         'Other Purchase Status - balanced, old-stock, and no-activity products, for reference.',
@@ -706,6 +792,62 @@ def build_report(sales, purch, out_path):
              qty_cols=['Predicted Total Footfall'])
     autosize(ws, [16] + [14] * len(branch_order))
     ws.freeze_panes = 'A3'
+
+    # ---- Monthly Trends ----
+    ws = wb.create_sheet('Monthly Trends')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Purchasing discipline and footfall, month by month - each month scored on its OWN purchases vs sales (not cumulative)'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    ws['A2'] = 'Goal: Over-Purchased down, Under-Purchased down, Balanced up, Dead Stock down, Footfall up'
+    ws['A2'].font = Font(name=FONT, italic=True, size=9, color='555555')
+
+    mt = monthly_trend.rename(columns={'Over_Purchased': 'Over-Purchased', 'Under_Purchased': 'Under-Purchased',
+                                        'Dead_Stock': 'Dead Stock', 'Footfall_Total': 'Footfall (total bills)',
+                                        'Footfall_Avg_Daily': 'Footfall (avg/day)'})
+    t_start = 4
+    write_df(ws, mt, start_row=t_start,
+             qty_cols=['Over-Purchased', 'Under-Purchased', 'Balanced', 'Dead Stock', 'Footfall (total bills)'],
+             money_cols=['Footfall (avg/day)'])
+    t_last = t_start + len(mt)
+
+    chart1 = LineChart()
+    chart1.title = 'Purchasing discipline, month by month (product count)'
+    chart1.style = 2
+    chart1.y_axis.title = 'Products'
+    chart1.x_axis.title = 'Month'
+    chart1.height = 9
+    chart1.width = 16
+    cats1 = Reference(ws, min_col=1, min_row=t_start + 1, max_row=t_last)
+    for col in range(2, 6):  # Over-Purchased, Under-Purchased, Balanced, Dead Stock
+        chart1.add_data(Reference(ws, min_col=col, min_row=t_start, max_row=t_last), titles_from_data=True)
+    chart1.set_categories(cats1)
+    ws.add_chart(chart1, f'H{t_start}')
+
+    chart2 = LineChart()
+    chart2.title = 'Footfall, avg bills/day (day-covered adjusted)'
+    chart2.style = 10
+    chart2.y_axis.title = 'Avg bills/day'
+    chart2.x_axis.title = 'Month'
+    chart2.height = 9
+    chart2.width = 16
+    cats2 = Reference(ws, min_col=1, min_row=t_start + 1, max_row=t_last)
+    chart2.add_data(Reference(ws, min_col=7, min_row=t_start, max_row=t_last), titles_from_data=True)
+    chart2.set_categories(cats2)
+    ws.add_chart(chart2, f'H{t_start + 20}')
+
+    r6 = t_last + 3
+    ws.cell(row=r6, column=1, value=f'Prediction for {trend_target_month}').font = Font(name=FONT, bold=True, size=11)
+    tp = trend_prediction.copy()
+    tp['Metric'] = tp['Metric'].str.replace('_', ' ')
+    tp['On_Track'] = tp['On_Track'].map({True: 'Yes - improving', False: 'No - check this', None: 'n/a (first month)'})
+    tp = tp.rename(columns={'Goal': 'Goal Direction', 'Predicted_Next': 'Predicted Next Month', 'On_Track': 'On Track?'})
+    ON_TRACK_COLORS = {'Yes - improving': PatternFill('solid', fgColor='C6EFCE'),
+                        'No - check this': PatternFill('solid', fgColor='FFC7CE'),
+                        'n/a (first month)': PatternFill('solid', fgColor='F2F2F2')}
+    write_df(ws, tp, start_row=r6 + 1, qty_cols=['Latest', 'Previous', 'Predicted Next Month'],
+             highlight_col='On Track?', highlight_map=ON_TRACK_COLORS)
+    autosize(ws, [18, 14, 20, 24, 24, 12, 12, 12])
+    ws.freeze_panes = 'A5'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
     ou = over_under.rename(columns={'Sold_Qty': 'Total Sold Qty', 'Purch_Qty': 'Total Purchased Qty',

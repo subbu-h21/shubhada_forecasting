@@ -85,6 +85,19 @@
   .chart-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
   .chart-empty { padding: 30px 0; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
 
+  .trend-card {
+    background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 13px; border-left: 3px solid var(--card-stripe, var(--line-strong));
+    display: flex; align-items: center; gap: 12px;
+  }
+  .trend-card .tc-main { flex: 1; min-width: 0; }
+  .trend-card .tc-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .trend-card .tc-label { font-size: 12.5px; font-weight: 600; }
+  .trend-card .tc-value { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-variant-numeric: tabular-nums;
+    font-size: 19px; font-weight: 700; margin-top: 1px; }
+  .trend-card .tc-sub { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+  .trend-card .tc-spark { flex: none; width: 76px; height: 34px; }
+
   .upload-box {
     background: var(--paper-raised); border: 1px dashed var(--line-strong); border-radius: 10px;
     padding: 16px; text-align: center; font-size: 13px; color: var(--ink-soft);
@@ -165,6 +178,8 @@
     <div class="loading" id="home-loading">Loading your data&hellip;</div>
     <div id="home-content" style="display:none">
       <div class="stat-grid" id="stat-grid"></div>
+      <div class="section-title">Monthly trends vs goals</div>
+      <div class="card-list" id="trend-cards" style="margin-bottom:6px"></div>
       <div class="section-title">Add this month's files</div>
       <div class="upload-box">
         Drop June/July-style Sale &amp; Purchase XLS files here.<br>
@@ -343,12 +358,61 @@ function render() {
     <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
   `).join('');
 
+  buildTrendCards();
   buildForecast();
   buildStock();
   buildProfit();
   buildIssues();
   buildBranchTabs();
   initLookup();
+}
+
+const TREND_CARD_CONFIG = [
+  { metric: 'Over_Purchased', key: 'over_purchased', label: 'Over-Purchased', unit: 'products' },
+  { metric: 'Under_Purchased', key: 'under_purchased', label: 'Under-Purchased', unit: 'products' },
+  { metric: 'Balanced', key: 'balanced', label: 'Balanced', unit: 'products' },
+  { metric: 'Dead_Stock', key: 'dead_stock', label: 'Dead Stock', unit: 'products' },
+  { metric: 'Footfall', key: 'footfall_avg_daily', label: 'Footfall', unit: 'avg bills/day' },
+];
+
+function sparklinePath(values, w, h, pad) {
+  const max = Math.max(...values, 1), min = Math.min(...values, 0);
+  const range = Math.max(1, max - min);
+  const step = (w - pad * 2) / Math.max(1, values.length - 1);
+  const pts = values.map((v, i) => [pad + i * step, pad + (h - pad * 2) * (1 - (v - min) / range)]);
+  const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  return { d, last: pts[pts.length - 1] };
+}
+
+function buildTrendCards() {
+  const container = document.getElementById('trend-cards');
+  if (!DATA.monthly_trend || !DATA.monthly_trend.length) {
+    container.innerHTML = '<div class="empty">Need at least 2 months of history for trend tracking.</div>';
+    return;
+  }
+  container.innerHTML = TREND_CARD_CONFIG.map(cfg => {
+    const pred = DATA.trend_prediction.find(p => p.metric === cfg.metric);
+    const series = DATA.monthly_trend.map(m => m[cfg.key]);
+    const { d, last } = sparklinePath(series, 76, 34, 4);
+    const onTrack = pred ? pred.on_track : null;
+    const color = onTrack === null ? 'var(--ink-faint)' : (onTrack ? 'var(--ok)' : 'var(--danger)');
+    const bg = onTrack === null ? 'var(--line)' : (onTrack ? 'var(--ok-soft)' : 'var(--danger-soft)');
+    const badge = onTrack === null ? 'first month' : (onTrack ? '✓ on track' : '⚠ off track');
+    const displayValue = cfg.metric === 'Footfall' ? series[series.length - 1] : fmt(series[series.length - 1]);
+    const predText = pred ? `Predicted: ${cfg.metric === 'Footfall' ? fmt(pred.predicted_next) + ' total' : fmt(pred.predicted_next)}` : '';
+    return `<div class="trend-card" style="--card-stripe:${color}">
+      <div class="tc-main">
+        <div class="tc-top"><span class="tc-label">${cfg.label}</span>
+          <span class="pill" style="color:${color};background:${bg}">${badge}</span></div>
+        <div class="tc-value">${displayValue} <span style="font-size:11px;font-weight:400;color:var(--ink-soft)">${cfg.unit}</span></div>
+        <div class="tc-sub">${predText}</div>
+      </div>
+      <svg class="tc-spark" viewBox="0 0 76 34" preserveAspectRatio="none" role="img" aria-label="${cfg.label} trend">
+        <path d="${d}" fill="none" style="stroke:${color}" stroke-width="2"/>
+        <circle cx="${last[0]}" cy="${last[1]}" r="2.5" style="fill:${color}"/>
+      </svg>
+    </div>`;
+  }).join('');
 }
 
 function marginColor(m) {

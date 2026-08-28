@@ -93,6 +93,7 @@ def compute_all():
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
+    monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -150,6 +151,13 @@ def compute_all():
         'Latest_Avg_Daily': 'latest_avg_daily', 'Predicted_Avg_Daily': 'predicted_avg_daily',
         'Predicted_Total_Footfall': 'predicted_total', 'Growth_Pct': 'growth_pct'})
 
+    monthly_trend_out = monthly_trend.rename(columns={
+        'Over_Purchased': 'over_purchased', 'Under_Purchased': 'under_purchased', 'Balanced': 'balanced',
+        'Dead_Stock': 'dead_stock', 'Footfall_Total': 'footfall_total', 'Footfall_Avg_Daily': 'footfall_avg_daily'})
+    trend_prediction_out = trend_prediction.rename(columns={
+        'Metric': 'metric', 'Goal': 'goal', 'Latest': 'latest', 'Previous': 'previous',
+        'Predicted_Next': 'predicted_next', 'On_Track': 'on_track'})
+
     return {
         'summary': summary,
         'branch_summary': df_records(branch_summary_out),
@@ -157,6 +165,9 @@ def compute_all():
         'footfall_daily': df_records(footfall_daily_out.rename(columns={'Day': 'day', 'Footfall': 'footfall'})),
         'footfall_forecast': df_records(footfall_forecast_out),
         'footfall_target_month': footfall_target_month,
+        'monthly_trend': df_records(monthly_trend_out),
+        'trend_prediction': df_records(trend_prediction_out),
+        'trend_target_month': trend_target_month,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),
