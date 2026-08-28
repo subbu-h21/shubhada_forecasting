@@ -248,7 +248,22 @@ def api_product():
         ['Date', 'Inv.No', 'Supplier', 'Qty', 'Factor', 'MRP', 'ptr', 'Free Qty', 'item_total']
     ]) if not p.empty else []
 
-    return jsonify({'summary': summary, 'sales': sales_out, 'purchases': purch_out})
+    # Monthly trend for the chart - purchase qty is Factor-adjusted to individual
+    # units so it's on the same scale as sale qty (same fix as Over-Under Purchased).
+    s_monthly = s.groupby('Source_Month').agg(sold_qty=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not s.empty else pd.DataFrame()
+    if not p.empty:
+        p['Physical_Qty'] = p['Qty'] * p['Factor']
+        p_monthly = p.groupby('Source_Month').agg(purch_qty=('Physical_Qty', 'sum'), purch_value=('Item Total', 'sum'))
+    else:
+        p_monthly = pd.DataFrame()
+    monthly = pd.concat([s_monthly, p_monthly], axis=1).fillna(0).reset_index().rename(columns={'index': 'month', 'Source_Month': 'month'})
+    monthly = monthly.sort_values('month')
+    for col in ['sold_qty', 'sold_value', 'purch_qty', 'purch_value']:
+        if col not in monthly.columns:
+            monthly[col] = 0
+    monthly_out = df_records(monthly[['month', 'sold_qty', 'sold_value', 'purch_qty', 'purch_value']])
+
+    return jsonify({'summary': summary, 'sales': sales_out, 'purchases': purch_out, 'monthly': monthly_out})
 
 
 @app.route('/api/upload', methods=['POST'])

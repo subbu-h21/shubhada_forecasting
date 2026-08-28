@@ -267,6 +267,9 @@
       <div class="section-title" id="lookup-title" style="margin-top:0"></div>
       <div class="stat-grid" id="lookup-stats"></div>
 
+      <div class="section-title">Monthly: sold vs purchased</div>
+      <div class="chart-card" id="lookup-monthly-chart"></div>
+
       <div class="section-title">Purchase history <span id="lookup-purch-count" style="font-weight:400;text-transform:none;letter-spacing:0"></span></div>
       <div class="card-list" id="lookup-purchases"></div>
 
@@ -753,6 +756,46 @@ async function loadProductDetail(name) {
   }
 }
 
+function renderProductMonthlyChart(monthly) {
+  const container = document.getElementById('lookup-monthly-chart');
+  if (!monthly || !monthly.length) {
+    container.innerHTML = '<div class="chart-empty">No monthly data.</div>';
+    return;
+  }
+  const W = 600, H = 170, padL = 36, padR = 8, padT = 10, padB = 22;
+  const maxY = Math.max(1, ...monthly.map(m => Math.max(m.sold_qty, m.purch_qty)));
+  const groupW = (W - padL - padR) / monthly.length;
+  const barW = Math.min(26, groupW * 0.32);
+  const yScale = v => padT + (H - padT - padB) * (1 - v / maxY);
+
+  const gridFracs = [0, 0.5, 1];
+  const gridLines = gridFracs.map(f => {
+    const y = padT + (H - padT - padB) * f;
+    const label = Math.round(maxY * (1 - f));
+    return `<line class="chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/><text class="chart-axis-label" text-anchor="end" x="${padL - 4}" y="${y + 3}">${label}</text>`;
+  }).join('');
+
+  const bars = monthly.map((m, i) => {
+    const cx = padL + groupW * (i + 0.5);
+    const soldY = yScale(m.sold_qty), purchY = yScale(m.purch_qty);
+    const base = yScale(0);
+    return `
+      <rect x="${(cx - barW - 3).toFixed(1)}" y="${soldY.toFixed(1)}" width="${barW}" height="${(base - soldY).toFixed(1)}" rx="3" style="fill:var(--accent)"/>
+      <rect x="${(cx + 3).toFixed(1)}" y="${purchY.toFixed(1)}" width="${barW}" height="${(base - purchY).toFixed(1)}" rx="3" style="fill:var(--warn)"/>
+      <text class="chart-axis-label" text-anchor="middle" x="${cx.toFixed(1)}" y="${H - 4}">${m.month}</text>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="chart-legend">
+      <span><span class="sw" style="background:var(--accent)"></span>Sold (units)</span>
+      <span><span class="sw" style="background:var(--warn)"></span>Purchased (units, factor-adjusted)</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Monthly sold vs purchased quantity">
+      ${gridLines}
+      ${bars}
+    </svg>`;
+}
+
 function renderProductDetail(d) {
   const s = d.summary;
   document.getElementById('lookup-detail').style.display = 'block';
@@ -769,6 +812,8 @@ function renderProductDetail(d) {
   document.getElementById('lookup-stats').innerHTML = stats.map(([color, n, l]) => `
     <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
   `).join('');
+
+  renderProductMonthlyChart(d.monthly);
 
   document.getElementById('lookup-purch-count').textContent = `(${d.purchases.length})`;
   document.getElementById('lookup-sales-count').textContent = `(${d.sales.length})`;
