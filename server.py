@@ -92,6 +92,7 @@ def compute_all():
 
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
+    footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -143,10 +144,19 @@ def compute_all():
     branch_forecast_out = branch_forecast.rename(columns={'Predicted_Qty': 'qty', 'Predicted_Value': 'value',
                                                            'Trend': 'trend', 'Avg_Price': 'avg_price'})
 
+    footfall_daily_out = footfall_daily.copy()
+    footfall_daily_out['Day'] = footfall_daily_out['Day'].astype(str)
+    footfall_forecast_out = footfall_forecast.rename(columns={
+        'Latest_Avg_Daily': 'latest_avg_daily', 'Predicted_Avg_Daily': 'predicted_avg_daily',
+        'Predicted_Total_Footfall': 'predicted_total', 'Growth_Pct': 'growth_pct'})
+
     return {
         'summary': summary,
         'branch_summary': df_records(branch_summary_out),
         'branch_forecast': df_records(branch_forecast_out[['Branch', 'Product', 'trend', 'qty', 'value']]),
+        'footfall_daily': df_records(footfall_daily_out.rename(columns={'Day': 'day', 'Footfall': 'footfall'})),
+        'footfall_forecast': df_records(footfall_forecast_out),
+        'footfall_target_month': footfall_target_month,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),

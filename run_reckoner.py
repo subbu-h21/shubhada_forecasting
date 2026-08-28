@@ -22,6 +22,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.chart import LineChart, Reference
 
 ROOT = Path(__file__).parent
 RAW_DIR = ROOT / 'data' / 'raw'
@@ -312,6 +313,48 @@ def build_branch_report(sales):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1c: Daily footfall (unique bills per day) per branch, and a
+# footfall forecast for next month using the same actual-days-covered,
+# capped-growth method as the product demand forecast.
+# ---------------------------------------------------------------------------
+def build_footfall(sales):
+    sales = sales.copy()
+    sales['Branch'] = sales['Inv.No'].apply(extract_branch)
+    dt = pd.to_datetime(sales['Date'], format='mixed')
+    sales['Day'] = dt.dt.date
+
+    months = sorted(sales['Source_Month'].unique())
+    latest = months[-1]
+    target_month = next_month_str(latest)
+    ty, tm = map(int, target_month.split('-'))
+    target_days = days_in_month(ty, tm)
+
+    daily = sales.groupby(['Day', 'Branch']).agg(Footfall=('Inv.No', 'nunique')).reset_index()
+    daily = daily.sort_values('Day').reset_index(drop=True)
+
+    monthly = sales.groupby(['Branch', 'Source_Month']).agg(Footfall=('Inv.No', 'nunique')).reset_index()
+    days_covered = sales.groupby(['Branch', 'Source_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
+    monthly = monthly.merge(days_covered, on=['Branch', 'Source_Month'])
+    monthly['Avg_Daily'] = (monthly['Footfall'] / monthly['Days_Covered']).round(2)
+
+    rows = []
+    for branch in sorted(sales['Branch'].unique()):
+        sub = monthly[monthly['Branch'] == branch].set_index('Source_Month')
+        series = [float(sub['Avg_Daily'].get(m, 0.0)) for m in months]
+        if len(series) == 1 or series[-2] == 0:
+            pred_per_day, growth = series[-1], 0.0
+        else:
+            growth = max(-0.3, min(0.5, (series[-1] - series[-2]) / series[-2]))
+            pred_per_day = series[-1] * (1 + growth)
+        pred_total = max(0, round(pred_per_day * target_days))
+        rows.append((branch, series[-1] if series else 0.0, round(pred_per_day, 1), pred_total, round(growth * 100, 1)))
+
+    forecast = pd.DataFrame(rows, columns=['Branch', 'Latest_Avg_Daily', 'Predicted_Avg_Daily',
+                                            'Predicted_Total_Footfall', 'Growth_Pct'])
+    return daily, monthly, forecast, target_month
+
+
+# ---------------------------------------------------------------------------
 # Analysis 2: Over/under purchased (cumulative, all history)
 #
 # Purchase 'Qty' is counted in PACKS (Factor = units per pack, e.g. a strip of
@@ -520,6 +563,7 @@ def autosize(ws, widths):
 def build_report(sales, purch, out_path):
     forecast, target_month, all_months = build_demand_forecast(sales)
     branch_summary, branch_forecast = build_branch_report(sales)
+    footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
     over_under = build_over_under(sales, purch)
     profit, profit_unknown = build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -544,6 +588,8 @@ def build_report(sales, purch, out_path):
         (f'Demand forecast built for {target_month}', f'{len(forecast)} products'),
         (f'Predicted sales value, {target_month}', round(forecast["Predicted_Value"].sum(), 2)),
         ('Branches detected', ', '.join(branch_summary['Branch'].tolist())),
+        (f'Predicted total footfall, {footfall_target_month} (all branches)',
+         int(footfall_forecast['Predicted_Total_Footfall'].sum())),
         ('Over-purchased products (all-time)', int((over_under['Status'] == 'Over-purchased').sum())),
         ('Dead stock products (purchased, never sold)', int((over_under['Status'] == 'Purchased, never sold (dead stock)').sum())),
         ('Gross profit, all history (pre-tax, known-cost products)', round(profit['Gross_Profit'].sum(), 2)),
@@ -567,6 +613,7 @@ def build_report(sales, purch, out_path):
     tab_notes = [
         'Demand Forecast - every product, predicted quantity & value for next month, trend flag.',
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
+        'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Over-Purchased - bought well more than sold (incl. dead stock), biggest excess value first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
         'Other Purchase Status - balanced, old-stock, and no-activity products, for reference.',
@@ -618,6 +665,46 @@ def build_report(sales, purch, out_path):
     bf = bf[['Branch', 'Product', 'Trend', 'Predicted Qty', 'Avg Selling Price', 'Predicted Value']]
     write_df(ws, bf, start_row=r4 + 1, money_cols=['Avg Selling Price', 'Predicted Value'], qty_cols=['Predicted Qty'])
     autosize(ws, [16, 38, 16, 16, 16, 16])
+    ws.freeze_panes = 'A3'
+
+    # ---- Footfall ----
+    ws = wb.create_sheet('Footfall')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Daily footfall (unique bills per day) by branch - "bills on a date" = that day\'s footfall'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+
+    branch_order = branch_summary['Branch'].tolist()
+    pivot = footfall_daily.pivot(index='Day', columns='Branch', values='Footfall').fillna(0)
+    pivot = pivot.reindex(columns=branch_order).reset_index()
+
+    start_row = 2
+    write_df(ws, pivot, start_row=start_row, qty_cols=branch_order)
+    data_last_row = start_row + len(pivot)
+
+    chart = LineChart()
+    chart.title = 'Daily footfall by branch'
+    chart.style = 2
+    chart.y_axis.title = 'Footfall (unique bills)'
+    chart.x_axis.title = 'Date'
+    chart.height = 9
+    chart.width = 22
+    cats = Reference(ws, min_col=1, min_row=start_row + 1, max_row=data_last_row)
+    for i in range(2, 2 + len(branch_order)):
+        data_ref = Reference(ws, min_col=i, min_row=start_row, max_row=data_last_row)
+        chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats)
+    ws.add_chart(chart, f'{get_column_letter(len(branch_order) + 3)}{start_row}')
+
+    r5 = data_last_row + 3
+    ws.cell(row=r5, column=1, value=f'Footfall forecast for {footfall_target_month}').font = Font(name=FONT, bold=True, size=11)
+    ff = footfall_forecast.rename(columns={'Latest_Avg_Daily': f'Avg Daily ({all_months[-1]})',
+                                            'Predicted_Avg_Daily': 'Predicted Avg Daily',
+                                            'Predicted_Total_Footfall': 'Predicted Total Footfall',
+                                            'Growth_Pct': 'Growth %'})
+    write_df(ws, ff, start_row=r5 + 1,
+             money_cols=[f'Avg Daily ({all_months[-1]})', 'Predicted Avg Daily', 'Growth %'],
+             qty_cols=['Predicted Total Footfall'])
+    autosize(ws, [16] + [14] * len(branch_order))
     ws.freeze_panes = 'A3'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----

@@ -72,6 +72,19 @@
   .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
     color: var(--ink-soft); margin: 20px 0 8px; }
 
+  .chart-card {
+    background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 10px 8px;
+  }
+  .chart-card svg { display: block; width: 100%; height: auto; }
+  .chart-card .chart-line { fill: none; stroke-width: 2; }
+  .chart-card .chart-grid { stroke: var(--line); stroke-width: 1; }
+  .chart-card .chart-axis-label { font-size: 9px; fill: var(--ink-faint); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  .chart-card .chart-endpoint { stroke: var(--paper-raised); stroke-width: 2; }
+  .chart-legend { display: flex; gap: 14px; padding: 2px 4px 8px; font-size: 11.5px; color: var(--ink-soft); flex-wrap: wrap; }
+  .chart-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .chart-empty { padding: 30px 0; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
+
   .upload-box {
     background: var(--paper-raised); border: 1px dashed var(--line-strong); border-radius: 10px;
     padding: 16px; text-align: center; font-size: 13px; color: var(--ink-soft);
@@ -216,6 +229,8 @@
   <div class="view" id="view-branch">
     <div class="subtabs" id="branch-tabs"></div>
     <div class="stat-grid" id="branch-stats" style="margin-bottom:14px"></div>
+    <div class="section-title">Daily footfall (unique bills per day)</div>
+    <div class="chart-card" id="branch-footfall-chart"></div>
     <div class="section-title">Product forecast, this branch</div>
     <div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -519,18 +534,81 @@ function buildBranchTabs() {
   buildBranch();
 }
 
+function renderFootfallChart(branch) {
+  const container = document.getElementById('branch-footfall-chart');
+  const rows = DATA.footfall_daily.filter(r => r.Branch === branch);
+  if (!rows.length) { container.innerHTML = '<div class="chart-empty">No footfall data for this branch.</div>'; return; }
+
+  const byDay = new Map(rows.map(r => [r.day, r.footfall]));
+  const allDays = [...new Set(DATA.footfall_daily.map(r => r.day))].sort();
+  const days = [];
+  let d = new Date(allDays[0] + 'T00:00:00');
+  const endD = new Date(allDays[allDays.length - 1] + 'T00:00:00');
+  while (d <= endD) {
+    const iso = d.toISOString().slice(0, 10);
+    days.push({ day: iso, footfall: byDay.get(iso) || 0 });
+    d.setDate(d.getDate() + 1);
+  }
+
+  const W = 600, H = 170, padL = 32, padR = 8, padT = 10, padB = 20;
+  const maxY = Math.max(1, ...days.map(x => x.footfall));
+  const xStep = (W - padL - padR) / Math.max(1, days.length - 1);
+  const yScale = v => padT + (H - padT - padB) * (1 - v / maxY);
+  const points = days.map((x, i) => [padL + i * xStep, yScale(x.footfall)]);
+  const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+
+  const gridFracs = [0, 0.5, 1];
+  const gridLines = gridFracs.map(f => {
+    const y = padT + (H - padT - padB) * f;
+    const label = Math.round(maxY * (1 - f));
+    return `<line class="chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/><text class="chart-axis-label" text-anchor="end" x="${padL - 4}" y="${y + 3}">${label}</text>`;
+  }).join('');
+
+  const monthTicks = [];
+  let lastMonth = '';
+  days.forEach((x, i) => {
+    const m = x.day.slice(0, 7);
+    if (m !== lastMonth) { monthTicks.push({ i, label: x.day.slice(0, 7) }); lastMonth = m; }
+  });
+  const monthLabels = monthTicks.map(t =>
+    `<text class="chart-axis-label" x="${padL + t.i * xStep}" y="${H - 4}">${t.label}</text>`).join('');
+
+  const last = points[points.length - 1];
+  const avg = Math.round(days.reduce((s, x) => s + x.footfall, 0) / days.length);
+
+  container.innerHTML = `
+    <div class="chart-legend">
+      <span><span class="sw" style="background:var(--accent)"></span>${branch} · avg ${avg}/day</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Daily footfall trend for ${branch}">
+      ${gridLines}
+      ${monthLabels}
+      <path class="chart-line" d="${path}" style="stroke:var(--accent)"/>
+      <circle class="chart-endpoint" cx="${last[0]}" cy="${last[1]}" r="4" style="fill:var(--accent)"/>
+    </svg>`;
+}
+
 function buildBranch() {
   const info = DATA.branch_summary.find(b => b.Branch === currentBranch);
+  const ff = DATA.footfall_forecast.find(f => f.Branch === currentBranch);
   const months = DATA.summary.months;
   const stats = [
     ['var(--accent)', money(info.total_revenue), 'Total revenue (all history)'],
-    ['var(--ok)', pct(info.growth_pct), `Growth, ${months[0]} → ${months[months.length - 1]}`],
-    ['var(--ink-soft)', fmt(info.invoices), 'Invoices'],
+    ['var(--ok)', pct(info.growth_pct), `Revenue growth, ${months[0]} → ${months[months.length - 1]}`],
+    ['var(--ink-soft)', fmt(info.invoices), 'Invoices (bills), all history'],
     ['var(--ink-soft)', fmt(info.patients), 'Unique patients'],
   ];
+  if (ff) {
+    stats.push(
+      ['var(--accent)', fmt(ff.predicted_total), `Predicted footfall, ${DATA.footfall_target_month}`],
+      [ff.growth_pct >= 0 ? 'var(--ok)' : 'var(--danger)', pct(ff.growth_pct), 'Footfall growth trend']
+    );
+  }
   document.getElementById('branch-stats').innerHTML = stats.map(([color, n, l]) => `
     <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
   `).join('');
+
+  renderFootfallChart(currentBranch);
 
   const data = DATA.branch_forecast.filter(r => r.Branch === currentBranch);
   setupSearch('search-branch', 'list-branch', 'rc-branch', data,
