@@ -203,6 +203,7 @@
   <div class="view" id="view-stock">
     <div class="subtabs">
       <button class="subtab active" data-stocksub="over">Over-Purchased</button>
+      <button class="subtab" data-stocksub="dead">Dead Stock</button>
       <button class="subtab" data-stocksub="under">Under-Purchased</button>
       <button class="subtab" data-stocksub="other">Other</button>
     </div>
@@ -473,9 +474,14 @@ function buildForecast() {
 
 const STOCK_GROUPS = {
   over: {
-    statuses: ['Over-purchased', 'Purchased, never sold (dead stock)'],
+    statuses: ['Over-purchased'],
     sort: (a, b) => b.value_impact - a.value_impact,
     label: 'Excess value',
+  },
+  dead: {
+    statuses: ['Purchased, never sold (dead stock)'],
+    sort: (a, b) => b.value_impact - a.value_impact,
+    label: 'Value tied up',
   },
   under: {
     statuses: ['Under-purchased'],

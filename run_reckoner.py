@@ -700,7 +700,8 @@ def build_report(sales, purch, out_path):
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
-        'Over-Purchased - bought well more than sold (incl. dead stock), biggest excess value first.',
+        'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
+        'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
         'Other Purchase Status - balanced, old-stock, and no-activity products, for reference.',
         'Profit & Margin - gross profit and margin % per product, pre-tax, all history. Products with no purchase record are listed separately (cost unknown).',
@@ -856,10 +857,15 @@ def build_report(sales, purch, out_path):
     base_cols = ['Product', 'Total Purchased Qty', 'Total Sold Qty', 'Net Qty', 'Rate',
                  'Total Purchase Value', 'Total Sale Value']
 
-    over_df = ou[ou['Status'].isin(['Over-purchased', 'Purchased, never sold (dead stock)'])].copy()
+    over_df = ou[ou['Status'] == 'Over-purchased'].copy()
     over_df = over_df.rename(columns={'Net_Value_Approx': 'Excess Value (at cost)'})
     over_df = over_df.sort_values('Excess Value (at cost)', ascending=False)
-    over_df = over_df[base_cols[:4] + ['Status'] + base_cols[4:] + ['Excess Value (at cost)']]
+    over_df = over_df[base_cols + ['Excess Value (at cost)']]
+
+    dead_df = ou[ou['Status'] == 'Purchased, never sold (dead stock)'].copy()
+    dead_df = dead_df.rename(columns={'Net_Value_Approx': 'Value Tied Up (at cost)'})
+    dead_df = dead_df.sort_values('Value Tied Up (at cost)', ascending=False)
+    dead_df = dead_df[base_cols + ['Value Tied Up (at cost)']]
 
     under_df = ou[ou['Status'] == 'Under-purchased'].copy()
     under_df['Shortfall Value (at cost)'] = -under_df['Net_Value_Approx']
@@ -873,11 +879,20 @@ def build_report(sales, purch, out_path):
 
     ws = wb.create_sheet('Over-Purchased')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Bought at least 1.5x what was sold (or bought with zero sales at all) - biggest excess first'
+    ws['A1'] = 'Bought at least 1.5x what was sold (and it did sell at least some) - biggest excess first'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
     write_df(ws, over_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Excess Value (at cost)'],
              qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
-    autosize(ws, [38, 16, 14, 12, 26, 12, 16, 16, 18])
+    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
+    ws.freeze_panes = 'A3'
+
+    ws = wb.create_sheet('Dead Stock')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Purchased in this history but never sold at all - zero movement, highest value tied up first'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    write_df(ws, dead_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Value Tied Up (at cost)'],
+             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
+    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Under-Purchased')
