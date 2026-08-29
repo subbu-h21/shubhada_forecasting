@@ -52,17 +52,31 @@ def invalidate_cache():
 
 def load_or_create_config():
     if CONFIG_PATH.exists():
-        return json.loads(CONFIG_PATH.read_text())
-    cfg = {'username': 'owner', 'password': secrets.token_hex(4)}
+        cfg = json.loads(CONFIG_PATH.read_text())
+        if 'credentials' not in cfg:
+            # Migrate the old single-login format to the multi-credential list.
+            cfg = {'credentials': [{'username': cfg['username'], 'password': cfg['password']}]}
+            CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        return cfg
+    cfg = {'credentials': [{'username': 'owner', 'password': secrets.token_hex(4)}]}
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
     return cfg
+
+
+def add_credential(username, password):
+    cfg = load_or_create_config()
+    cfg['credentials'] = [c for c in cfg['credentials'] if c['username'] != username]
+    cfg['credentials'].append({'username': username, 'password': password})
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    global CONFIG
+    CONFIG = cfg
 
 
 CONFIG = load_or_create_config()
 
 
 def check_auth(username, password):
-    return username == CONFIG['username'] and password == CONFIG['password']
+    return any(c['username'] == username and c['password'] == password for c in CONFIG['credentials'])
 
 
 def requires_auth(f):
@@ -377,8 +391,8 @@ if __name__ == '__main__':
     print('=' * 60)
     print('Pharmacy Ready Reckoner - Mobile Server')
     print('=' * 60)
-    print(f'Username: {CONFIG["username"]}')
-    print(f'Password: {CONFIG["password"]}')
+    for c in CONFIG['credentials']:
+        print(f'Login: {c["username"]} / {c["password"]}')
     print(f'(saved in server_config.json - change it any time)')
     print()
     print(f'On your phone (same WiFi), open: http://{lan_ip}:8420')
