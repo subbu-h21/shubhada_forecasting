@@ -207,6 +207,7 @@
       <div class="card-list" id="trend-cards" style="margin-bottom:6px"></div>
       <div class="section-title" id="holiday-cal-title">Mark holidays for forecast</div>
       <div class="chart-card" id="holiday-calendar"></div>
+      <div id="cal-recalc-prompt" style="display:none"></div>
       <div class="section-title">Add this month's files</div>
       <div class="upload-box">
         Drop June/July-style Sale &amp; Purchase XLS files here.<br>
@@ -500,7 +501,25 @@ async function onCalendarDayTap(cell) {
     await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, name }) });
   }
-  await loadData(true);
+  // Just refresh the calendar itself (cheap) - NOT the whole dashboard, so
+  // marking several holidays in a row doesn't trigger a recalculation after
+  // every single tap. Show a prompt to recalculate once, whenever ready.
+  await loadHolidayCalendar();
+  showRecalcPrompt();
+}
+
+function showRecalcPrompt() {
+  const el = document.getElementById('cal-recalc-prompt');
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="chart-card" style="border-color:var(--accent);display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px">
+      <span style="font-size:12.5px;color:var(--ink-soft)">Holiday marks saved. Forecast not updated yet.</span>
+      <button class="upload-label" style="margin:0;padding:7px 14px;font-size:12.5px" id="recalc-now-btn">Recalculate now</button>
+    </div>`;
+  document.getElementById('recalc-now-btn').addEventListener('click', async () => {
+    el.style.display = 'none';
+    await loadData(true);
+  });
 }
 
 function buildPeople() {
