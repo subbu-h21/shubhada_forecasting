@@ -307,6 +307,15 @@
       <div class="card-list" id="lookup-sales"></div>
     </div>
   </div>
+
+  <!-- PEOPLE -->
+  <div class="view" id="view-people">
+    <div class="subtabs">
+      <button class="subtab active" data-peoplesub="employees">Employees</button>
+      <button class="subtab" data-peoplesub="customers">Customers</button>
+    </div>
+    <div id="people-content"></div>
+  </div>
 </main>
 
 <nav class="bottom">
@@ -338,12 +347,17 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
     Lookup
   </button>
+  <button class="nav-btn" data-view="people">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+    People
+  </button>
 </nav>
 
 <script>
 let DATA = null;
 let currentSub = 'ptr';
 let currentStockSub = 'over';
+let currentPeopleSub = 'employees';
 let currentBranch = null;
 
 function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
@@ -399,6 +413,7 @@ function render() {
   buildBranchTabs();
   initLookup();
   loadHolidayCalendar();
+  buildPeople();
 }
 
 const TREND_CARD_CONFIG = [
@@ -486,6 +501,69 @@ async function onCalendarDayTap(cell) {
       body: JSON.stringify({ date, name }) });
   }
   await loadData(true);
+}
+
+function buildPeople() {
+  const container = document.getElementById('people-content');
+  if (currentPeopleSub === 'employees') {
+    renderEmployees(container);
+  } else {
+    renderCustomers(container);
+  }
+}
+
+function employeeCard(color, name, metrics) {
+  return `<div class="card" style="--card-stripe:${color}">
+    <div class="row1"><div class="name">${name}</div></div>
+    <div class="metrics">
+      ${metrics.map(([k, v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}
+    </div></div>`;
+}
+
+function renderEmployees(container) {
+  const hasAny = DATA.employee_billed_by || DATA.employee_given_by || DATA.employee_created_by;
+  if (!hasAny) {
+    container.innerHTML = `<div class="empty">Not available yet — none of your exports include a "Billed By",
+      "Item Given By", or "Created By" column. This activates automatically once one shows up in an upload.</div>`;
+    return;
+  }
+  let html = '';
+  if (DATA.employee_billed_by) {
+    html += `<div class="section-title" style="margin-top:14px">Billed by</div><div class="card-list">` +
+      DATA.employee_billed_by.map(e => employeeCard('var(--accent)', e.Employee, [
+        ['Bills', fmt(e.Bills)], ['Revenue', money(e.Revenue)],
+        ['Avg Bill', money(e.Avg_Bill_Value)], ['Patients', fmt(e.Patients)],
+      ])).join('') + `</div>`;
+  }
+  if (DATA.employee_given_by) {
+    html += `<div class="section-title">Item given by</div><div class="card-list">` +
+      DATA.employee_given_by.map(e => employeeCard('var(--ok)', e.Employee, [
+        ['Line Items', fmt(e.Lines)], ['Qty', fmt(e.Qty)], ['Value', money(e.Value)],
+      ])).join('') + `</div>`;
+  }
+  if (DATA.employee_created_by) {
+    html += `<div class="section-title">Purchase entries created by</div><div class="card-list">` +
+      DATA.employee_created_by.map(e => employeeCard(e.PTR_Errors > 0 ? 'var(--danger)' : 'var(--warn)', e.Employee, [
+        ['Invoices', fmt(e.Entries)], ['Value', money(e.Value)],
+        ['PTR>MRP errors', fmt(e.PTR_Errors)],
+      ])).join('') + `</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderCustomers(container) {
+  if (!DATA.customer_loyalty) {
+    container.innerHTML = `<div class="empty">Not available yet — none of your exports include a mobile number
+      column. Patient name alone isn't used since it can't reliably identify a unique customer. This activates
+      automatically once a mobile number column shows up in an upload.</div>`;
+    return;
+  }
+  container.innerHTML = `<div class="section-title" style="margin-top:14px">New / returning / dropped off, by month (via ${escAttr(DATA.customer_loyalty_col)})</div>
+    <div class="card-list">` +
+    DATA.customer_loyalty.map(r => employeeCard('var(--accent)', r.Month, [
+      ['New', fmt(r.New_Customers)], ['Returning', fmt(r.Returning_Customers)],
+      ['Dropped off', fmt(r.Dropped_Off_From_Prev_Month)], ['Total active', fmt(r.Total_Active_Customers)],
+    ])).join('') + `</div>`;
 }
 
 function buildTrendCards() {
@@ -1106,6 +1184,15 @@ document.querySelectorAll('#view-stock .subtab').forEach(btn => {
     currentStockSub = btn.dataset.stocksub;
     document.getElementById('search-stock').value = '';
     buildStock();
+  });
+});
+
+document.querySelectorAll('#view-people .subtab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#view-people .subtab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPeopleSub = btn.dataset.peoplesub;
+    buildPeople();
   });
 });
 

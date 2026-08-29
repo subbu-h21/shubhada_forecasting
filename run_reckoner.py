@@ -108,6 +108,27 @@ def extract_branch(inv_no):
     code = m.group(1).upper()
     return BRANCH_MAP.get(code, f'Unknown branch ({code})')
 
+
+# Columns not present in any export yet (as of building this) - employee and
+# customer analysis activates automatically once a future export includes
+# one of these under any of its common naming variants. Nothing breaks in
+# the meantime; ingestion already keeps whatever columns a file has.
+MOBILE_CANDIDATES = ['Mobile Number', 'Mobile No', 'Mobile', 'Phone Number', 'Phone', 'Patient Mobile', 'Contact Number']
+TIMESTAMP_CANDIDATES = ['Time Stamp', 'Timestamp', 'Time', 'Bill Time']
+BILLED_BY_CANDIDATES = ['Billed By', 'Billed by', 'Biller', 'Cashier', 'Bill By']
+GIVEN_BY_CANDIDATES = ['Item Given By', 'Given By', 'Dispensed By', 'Issued By']
+CREATED_BY_CANDIDATES = ['Created By', 'Created by', 'Entry By', 'Entered By']
+
+
+def find_col(df, candidates):
+    """First matching column name (from a list of naming variants) that
+    actually has real data in it - a present-but-empty column doesn't count."""
+    for c in candidates:
+        if c in df.columns and df[c].notna().any():
+            return c
+    return None
+
+
 MONTH_DAYS = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
 
 
@@ -560,6 +581,84 @@ def build_daywise_forecast(sales, footfall_forecast):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1e: Employee performance - Billed By / Item Given By (sales),
+# Created By (purchase). None of these columns exist in any export yet;
+# this activates automatically the first time a file includes one of them.
+# ---------------------------------------------------------------------------
+def build_employee_performance(sales, purch):
+    billed_col = find_col(sales, BILLED_BY_CANDIDATES)
+    given_col = find_col(sales, GIVEN_BY_CANDIDATES)
+    created_col = find_col(purch, CREATED_BY_CANDIDATES)
+
+    result = {'billed_by': None, 'given_by': None, 'created_by': None}
+
+    if billed_col:
+        g = sales[sales[billed_col].notna()].groupby(billed_col).agg(
+            Bills=('Inv.No', 'nunique'), Revenue=('Item Total', 'sum'),
+            Patients=('Patient', 'nunique')).reset_index().rename(columns={billed_col: 'Employee'})
+        g['Avg_Bill_Value'] = (g['Revenue'] / g['Bills']).round(2)
+        result['billed_by'] = g.sort_values('Revenue', ascending=False).reset_index(drop=True)
+
+    if given_col:
+        g2 = sales[sales[given_col].notna()].groupby(given_col).agg(
+            Lines=('Product', 'count'), Qty=('Qty', 'sum'), Value=('Item Total', 'sum')
+        ).reset_index().rename(columns={given_col: 'Employee'})
+        result['given_by'] = g2.sort_values('Value', ascending=False).reset_index(drop=True)
+
+    if created_col:
+        p = purch.copy()
+        p['Factor'] = p['Factor'].replace(0, 1).fillna(1)
+        g3 = p[p[created_col].notna()].groupby(created_col).agg(
+            Entries=('Inv.No', 'nunique'), Lines=('Product', 'count'), Value=('Item Total', 'sum')
+        ).reset_index().rename(columns={created_col: 'Employee'})
+        # Cross-reference with the purchase-entry error checks already built -
+        # who's actually keying in the PTR-above-MRP / MRP-mismatch entries.
+        errors = p[(p['Sale Rate'] > p['MRP']) & (p['MRP'] > 0) & p[created_col].notna()]
+        err_counts = errors.groupby(created_col)['Inv.No'].count().rename('PTR_Errors')
+        g3 = g3.merge(err_counts, left_on='Employee', right_index=True, how='left')
+        g3['PTR_Errors'] = g3['PTR_Errors'].fillna(0).astype(int)
+        result['created_by'] = g3.sort_values('Value', ascending=False).reset_index(drop=True)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Analysis 1f: Customer loyalty - new / returning / dropped-off, by mobile
+# number, month over month. The Mobile Number column doesn't exist in any
+# export yet; this activates automatically once a file includes one.
+# Patient NAME is deliberately not used as a fallback identifier - the same
+# name can be different people, and it would quietly produce wrong counts
+# rather than an honest "not available yet".
+# ---------------------------------------------------------------------------
+def build_customer_loyalty(sales):
+    mobile_col = find_col(sales, MOBILE_CANDIDATES)
+    if not mobile_col:
+        return None, None
+
+    s = sales[sales[mobile_col].notna()].copy()
+    s[mobile_col] = s[mobile_col].astype(str).str.strip()
+    months = sorted(s['Source_Month'].unique())
+    monthly_customers = {m: set(s[s['Source_Month'] == m][mobile_col]) for m in months}
+
+    rows = []
+    seen_so_far = set()
+    for i, m in enumerate(months):
+        current = monthly_customers[m]
+        new_customers = current - seen_so_far
+        returning = current & seen_so_far
+        prev_customers = monthly_customers[months[i - 1]] if i > 0 else set()
+        dropped_off = prev_customers - current
+        rows.append({
+            'Month': m, 'New_Customers': len(new_customers), 'Returning_Customers': len(returning),
+            'Dropped_Off_From_Prev_Month': len(dropped_off), 'Total_Active_Customers': len(current),
+        })
+        seen_so_far |= current
+
+    trend = pd.DataFrame(rows)
+    return trend, mobile_col
+
+
+# ---------------------------------------------------------------------------
 # Analysis 2: Over/under purchased (cumulative, all history)
 #
 # Purchase 'Qty' is counted in PACKS (Factor = units per pack, e.g. a strip of
@@ -853,6 +952,8 @@ def build_report(sales, purch, out_path):
     forecast, target_month, all_months = build_demand_forecast(sales)
     branch_summary, branch_forecast = build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
+    employee_perf = build_employee_performance(sales, purch)
+    customer_loyalty, mobile_col = build_customer_loyalty(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
     over_under = build_over_under(sales, purch)
@@ -907,6 +1008,8 @@ def build_report(sales, purch, out_path):
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
         'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
+        'Employee Performance - Billed By / Item Given By / Created By breakdown. Activates once your export includes one of these columns.',
+        'Customer Loyalty - new/returning/dropped-off customers by mobile number, month by month. Activates once your export includes a mobile number column.',
         'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
         'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
@@ -1103,6 +1206,59 @@ def build_report(sales, purch, out_path):
 
     autosize(ws, [14, 12, 16, 18, 18, 18])
     ws.freeze_panes = 'A5'
+
+    # ---- Employee Performance ----
+    ws = wb.create_sheet('Employee Performance')
+    ws.sheet_view.showGridLines = False
+    r_emp = 2
+    any_emp_data = any(v is not None for v in employee_perf.values())
+    if not any_emp_data:
+        ws['A1'] = 'Not available yet'
+        ws['A1'].font = Font(name=FONT, bold=True, size=13)
+        ws['A2'] = 'None of your exports include a "Billed By", "Item Given By", or "Created By" column yet.'
+        ws['A2'].font = Font(name=FONT, size=10, color='555555')
+        ws['A3'] = 'This activates automatically the first time an uploaded file includes one of these.'
+        ws['A3'].font = Font(name=FONT, size=10, color='555555')
+    else:
+        if employee_perf['billed_by'] is not None:
+            ws.cell(row=r_emp, column=1, value='Billed By (sales) - revenue, bills, and average bill value per employee').font = Font(name=FONT, bold=True, size=11)
+            df_b = employee_perf['billed_by'].rename(columns={'Bills': 'Bills', 'Revenue': 'Revenue',
+                                                                'Patients': 'Unique Patients', 'Avg_Bill_Value': 'Avg Bill Value'})
+            r_emp = write_df(ws, df_b, start_row=r_emp + 1, qty_cols=['Bills', 'Unique Patients'],
+                              money_cols=['Revenue', 'Avg Bill Value']) + 3
+        if employee_perf['given_by'] is not None:
+            ws.cell(row=r_emp, column=1, value='Item Given By (sales) - lines dispensed, quantity, and value per employee').font = Font(name=FONT, bold=True, size=11)
+            df_g = employee_perf['given_by'].rename(columns={'Lines': 'Line Items', 'Qty': 'Total Qty', 'Value': 'Total Value'})
+            r_emp = write_df(ws, df_g, start_row=r_emp + 1, qty_cols=['Line Items', 'Total Qty'], money_cols=['Total Value']) + 3
+        if employee_perf['created_by'] is not None:
+            ws.cell(row=r_emp, column=1, value='Created By (purchase entries) - includes a cross-check against PTR-above-MRP errors from the Issues tabs').font = Font(name=FONT, bold=True, size=11)
+            df_c = employee_perf['created_by'].rename(columns={'Entries': 'Invoices Entered', 'Lines': 'Line Items',
+                                                                 'Value': 'Total Purchase Value', 'PTR_Errors': 'PTR > MRP Errors'})
+            write_df(ws, df_c, start_row=r_emp + 1, qty_cols=['Invoices Entered', 'Line Items', 'PTR > MRP Errors'],
+                     money_cols=['Total Purchase Value'])
+    autosize(ws, [26, 14, 16, 16, 16])
+    ws.freeze_panes = 'A2'
+
+    # ---- Customer Loyalty ----
+    ws = wb.create_sheet('Customer Loyalty')
+    ws.sheet_view.showGridLines = False
+    if customer_loyalty is None:
+        ws['A1'] = 'Not available yet'
+        ws['A1'].font = Font(name=FONT, bold=True, size=13)
+        ws['A2'] = 'None of your exports include a mobile number column yet.'
+        ws['A2'].font = Font(name=FONT, size=10, color='555555')
+        ws['A3'] = 'This activates automatically the first time an uploaded file includes one - identifying customers by name alone isn\'t reliable, since names repeat across different people.'
+        ws['A3'].font = Font(name=FONT, size=10, color='555555')
+    else:
+        ws['A1'] = f'New / returning / dropped-off customers by month, identified by "{mobile_col}". Goal: New and Returning up, Dropped Off down.'
+        ws['A1'].font = Font(name=FONT, bold=True, size=11)
+        cl = customer_loyalty.rename(columns={'New_Customers': 'New Customers', 'Returning_Customers': 'Returning Customers',
+                                               'Dropped_Off_From_Prev_Month': 'Dropped Off (vs prev month)',
+                                               'Total_Active_Customers': 'Total Active This Month'})
+        write_df(ws, cl, start_row=3, qty_cols=['New Customers', 'Returning Customers',
+                                                 'Dropped Off (vs prev month)', 'Total Active This Month'])
+    autosize(ws, [14, 16, 18, 22, 20])
+    ws.freeze_panes = 'A4'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
     ou = over_under.rename(columns={'Sold_Qty': 'Total Sold Qty', 'Purch_Qty': 'Total Purchased Qty',

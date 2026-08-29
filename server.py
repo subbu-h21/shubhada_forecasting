@@ -93,6 +93,8 @@ def compute_all():
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
+    employee_perf = rk.build_employee_performance(sales, purch)
+    customer_loyalty, mobile_col = rk.build_customer_loyalty(sales)
     monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
@@ -176,6 +178,11 @@ def compute_all():
         'trend_target_month': trend_target_month,
         'daywise_forecast': df_records(daywise_out),
         'daywise_target_month': daywise_target_month,
+        'employee_billed_by': df_records(employee_perf['billed_by']) if employee_perf['billed_by'] is not None else None,
+        'employee_given_by': df_records(employee_perf['given_by']) if employee_perf['given_by'] is not None else None,
+        'employee_created_by': df_records(employee_perf['created_by']) if employee_perf['created_by'] is not None else None,
+        'customer_loyalty': df_records(customer_loyalty) if customer_loyalty is not None else None,
+        'customer_loyalty_col': mobile_col,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),
