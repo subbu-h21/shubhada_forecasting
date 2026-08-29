@@ -716,9 +716,9 @@ function renderDaywiseChart(branch) {
   const bars = rows.map((r, i) => {
     const x = padL + i * step + (step - barW) / 2;
     const y = yScale(r.footfall);
-    const isSunday = r.weekday === 'Sunday';
-    const color = isSunday ? 'var(--warn)' : 'var(--accent)';
-    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(base - y).toFixed(1)}" rx="2" style="fill:${color}"><title>${r.date} (${r.weekday}): ${r.footfall}</title></rect>`;
+    const color = r.Holiday ? 'var(--danger)' : (r.weekday === 'Sunday' ? 'var(--warn)' : 'var(--accent)');
+    const titleText = r.Holiday ? `${r.date} (${r.Holiday}): ${r.footfall}` : `${r.date} (${r.weekday}): ${r.footfall}`;
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(base - y).toFixed(1)}" rx="2" style="fill:${color}"><title>${titleText}</title></rect>`;
   }).join('');
 
   const dayLabels = rows.filter((r, i) => i === 0 || i === rows.length - 1 || (i + 1) % 7 === 0).map(r => {
@@ -730,11 +730,15 @@ function renderDaywiseChart(branch) {
   const busiest = rows.reduce((a, b) => b.footfall > a.footfall ? b : a);
   const quietest = rows.reduce((a, b) => b.footfall < a.footfall ? b : a);
 
+  const holidayCount = rows.filter(r => r.Holiday).length;
   container.innerHTML = `
     <div class="chart-legend">
       <span><span class="sw" style="background:var(--accent)"></span>Weekday</span>
       <span><span class="sw" style="background:var(--warn)"></span>Sunday</span>
-      <span style="margin-left:auto">Busiest: ${busiest.weekday} ${busiest.date.slice(8)} (${fmt(busiest.footfall)}) · Quietest: ${quietest.weekday} ${quietest.date.slice(8)} (${fmt(quietest.footfall)})</span>
+      ${holidayCount ? '<span><span class="sw" style="background:var(--danger)"></span>Holiday</span>' : ''}
+    </div>
+    <div class="chart-legend" style="padding-top:0">
+      <span>Busiest: ${busiest.weekday} ${busiest.date.slice(8)} (${fmt(busiest.footfall)}) · Quietest: ${quietest.weekday} ${quietest.date.slice(8)} (${fmt(quietest.footfall)})</span>
     </div>
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Day-wise footfall forecast for ${branch}">
       ${gridLines}
@@ -744,7 +748,9 @@ function renderDaywiseChart(branch) {
 
   const touchPoints = rows.map((r, i) => ({
     x: padL + i * step + step / 2,
-    label: `${r.date} (${r.weekday}): ${fmt(r.footfall)} footfall, ${money(r.revenue)}`,
+    label: r.Holiday
+      ? `${r.date} — ${r.Holiday}: ${fmt(r.footfall)} footfall, ${money(r.revenue)}`
+      : `${r.date} (${r.weekday}): ${fmt(r.footfall)} footfall, ${money(r.revenue)}`,
   }));
   makeChartTouchable(container, container.querySelector('svg'), touchPoints);
 }

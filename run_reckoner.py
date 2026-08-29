@@ -31,6 +31,18 @@ REPORTS_DIR = ROOT / 'reports'
 MANIFEST_PATH = PROC_DIR / 'manifest.json'
 SALES_MASTER = PROC_DIR / 'sales_master.csv'
 PURCH_MASTER = PROC_DIR / 'purchase_master.csv'
+HOLIDAYS_PATH = ROOT / 'holidays.json'
+
+
+def load_holidays():
+    """Declared holidays as {date_string: name}. Edit holidays.json to add
+    festival/regional dates - lunar-calendar festivals (Diwali, Ganesh
+    Chaturthi, Eid, etc.) shift every year, so they're deliberately not
+    guessed here; add the confirmed date for the specific year yourself."""
+    if not HOLIDAYS_PATH.exists():
+        return {}
+    entries = json.loads(HOLIDAYS_PATH.read_text())
+    return {e['date']: e['name'] for e in entries}
 
 SALE_SIGNATURE = {'Patient', 'Product', 'Qty', 'Item Total'}
 PURCH_SIGNATURE = {'Supplier', 'Invoice Amount', 'Product', 'Qty'}
@@ -378,6 +390,9 @@ def build_daywise_forecast(sales, footfall_forecast):
     sales['Day'] = dt.dt.date
     sales['Weekday'] = dt.dt.weekday
 
+    holidays = load_holidays()
+    sales['Is_Holiday'] = sales['Day'].astype(str).isin(holidays.keys())
+
     months = sorted(sales['Source_Month'].unique())
     latest = months[-1]
     target_month = next_month_str(latest)
@@ -385,13 +400,20 @@ def build_daywise_forecast(sales, footfall_forecast):
     target_days_count = days_in_month(ty, tm)
     branches = sorted(sales['Branch'].unique())
 
-    daily = sales.groupby(['Day', 'Weekday', 'Branch']).agg(
+    daily = sales.groupby(['Day', 'Weekday', 'Branch', 'Is_Holiday']).agg(
         Footfall=('Inv.No', 'nunique'), Revenue=('Item Total', 'sum')).reset_index()
+
+    # Weekday pattern excludes holidays - a holiday shouldn't drag down what a
+    # "normal" Monday/Tuesday/etc. looks like for that branch.
+    normal_daily = daily[~daily['Is_Holiday']]
+    branch_avg = {b: {'footfall': normal_daily[normal_daily['Branch'] == b]['Footfall'].mean(),
+                       'revenue': normal_daily[normal_daily['Branch'] == b]['Revenue'].mean()}
+                  for b in branches}
 
     dow_index = {}
     for branch in branches:
-        b = daily[daily['Branch'] == branch]
-        avg_ff, avg_rev = b['Footfall'].mean(), b['Revenue'].mean()
+        b = normal_daily[normal_daily['Branch'] == branch]
+        avg_ff, avg_rev = branch_avg[branch]['footfall'], branch_avg[branch]['revenue']
         idx = {}
         for wd in range(7):
             sub = b[b['Weekday'] == wd]
@@ -400,6 +422,30 @@ def build_daywise_forecast(sales, footfall_forecast):
                 'revenue': float(sub['Revenue'].mean() / avg_rev) if len(sub) and avg_rev > 0 else 1.0,
             }
         dow_index[branch] = idx
+
+    # Holiday adjustment: for each past holiday actually seen in the data, how far
+    # its footfall/revenue fell from what a normal day of that same weekday would
+    # have produced. Averaged per branch (falling back to the all-branch average,
+    # then to "no adjustment" if this branch/global has never seen a holiday yet -
+    # accuracy improves automatically as more holiday-months accumulate).
+    def holiday_ratios(metric):
+        out = {}
+        for _, r in daily[daily['Is_Holiday']].iterrows():
+            br, wd = r['Branch'], r['Weekday']
+            expected = branch_avg.get(br, {}).get(metric, 0) * dow_index.get(br, {}).get(wd, {}).get(metric, 1.0)
+            if expected > 0:
+                out.setdefault(br, []).append(r[metric.capitalize()] / expected)
+        return out
+
+    holiday_factor = {}
+    for metric in ('footfall', 'revenue'):
+        ratios_by_branch = holiday_ratios(metric)
+        all_ratios = [r for rs in ratios_by_branch.values() for r in rs]
+        global_avg = (sum(all_ratios) / len(all_ratios)) if all_ratios else 1.0
+        for branch in branches:
+            rs = ratios_by_branch.get(branch)
+            holiday_factor.setdefault(branch, {})[metric] = (
+                sum(rs) / len(rs) if rs else global_avg)
 
     # Monthly revenue forecast per branch, same day-covered-adjusted trend method as footfall
     monthly_rev = sales.groupby(['Branch', 'Source_Month']).agg(Revenue=('Item Total', 'sum')).reset_index()
@@ -420,22 +466,31 @@ def build_daywise_forecast(sales, footfall_forecast):
 
     ff_forecast_map = footfall_forecast.set_index('Branch')['Predicted_Total_Footfall'].to_dict()
     target_dates = pd.date_range(pd.Timestamp(ty, tm, 1), periods=target_days_count, freq='D')
+    target_holiday = [holidays.get(str(d.date())) for d in target_dates]
 
     rows = []
     for branch in branches:
-        w_ff = [dow_index[branch][d.weekday()]['footfall'] for d in target_dates]
-        w_rev = [dow_index[branch][d.weekday()]['revenue'] for d in target_dates]
+        w_ff, w_rev = [], []
+        for d, hname in zip(target_dates, target_holiday):
+            base_ff = dow_index[branch][d.weekday()]['footfall']
+            base_rev = dow_index[branch][d.weekday()]['revenue']
+            if hname:
+                base_ff *= holiday_factor[branch]['footfall']
+                base_rev *= holiday_factor[branch]['revenue']
+            w_ff.append(base_ff)
+            w_rev.append(base_rev)
         sum_ff, sum_rev = sum(w_ff), sum(w_rev)
         total_ff, total_rev = ff_forecast_map.get(branch, 0), rev_forecast.get(branch, 0)
-        for d, wf, wr in zip(target_dates, w_ff, w_rev):
+        for d, wf, wr, hname in zip(target_dates, w_ff, w_rev, target_holiday):
             rows.append({
                 'Date': d.date(), 'Weekday': WEEKDAY_NAMES[d.weekday()], 'Branch': branch,
+                'Holiday': hname or '',
                 'Predicted_Footfall': round(total_ff * (wf / sum_ff)) if sum_ff > 0 else 0,
                 'Predicted_Revenue': round(total_rev * (wr / sum_rev), 2) if sum_rev > 0 else 0,
             })
     daywise = pd.DataFrame(rows)
 
-    all_branches = daywise.groupby(['Date', 'Weekday']).agg(
+    all_branches = daywise.groupby(['Date', 'Weekday', 'Holiday']).agg(
         Predicted_Footfall=('Predicted_Footfall', 'sum'), Predicted_Revenue=('Predicted_Revenue', 'sum')).reset_index()
     all_branches.insert(2, 'Branch', 'All Branches')
     daywise = pd.concat([daywise, all_branches], ignore_index=True).sort_values(['Branch', 'Date']).reset_index(drop=True)
@@ -959,12 +1014,18 @@ def build_report(sales, purch, out_path):
     idx_last = write_df(ws, dow_out, start_row=4, money_cols=['Footfall Index', 'Revenue Index'])
 
     r7 = idx_last + 3
-    ws.cell(row=r7, column=1, value=f'Day-by-day forecast for {daywise_target_month}').font = Font(name=FONT, bold=True, size=11)
+    ws.cell(row=r7, column=1, value=f'Day-by-day forecast for {daywise_target_month} (holiday-adjusted where a declared holiday falls, see holidays.json)').font = Font(name=FONT, bold=True, size=11)
     dw_out = daywise_forecast.rename(columns={'Predicted_Footfall': 'Predicted Footfall', 'Predicted_Revenue': 'Predicted Revenue'})
-    dw_out = dw_out[['Date', 'Weekday', 'Branch', 'Predicted Footfall', 'Predicted Revenue']]
+    dw_out = dw_out[['Date', 'Weekday', 'Branch', 'Holiday', 'Predicted Footfall', 'Predicted Revenue']]
     dw_start = r7 + 1
     write_df(ws, dw_out, start_row=dw_start, qty_cols=['Predicted Footfall'], money_cols=['Predicted Revenue'])
     dw_last = dw_start + len(dw_out)
+
+    holiday_fill = PatternFill('solid', fgColor='F3E6CB')
+    for i, is_holiday in enumerate(dw_out['Holiday'] != ''):
+        if is_holiday:
+            for col in range(1, len(dw_out.columns) + 1):
+                ws.cell(row=dw_start + 1 + i, column=col).fill = holiday_fill
 
     # 'All Branches' sorts first alphabetically (A < H < S), so it occupies the
     # first `all_count` data rows of the table just written.
@@ -985,7 +1046,7 @@ def build_report(sales, purch, out_path):
     chart.set_categories(cats)
     ws.add_chart(chart, f'H{dw_start}')
 
-    autosize(ws, [14, 12, 16, 18, 18])
+    autosize(ws, [14, 12, 16, 18, 18, 18])
     ws.freeze_panes = 'A5'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
