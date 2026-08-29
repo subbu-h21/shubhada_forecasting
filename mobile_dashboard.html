@@ -74,16 +74,29 @@
 
   .chart-card {
     background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px;
-    padding: 12px 10px 8px;
+    padding: 12px 10px 8px; position: relative;
   }
-  .chart-card svg { display: block; width: 100%; height: auto; }
+  .chart-card svg { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: pointer; }
   .chart-card .chart-line { fill: none; stroke-width: 2; }
   .chart-card .chart-grid { stroke: var(--line); stroke-width: 1; }
   .chart-card .chart-axis-label { font-size: 9px; fill: var(--ink-faint); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
   .chart-card .chart-endpoint { stroke: var(--paper-raised); stroke-width: 2; }
+  .chart-card .chart-touch-marker { fill: var(--ink); stroke: var(--paper-raised); stroke-width: 1.5; pointer-events: none; }
   .chart-legend { display: flex; gap: 14px; padding: 2px 4px 8px; font-size: 11.5px; color: var(--ink-soft); flex-wrap: wrap; }
   .chart-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
   .chart-empty { padding: 30px 0; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
+
+  .chart-tooltip {
+    display: none; position: absolute; top: 6px; transform: translateX(-50%);
+    background: var(--ink); color: var(--paper); font-size: 11px; font-weight: 600;
+    padding: 4px 9px; border-radius: 6px; white-space: nowrap; pointer-events: none; z-index: 5;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  :root:not([data-theme="light"]) .chart-tooltip { background: var(--paper-raised); color: var(--ink); border: 1px solid var(--line-strong); }
+  @media (prefers-color-scheme: dark) { .chart-tooltip { background: var(--paper-raised); color: var(--ink); border: 1px solid var(--line-strong); } }
+  :root[data-theme="dark"] .chart-tooltip { background: var(--paper-raised); color: var(--ink); border: 1px solid var(--line-strong); }
+
+  .trend-card { position: relative; }
 
   .trend-card {
     background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px;
@@ -387,7 +400,7 @@ function sparklinePath(values, w, h, pad) {
   const step = (w - pad * 2) / Math.max(1, values.length - 1);
   const pts = values.map((v, i) => [pad + i * step, pad + (h - pad * 2) * (1 - (v - min) / range)]);
   const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
-  return { d, last: pts[pts.length - 1] };
+  return { d, last: pts[pts.length - 1], pts };
 }
 
 function buildTrendCards() {
@@ -396,10 +409,13 @@ function buildTrendCards() {
     container.innerHTML = '<div class="empty">Need at least 2 months of history for trend tracking.</div>';
     return;
   }
+  const months = DATA.summary.months;
+  const sparkData = [];
   container.innerHTML = TREND_CARD_CONFIG.map(cfg => {
     const pred = DATA.trend_prediction.find(p => p.metric === cfg.metric);
     const series = DATA.monthly_trend.map(m => m[cfg.key]);
-    const { d, last } = sparklinePath(series, 76, 34, 4);
+    const { d, last, pts } = sparklinePath(series, 76, 34, 4);
+    sparkData.push({ pts, months, series, unit: cfg.unit });
     const onTrack = pred ? pred.on_track : null;
     const color = onTrack === null ? 'var(--ink-faint)' : (onTrack ? 'var(--ok)' : 'var(--danger)');
     const bg = onTrack === null ? 'var(--line)' : (onTrack ? 'var(--ok-soft)' : 'var(--danger-soft)');
@@ -419,6 +435,12 @@ function buildTrendCards() {
       </svg>
     </div>`;
   }).join('');
+
+  [...container.querySelectorAll('.trend-card')].forEach((card, i) => {
+    const { pts, months, series, unit } = sparkData[i];
+    const touchPoints = pts.map((p, j) => ({ x: p[0], y: p[1], label: `${months[j]}: ${fmt(series[j])} ${unit}` }));
+    makeChartTouchable(card, card.querySelector('svg'), touchPoints);
+  });
 }
 
 function marginColor(m) {
@@ -661,6 +683,9 @@ function renderFootfallChart(branch) {
       <path class="chart-line" d="${path}" style="stroke:var(--accent)"/>
       <circle class="chart-endpoint" cx="${last[0]}" cy="${last[1]}" r="4" style="fill:var(--accent)"/>
     </svg>`;
+
+  const touchPoints = days.map((x, i) => ({ x: points[i][0], y: points[i][1], label: `${x.day}: ${fmt(x.footfall)}` }));
+  makeChartTouchable(container, container.querySelector('svg'), touchPoints);
 }
 
 function renderDaywiseChart(branch) {
@@ -716,6 +741,12 @@ function renderDaywiseChart(branch) {
       ${bars}
       ${dayLabels}
     </svg>`;
+
+  const touchPoints = rows.map((r, i) => ({
+    x: padL + i * step + step / 2,
+    label: `${r.date} (${r.weekday}): ${fmt(r.footfall)} footfall, ${money(r.revenue)}`,
+  }));
+  makeChartTouchable(container, container.querySelector('svg'), touchPoints);
 }
 
 function buildBranch() {
@@ -757,6 +788,58 @@ function buildBranch() {
 }
 
 function escAttr(s) { return String(s).replace(/"/g, '&quot;'); }
+
+// Reusable tap/click-to-reveal-value for hand-rolled SVG charts. `points` is
+// an array of {x, y, label} in the SVG's own viewBox units (y optional - used
+// to drop a marker on the touched point for line charts). `cardEl` must be
+// the .chart-card wrapper (position:relative) holding both the <svg> and a
+// sibling .chart-tooltip div gets created into.
+function makeChartTouchable(cardEl, svgEl, points, markerClass) {
+  if (!points.length) return;
+  let tooltip = cardEl.querySelector(':scope > .chart-tooltip');
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.className = 'chart-tooltip';
+    cardEl.appendChild(tooltip);
+  }
+  let marker = null;
+
+  function showAt(clientX, clientY) {
+    const vb = svgEl.viewBox.baseVal;
+    const rect = svgEl.getBoundingClientRect();
+    const svgX = ((clientX - rect.left) / rect.width) * vb.width;
+    let nearest = points[0], minDist = Infinity;
+    for (const p of points) {
+      const dist = Math.abs(p.x - svgX);
+      if (dist < minDist) { minDist = dist; nearest = p; }
+    }
+    tooltip.textContent = nearest.label;
+    tooltip.style.display = 'block';
+    const pxX = (nearest.x / vb.width) * rect.width;
+    const cardRect = cardEl.getBoundingClientRect();
+    const svgOffsetLeft = rect.left - cardRect.left;
+    tooltip.style.left = Math.min(Math.max(svgOffsetLeft + pxX, 34), cardRect.width - 34) + 'px';
+
+    if (nearest.y !== undefined) {
+      if (marker) marker.remove();
+      marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      marker.setAttribute('cx', nearest.x);
+      marker.setAttribute('cy', nearest.y);
+      marker.setAttribute('r', 4);
+      marker.setAttribute('class', 'chart-touch-marker' + (markerClass ? ' ' + markerClass : ''));
+      svgEl.appendChild(marker);
+    }
+  }
+
+  function onEvent(evt) {
+    const pt = evt.touches ? evt.touches[0] : evt;
+    showAt(pt.clientX, pt.clientY);
+    evt.preventDefault();
+  }
+  svgEl.addEventListener('click', onEvent);
+  svgEl.addEventListener('touchstart', onEvent, { passive: false });
+  svgEl.addEventListener('touchmove', onEvent, { passive: false });
+}
 
 function goToLookup(product) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
@@ -858,6 +941,14 @@ function renderProductMonthlyChart(monthly) {
       ${gridLines}
       ${bars}
     </svg>`;
+
+  const touchPoints = [];
+  monthly.forEach((m, i) => {
+    const cx = padL + groupW * (i + 0.5);
+    touchPoints.push({ x: cx - barW / 2 - 3, label: `${m.month} sold: ${fmt(m.sold_qty)} (${money(m.sold_value)})` });
+    touchPoints.push({ x: cx + barW / 2 + 3, label: `${m.month} purchased: ${fmt(m.purch_qty)} (${money(m.purch_value)})` });
+  });
+  makeChartTouchable(container, container.querySelector('svg'), touchPoints);
 }
 
 function renderProductDetail(d) {
