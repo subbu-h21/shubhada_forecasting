@@ -199,6 +199,47 @@ def api_data():
     return jsonify(data)
 
 
+@app.route('/api/holidays_calendar')
+@requires_auth
+def api_holidays_calendar():
+    month = request.args.get('month')
+    if not month:
+        data, _ = get_cached_data()
+        if data is None:
+            return jsonify({'error': 'No data yet'}), 400
+        month = data['daywise_target_month']
+    ty, tm = map(int, month.split('-'))
+    days_count = rk.days_in_month(ty, tm)
+    holidays = rk.load_holidays()
+    dates = pd.date_range(pd.Timestamp(ty, tm, 1), periods=days_count, freq='D')
+    out = []
+    for d in dates:
+        day_type, label = rk.classify_special_day(d, holidays)
+        out.append({
+            'date': str(d.date()), 'weekday': rk.WEEKDAY_NAMES[d.weekday()],
+            'day_type': day_type, 'label': label,
+            'is_custom': str(d.date()) in holidays,
+        })
+    return jsonify({'month': month, 'days': out})
+
+
+@app.route('/api/holidays', methods=['POST'])
+@requires_auth
+def api_holidays_post():
+    body = request.get_json(force=True, silent=True) or {}
+    date_str = body.get('date')
+    name = body.get('name')
+    if not date_str:
+        return jsonify({'error': 'date is required'}), 400
+    try:
+        pd.Timestamp(date_str)
+    except Exception:
+        return jsonify({'error': 'invalid date'}), 400
+    rk.save_holiday(date_str, name)
+    invalidate_cache()
+    return jsonify({'ok': True, 'date': date_str, 'name': name})
+
+
 @app.route('/api/products')
 @requires_auth
 def api_products():

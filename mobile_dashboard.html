@@ -96,6 +96,18 @@
   @media (prefers-color-scheme: dark) { .chart-tooltip { background: var(--paper-raised); color: var(--ink); border: 1px solid var(--line-strong); } }
   :root[data-theme="dark"] .chart-tooltip { background: var(--paper-raised); color: var(--ink); border: 1px solid var(--line-strong); }
 
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .cal-dow { text-align: center; font-size: 10px; color: var(--ink-faint); font-weight: 600; padding-bottom: 2px; }
+  .cal-cell {
+    aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--paper); font-size: 12px;
+    font-weight: 600; cursor: pointer; position: relative; gap: 1px;
+  }
+  .cal-cell .cal-dot { width: 4px; height: 4px; border-radius: 50%; position: absolute; bottom: 3px; }
+  .cal-cell.cal-empty { visibility: hidden; cursor: default; }
+  .cal-legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 10.5px; color: var(--ink-soft); margin-top: 10px; }
+  .cal-legend .sw { width: 8px; height: 8px; border-radius: 3px; display: inline-block; margin-right: 4px; vertical-align: -1px; }
+
   .trend-card { position: relative; }
 
   .trend-card {
@@ -193,6 +205,8 @@
       <div class="stat-grid" id="stat-grid"></div>
       <div class="section-title">Monthly trends vs goals</div>
       <div class="card-list" id="trend-cards" style="margin-bottom:6px"></div>
+      <div class="section-title" id="holiday-cal-title">Mark holidays for forecast</div>
+      <div class="chart-card" id="holiday-calendar"></div>
       <div class="section-title">Add this month's files</div>
       <div class="upload-box">
         Drop June/July-style Sale &amp; Purchase XLS files here.<br>
@@ -384,6 +398,7 @@ function render() {
   buildIssues();
   buildBranchTabs();
   initLookup();
+  loadHolidayCalendar();
 }
 
 const TREND_CARD_CONFIG = [
@@ -401,6 +416,76 @@ function sparklinePath(values, w, h, pad) {
   const pts = values.map((v, i) => [pad + i * step, pad + (h - pad * 2) * (1 - (v - min) / range)]);
   const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
   return { d, last: pts[pts.length - 1], pts };
+}
+
+const DAY_TYPE_COLOR = {
+  holiday: 'var(--danger)', pre_holiday: 'var(--accent)', post_holiday: 'var(--accent)',
+  second_saturday: 'var(--warn)',
+};
+const DAY_TYPE_BG = {
+  holiday: 'var(--danger-soft)', pre_holiday: 'var(--accent-soft)', post_holiday: 'var(--accent-soft)',
+  second_saturday: 'var(--warn-soft)',
+};
+
+async function loadHolidayCalendar() {
+  const container = document.getElementById('holiday-calendar');
+  try {
+    const res = await fetch('/api/holidays_calendar');
+    if (!res.ok) { container.innerHTML = '<div class="chart-empty">Could not load calendar.</div>'; return; }
+    const data = await res.json();
+    document.getElementById('holiday-cal-title').textContent = `Mark holidays for forecast — ${data.month}`;
+    renderHolidayCalendar(data);
+  } catch (e) {
+    container.innerHTML = '<div class="chart-empty">Could not load calendar.</div>';
+  }
+}
+
+function renderHolidayCalendar(data) {
+  const container = document.getElementById('holiday-calendar');
+  const days = data.days;
+  const firstDow = new Date(days[0].date + 'T00:00:00').getDay(); // 0=Sun
+  const leadBlanks = (firstDow + 6) % 7; // convert to Mon-first
+
+  const cells = [];
+  for (let i = 0; i < leadBlanks; i++) cells.push('<div class="cal-cell cal-empty"></div>');
+  days.forEach(d => {
+    const dayNum = d.date.slice(8);
+    const color = DAY_TYPE_COLOR[d.day_type] || 'var(--ink)';
+    const bg = d.day_type ? (DAY_TYPE_BG[d.day_type] || 'var(--line)') : 'var(--paper)';
+    const dot = d.is_custom ? `<span class="cal-dot" style="background:${color}"></span>` : '';
+    cells.push(`<div class="cal-cell" style="color:${color};background:${bg}" data-date="${d.date}" data-label="${escAttr(d.label)}" data-custom="${d.is_custom ? '1' : ''}">${dayNum}${dot}</div>`);
+  });
+
+  container.innerHTML = `
+    <div class="cal-grid">
+      ${['Mo','Tu','We','Th','Fr','Sa','Su'].map(x => `<div class="cal-dow">${x}</div>`).join('')}
+      ${cells.join('')}
+    </div>
+    <div class="cal-legend">
+      <span><span class="sw" style="background:var(--danger-soft);border:1px solid var(--danger)"></span>Holiday</span>
+      <span><span class="sw" style="background:var(--accent-soft);border:1px solid var(--accent)"></span>Before/after holiday</span>
+      <span><span class="sw" style="background:var(--warn-soft);border:1px solid var(--warn)"></span>2nd Saturday</span>
+    </div>`;
+
+  container.querySelectorAll('.cal-cell[data-date]').forEach(cell => {
+    cell.addEventListener('click', () => onCalendarDayTap(cell));
+  });
+}
+
+async function onCalendarDayTap(cell) {
+  const date = cell.dataset.date;
+  const isCustom = cell.dataset.custom === '1';
+  if (isCustom) {
+    if (!confirm(`Remove "${cell.dataset.label}" from ${date}?`)) return;
+    await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, name: null }) });
+  } else {
+    const name = prompt(`Mark ${date} as a holiday. Holiday name:`, cell.dataset.label || '');
+    if (!name) return;
+    await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, name }) });
+  }
+  await loadData(true);
 }
 
 function buildTrendCards() {

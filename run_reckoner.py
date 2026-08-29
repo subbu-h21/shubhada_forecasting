@@ -35,14 +35,54 @@ HOLIDAYS_PATH = ROOT / 'holidays.json'
 
 
 def load_holidays():
-    """Declared holidays as {date_string: name}. Edit holidays.json to add
-    festival/regional dates - lunar-calendar festivals (Diwali, Ganesh
-    Chaturthi, Eid, etc.) shift every year, so they're deliberately not
-    guessed here; add the confirmed date for the specific year yourself."""
+    """Declared holidays as {date_string: name}. Edit holidays.json (or mark
+    them from the mobile calendar) to add festival/regional dates - lunar-
+    calendar festivals (Diwali, Ganesh Chaturthi, Eid, etc.) shift every
+    year, so they're deliberately not guessed here; add the confirmed date
+    for the specific year yourself."""
     if not HOLIDAYS_PATH.exists():
         return {}
     entries = json.loads(HOLIDAYS_PATH.read_text())
     return {e['date']: e['name'] for e in entries}
+
+
+def save_holiday(date_str, name):
+    """Add or update one holiday. Pass name=None to remove that date."""
+    entries = []
+    if HOLIDAYS_PATH.exists():
+        entries = json.loads(HOLIDAYS_PATH.read_text())
+    entries = [e for e in entries if e['date'] != date_str]
+    if name:
+        entries.append({'date': date_str, 'name': name})
+    entries.sort(key=lambda e: e['date'])
+    HOLIDAYS_PATH.write_text(json.dumps(entries, indent=2))
+
+
+def is_nth_weekday_of_month(d, weekday, n):
+    """True if date d is the nth occurrence of `weekday` (0=Mon..6=Sun) in its month."""
+    return d.weekday() == weekday and (d.day - 1) // 7 == n - 1
+
+
+def classify_special_day(d, holidays):
+    """Returns (day_type, label) for a date. day_type is one of:
+    'holiday', 'pre_holiday', 'post_holiday', 'second_saturday', or None.
+    Priority: an actual declared holiday wins over being adjacent to one;
+    adjacency wins over the (data-driven, not assumed) 2nd-Saturday effect."""
+    d = pd.Timestamp(d)  # normalize: a bare date object or a Timestamp with a
+    # time component both need to collapse to plain 'YYYY-MM-DD' for the
+    # holidays-dict lookup below - str() on a raw Timestamp keeps "00:00:00"
+    # and would silently never match.
+    ds = str(d.date())
+    if ds in holidays:
+        return 'holiday', holidays[ds]
+    nxt, prv = str((d + pd.Timedelta(days=1)).date()), str((d - pd.Timedelta(days=1)).date())
+    if nxt in holidays:
+        return 'pre_holiday', f'Day before {holidays[nxt]}'
+    if prv in holidays:
+        return 'post_holiday', f'Day after {holidays[prv]}'
+    if is_nth_weekday_of_month(d, 5, 2):  # 5 = Saturday
+        return 'second_saturday', '2nd Saturday'
+    return None, ''
 
 SALE_SIGNATURE = {'Patient', 'Product', 'Qty', 'Item Total'}
 PURCH_SIGNATURE = {'Supplier', 'Invoice Amount', 'Product', 'Qty'}
@@ -383,6 +423,12 @@ def build_footfall(sales):
 WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
 
+SPECIAL_DAY_LABELS = {
+    'holiday': 'Holiday', 'pre_holiday': 'Day before holiday',
+    'post_holiday': 'Day after holiday', 'second_saturday': '2nd Saturday',
+}
+
+
 def build_daywise_forecast(sales, footfall_forecast):
     sales = sales.copy()
     sales['Branch'] = sales['Inv.No'].apply(extract_branch)
@@ -391,7 +437,9 @@ def build_daywise_forecast(sales, footfall_forecast):
     sales['Weekday'] = dt.dt.weekday
 
     holidays = load_holidays()
-    sales['Is_Holiday'] = sales['Day'].astype(str).isin(holidays.keys())
+    classified = sales['Day'].apply(lambda d: classify_special_day(pd.Timestamp(d), holidays))
+    sales['Day_Type'] = [c[0] for c in classified]
+    sales['Day_Label'] = [c[1] for c in classified]
 
     months = sorted(sales['Source_Month'].unique())
     latest = months[-1]
@@ -400,12 +448,16 @@ def build_daywise_forecast(sales, footfall_forecast):
     target_days_count = days_in_month(ty, tm)
     branches = sorted(sales['Branch'].unique())
 
-    daily = sales.groupby(['Day', 'Weekday', 'Branch', 'Is_Holiday']).agg(
+    # dropna=False: Day_Type is None for every ordinary day - groupby() drops
+    # any row whose grouping key is null by default, which would silently
+    # wipe out every normal day and leave only the handful of special ones.
+    daily = sales.groupby(['Day', 'Weekday', 'Branch', 'Day_Type'], dropna=False).agg(
         Footfall=('Inv.No', 'nunique'), Revenue=('Item Total', 'sum')).reset_index()
 
-    # Weekday pattern excludes holidays - a holiday shouldn't drag down what a
-    # "normal" Monday/Tuesday/etc. looks like for that branch.
-    normal_daily = daily[~daily['Is_Holiday']]
+    # Weekday pattern excludes ALL special days (holidays, the day before/after
+    # one, 2nd Saturdays) - none of them should skew what a "normal" Monday/
+    # Tuesday/etc. looks like for that branch.
+    normal_daily = daily[daily['Day_Type'].isna()]
     branch_avg = {b: {'footfall': normal_daily[normal_daily['Branch'] == b]['Footfall'].mean(),
                        'revenue': normal_daily[normal_daily['Branch'] == b]['Revenue'].mean()}
                   for b in branches}
@@ -423,29 +475,32 @@ def build_daywise_forecast(sales, footfall_forecast):
             }
         dow_index[branch] = idx
 
-    # Holiday adjustment: for each past holiday actually seen in the data, how far
-    # its footfall/revenue fell from what a normal day of that same weekday would
-    # have produced. Averaged per branch (falling back to the all-branch average,
-    # then to "no adjustment" if this branch/global has never seen a holiday yet -
-    # accuracy improves automatically as more holiday-months accumulate).
-    def holiday_ratios(metric):
+    # For each special-day TYPE, how far its footfall/revenue actually strayed
+    # (in either direction - a pre-holiday boost stays a boost) from what a
+    # normal day of that same weekday would have produced. Averaged per branch,
+    # falling back to the all-branch average, then to "no adjustment" if that
+    # day type has never been observed yet - accuracy improves automatically as
+    # more such days accumulate in the history.
+    def special_ratios(day_type, metric):
         out = {}
-        for _, r in daily[daily['Is_Holiday']].iterrows():
+        for _, r in daily[daily['Day_Type'] == day_type].iterrows():
             br, wd = r['Branch'], r['Weekday']
             expected = branch_avg.get(br, {}).get(metric, 0) * dow_index.get(br, {}).get(wd, {}).get(metric, 1.0)
             if expected > 0:
                 out.setdefault(br, []).append(r[metric.capitalize()] / expected)
         return out
 
-    holiday_factor = {}
-    for metric in ('footfall', 'revenue'):
-        ratios_by_branch = holiday_ratios(metric)
-        all_ratios = [r for rs in ratios_by_branch.values() for r in rs]
-        global_avg = (sum(all_ratios) / len(all_ratios)) if all_ratios else 1.0
-        for branch in branches:
-            rs = ratios_by_branch.get(branch)
-            holiday_factor.setdefault(branch, {})[metric] = (
-                sum(rs) / len(rs) if rs else global_avg)
+    special_factor = {}
+    for day_type in SPECIAL_DAY_LABELS:
+        special_factor[day_type] = {}
+        for metric in ('footfall', 'revenue'):
+            ratios_by_branch = special_ratios(day_type, metric)
+            all_ratios = [r for rs in ratios_by_branch.values() for r in rs]
+            global_avg = (sum(all_ratios) / len(all_ratios)) if all_ratios else 1.0
+            for branch in branches:
+                rs = ratios_by_branch.get(branch)
+                special_factor[day_type].setdefault(branch, {})[metric] = (
+                    sum(rs) / len(rs) if rs else global_avg)
 
     # Monthly revenue forecast per branch, same day-covered-adjusted trend method as footfall
     monthly_rev = sales.groupby(['Branch', 'Source_Month']).agg(Revenue=('Item Total', 'sum')).reset_index()
@@ -466,25 +521,25 @@ def build_daywise_forecast(sales, footfall_forecast):
 
     ff_forecast_map = footfall_forecast.set_index('Branch')['Predicted_Total_Footfall'].to_dict()
     target_dates = pd.date_range(pd.Timestamp(ty, tm, 1), periods=target_days_count, freq='D')
-    target_holiday = [holidays.get(str(d.date())) for d in target_dates]
+    target_classified = [classify_special_day(d, holidays) for d in target_dates]
 
     rows = []
     for branch in branches:
         w_ff, w_rev = [], []
-        for d, hname in zip(target_dates, target_holiday):
+        for d, (day_type, _) in zip(target_dates, target_classified):
             base_ff = dow_index[branch][d.weekday()]['footfall']
             base_rev = dow_index[branch][d.weekday()]['revenue']
-            if hname:
-                base_ff *= holiday_factor[branch]['footfall']
-                base_rev *= holiday_factor[branch]['revenue']
+            if day_type:
+                base_ff *= special_factor[day_type][branch]['footfall']
+                base_rev *= special_factor[day_type][branch]['revenue']
             w_ff.append(base_ff)
             w_rev.append(base_rev)
         sum_ff, sum_rev = sum(w_ff), sum(w_rev)
         total_ff, total_rev = ff_forecast_map.get(branch, 0), rev_forecast.get(branch, 0)
-        for d, wf, wr, hname in zip(target_dates, w_ff, w_rev, target_holiday):
+        for d, wf, wr, (day_type, label) in zip(target_dates, w_ff, w_rev, target_classified):
             rows.append({
                 'Date': d.date(), 'Weekday': WEEKDAY_NAMES[d.weekday()], 'Branch': branch,
-                'Holiday': hname or '',
+                'Holiday': label,
                 'Predicted_Footfall': round(total_ff * (wf / sum_ff)) if sum_ff > 0 else 0,
                 'Predicted_Revenue': round(total_rev * (wr / sum_rev), 2) if sum_rev > 0 else 0,
             })
