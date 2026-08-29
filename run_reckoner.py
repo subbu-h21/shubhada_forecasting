@@ -355,6 +355,101 @@ def build_footfall(sales):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1d: Day-by-day forecast for next month, per branch
+#
+# A single monthly total (build_footfall's job) doesn't say which days will
+# be busy. This breaks it down by day using a day-of-week seasonality index
+# learned from all 3 months of daily history (e.g. "Mondays run 15% above
+# this branch's daily average"), then spreads next month's ALREADY-TRUSTED
+# monthly forecast across its actual calendar days according to that
+# pattern - so the daily figures always add back up to the monthly one,
+# rather than being a second, disconnected guess. Same method for revenue.
+#
+# Deliberately business-level (per branch/day), not per-product: a
+# product x day grid for 11,000+ products would be too granular to act on.
+# ---------------------------------------------------------------------------
+WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+
+def build_daywise_forecast(sales, footfall_forecast):
+    sales = sales.copy()
+    sales['Branch'] = sales['Inv.No'].apply(extract_branch)
+    dt = pd.to_datetime(sales['Date'], format='mixed')
+    sales['Day'] = dt.dt.date
+    sales['Weekday'] = dt.dt.weekday
+
+    months = sorted(sales['Source_Month'].unique())
+    latest = months[-1]
+    target_month = next_month_str(latest)
+    ty, tm = map(int, target_month.split('-'))
+    target_days_count = days_in_month(ty, tm)
+    branches = sorted(sales['Branch'].unique())
+
+    daily = sales.groupby(['Day', 'Weekday', 'Branch']).agg(
+        Footfall=('Inv.No', 'nunique'), Revenue=('Item Total', 'sum')).reset_index()
+
+    dow_index = {}
+    for branch in branches:
+        b = daily[daily['Branch'] == branch]
+        avg_ff, avg_rev = b['Footfall'].mean(), b['Revenue'].mean()
+        idx = {}
+        for wd in range(7):
+            sub = b[b['Weekday'] == wd]
+            idx[wd] = {
+                'footfall': float(sub['Footfall'].mean() / avg_ff) if len(sub) and avg_ff > 0 else 1.0,
+                'revenue': float(sub['Revenue'].mean() / avg_rev) if len(sub) and avg_rev > 0 else 1.0,
+            }
+        dow_index[branch] = idx
+
+    # Monthly revenue forecast per branch, same day-covered-adjusted trend method as footfall
+    monthly_rev = sales.groupby(['Branch', 'Source_Month']).agg(Revenue=('Item Total', 'sum')).reset_index()
+    days_covered = sales.groupby(['Branch', 'Source_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
+    monthly_rev = monthly_rev.merge(days_covered, on=['Branch', 'Source_Month'])
+    monthly_rev['Avg_Daily_Rev'] = monthly_rev['Revenue'] / monthly_rev['Days_Covered']
+
+    rev_forecast = {}
+    for branch in branches:
+        sub = monthly_rev[monthly_rev['Branch'] == branch].set_index('Source_Month')
+        series = [float(sub['Avg_Daily_Rev'].get(m, 0.0)) for m in months]
+        if len(series) == 1 or series[-2] == 0:
+            pred_per_day = series[-1]
+        else:
+            growth = max(-0.3, min(0.5, (series[-1] - series[-2]) / series[-2]))
+            pred_per_day = series[-1] * (1 + growth)
+        rev_forecast[branch] = pred_per_day * target_days_count
+
+    ff_forecast_map = footfall_forecast.set_index('Branch')['Predicted_Total_Footfall'].to_dict()
+    target_dates = pd.date_range(pd.Timestamp(ty, tm, 1), periods=target_days_count, freq='D')
+
+    rows = []
+    for branch in branches:
+        w_ff = [dow_index[branch][d.weekday()]['footfall'] for d in target_dates]
+        w_rev = [dow_index[branch][d.weekday()]['revenue'] for d in target_dates]
+        sum_ff, sum_rev = sum(w_ff), sum(w_rev)
+        total_ff, total_rev = ff_forecast_map.get(branch, 0), rev_forecast.get(branch, 0)
+        for d, wf, wr in zip(target_dates, w_ff, w_rev):
+            rows.append({
+                'Date': d.date(), 'Weekday': WEEKDAY_NAMES[d.weekday()], 'Branch': branch,
+                'Predicted_Footfall': round(total_ff * (wf / sum_ff)) if sum_ff > 0 else 0,
+                'Predicted_Revenue': round(total_rev * (wr / sum_rev), 2) if sum_rev > 0 else 0,
+            })
+    daywise = pd.DataFrame(rows)
+
+    all_branches = daywise.groupby(['Date', 'Weekday']).agg(
+        Predicted_Footfall=('Predicted_Footfall', 'sum'), Predicted_Revenue=('Predicted_Revenue', 'sum')).reset_index()
+    all_branches.insert(2, 'Branch', 'All Branches')
+    daywise = pd.concat([daywise, all_branches], ignore_index=True).sort_values(['Branch', 'Date']).reset_index(drop=True)
+
+    idx_rows = [{'Branch': br, 'Weekday': WEEKDAY_NAMES[wd],
+                 'Footfall_Index': round(dow_index[br][wd]['footfall'], 2),
+                 'Revenue_Index': round(dow_index[br][wd]['revenue'], 2)}
+                for br in branches for wd in range(7)]
+    dow_index_df = pd.DataFrame(idx_rows)
+
+    return daywise, dow_index_df, target_month
+
+
+# ---------------------------------------------------------------------------
 # Analysis 2: Over/under purchased (cumulative, all history)
 #
 # Purchase 'Qty' is counted in PACKS (Factor = units per pack, e.g. a strip of
@@ -649,6 +744,7 @@ def build_report(sales, purch, out_path):
     branch_summary, branch_forecast = build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
+    daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
     over_under = build_over_under(sales, purch)
     profit, profit_unknown = build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -700,6 +796,7 @@ def build_report(sales, purch, out_path):
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
+        'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
         'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
         'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
@@ -848,6 +945,47 @@ def build_report(sales, purch, out_path):
     write_df(ws, tp, start_row=r6 + 1, qty_cols=['Latest', 'Previous', 'Predicted Next Month'],
              highlight_col='On Track?', highlight_map=ON_TRACK_COLORS)
     autosize(ws, [18, 14, 20, 24, 24, 12, 12, 12])
+    ws.freeze_panes = 'A5'
+
+    # ---- Day-wise Forecast ----
+    ws = wb.create_sheet('Day-wise Forecast')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = f'{daywise_target_month} forecast by calendar day per branch - each branch\'s next-month total spread across its days using its own day-of-week pattern from all 3 months of history'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+
+    ws['A2'] = 'Day-of-week pattern (index = that weekday\'s average vs. the branch\'s overall daily average - 1.20 means 20% busier than average)'
+    ws['A2'].font = Font(name=FONT, italic=True, size=9, color='555555')
+    dow_out = dow_index.rename(columns={'Footfall_Index': 'Footfall Index', 'Revenue_Index': 'Revenue Index'})
+    idx_last = write_df(ws, dow_out, start_row=4, money_cols=['Footfall Index', 'Revenue Index'])
+
+    r7 = idx_last + 3
+    ws.cell(row=r7, column=1, value=f'Day-by-day forecast for {daywise_target_month}').font = Font(name=FONT, bold=True, size=11)
+    dw_out = daywise_forecast.rename(columns={'Predicted_Footfall': 'Predicted Footfall', 'Predicted_Revenue': 'Predicted Revenue'})
+    dw_out = dw_out[['Date', 'Weekday', 'Branch', 'Predicted Footfall', 'Predicted Revenue']]
+    dw_start = r7 + 1
+    write_df(ws, dw_out, start_row=dw_start, qty_cols=['Predicted Footfall'], money_cols=['Predicted Revenue'])
+    dw_last = dw_start + len(dw_out)
+
+    # 'All Branches' sorts first alphabetically (A < H < S), so it occupies the
+    # first `all_count` data rows of the table just written.
+    all_count = int((daywise_forecast['Branch'] == 'All Branches').sum())
+    all_first_row, all_last_row = dw_start + 1, dw_start + all_count
+
+    chart = LineChart()
+    chart.title = f'{daywise_target_month} predicted footfall by day, all branches'
+    chart.style = 12
+    chart.y_axis.title = 'Predicted footfall'
+    chart.x_axis.title = 'Date'
+    chart.height = 9
+    chart.width = 22
+    date_col_idx = dw_out.columns.get_loc('Date') + 1
+    ff_col_idx = dw_out.columns.get_loc('Predicted Footfall') + 1
+    cats = Reference(ws, min_col=date_col_idx, min_row=all_first_row, max_row=all_last_row)
+    chart.add_data(Reference(ws, min_col=ff_col_idx, min_row=dw_start, max_row=all_last_row), titles_from_data=True)
+    chart.set_categories(cats)
+    ws.add_chart(chart, f'H{dw_start}')
+
+    autosize(ws, [14, 12, 16, 18, 18])
     ws.freeze_panes = 'A5'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----

@@ -94,6 +94,7 @@ def compute_all():
     branch_summary, branch_forecast = rk.build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
     monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
+    daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
     latest_month = all_months[-1]
@@ -158,6 +159,11 @@ def compute_all():
         'Metric': 'metric', 'Goal': 'goal', 'Latest': 'latest', 'Previous': 'previous',
         'Predicted_Next': 'predicted_next', 'On_Track': 'on_track'})
 
+    daywise_out = daywise_forecast.copy()
+    daywise_out['Date'] = daywise_out['Date'].astype(str)
+    daywise_out = daywise_out.rename(columns={'Weekday': 'weekday', 'Predicted_Footfall': 'footfall',
+                                               'Predicted_Revenue': 'revenue', 'Date': 'date'})
+
     return {
         'summary': summary,
         'branch_summary': df_records(branch_summary_out),
@@ -168,6 +174,8 @@ def compute_all():
         'monthly_trend': df_records(monthly_trend_out),
         'trend_prediction': df_records(trend_prediction_out),
         'trend_target_month': trend_target_month,
+        'daywise_forecast': df_records(daywise_out),
+        'daywise_target_month': daywise_target_month,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),

@@ -247,6 +247,8 @@
     <div class="stat-grid" id="branch-stats" style="margin-bottom:14px"></div>
     <div class="section-title">Daily footfall (unique bills per day)</div>
     <div class="chart-card" id="branch-footfall-chart"></div>
+    <div class="section-title" id="branch-daywise-title">Day-wise footfall forecast</div>
+    <div class="chart-card" id="branch-daywise-chart"></div>
     <div class="section-title">Product forecast, this branch</div>
     <div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -661,6 +663,61 @@ function renderFootfallChart(branch) {
     </svg>`;
 }
 
+function renderDaywiseChart(branch) {
+  const titleEl = document.getElementById('branch-daywise-title');
+  const container = document.getElementById('branch-daywise-chart');
+  const rows = (DATA.daywise_forecast || []).filter(r => r.Branch === branch).sort((a, b) => a.date < b.date ? -1 : 1);
+  if (!rows.length) {
+    titleEl.textContent = 'Day-wise footfall forecast';
+    container.innerHTML = '<div class="chart-empty">No day-wise forecast available.</div>';
+    return;
+  }
+  titleEl.textContent = `Day-wise footfall forecast — ${DATA.daywise_target_month}`;
+
+  const W = 600, H = 170, padL = 32, padR = 8, padT = 10, padB = 22;
+  const maxY = Math.max(1, ...rows.map(r => r.footfall));
+  const barW = Math.max(4, (W - padL - padR) / rows.length - 2);
+  const yScale = v => padT + (H - padT - padB) * (1 - v / maxY);
+  const base = yScale(0);
+
+  const gridFracs = [0, 0.5, 1];
+  const gridLines = gridFracs.map(f => {
+    const y = padT + (H - padT - padB) * f;
+    const label = Math.round(maxY * (1 - f));
+    return `<line class="chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/><text class="chart-axis-label" text-anchor="end" x="${padL - 4}" y="${y + 3}">${label}</text>`;
+  }).join('');
+
+  const step = (W - padL - padR) / rows.length;
+  const bars = rows.map((r, i) => {
+    const x = padL + i * step + (step - barW) / 2;
+    const y = yScale(r.footfall);
+    const isSunday = r.weekday === 'Sunday';
+    const color = isSunday ? 'var(--warn)' : 'var(--accent)';
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(base - y).toFixed(1)}" rx="2" style="fill:${color}"><title>${r.date} (${r.weekday}): ${r.footfall}</title></rect>`;
+  }).join('');
+
+  const dayLabels = rows.filter((r, i) => i === 0 || i === rows.length - 1 || (i + 1) % 7 === 0).map(r => {
+    const i = rows.indexOf(r);
+    const x = padL + i * step + step / 2;
+    return `<text class="chart-axis-label" text-anchor="middle" x="${x.toFixed(1)}" y="${H - 4}">${r.date.slice(8)}</text>`;
+  }).join('');
+
+  const busiest = rows.reduce((a, b) => b.footfall > a.footfall ? b : a);
+  const quietest = rows.reduce((a, b) => b.footfall < a.footfall ? b : a);
+
+  container.innerHTML = `
+    <div class="chart-legend">
+      <span><span class="sw" style="background:var(--accent)"></span>Weekday</span>
+      <span><span class="sw" style="background:var(--warn)"></span>Sunday</span>
+      <span style="margin-left:auto">Busiest: ${busiest.weekday} ${busiest.date.slice(8)} (${fmt(busiest.footfall)}) · Quietest: ${quietest.weekday} ${quietest.date.slice(8)} (${fmt(quietest.footfall)})</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Day-wise footfall forecast for ${branch}">
+      ${gridLines}
+      ${bars}
+      ${dayLabels}
+    </svg>`;
+}
+
 function buildBranch() {
   const info = DATA.branch_summary.find(b => b.Branch === currentBranch);
   const ff = DATA.footfall_forecast.find(f => f.Branch === currentBranch);
@@ -682,6 +739,7 @@ function buildBranch() {
   `).join('');
 
   renderFootfallChart(currentBranch);
+  renderDaywiseChart(currentBranch);
 
   const data = DATA.branch_forecast.filter(r => r.Branch === currentBranch);
   setupSearch('search-branch', 'list-branch', 'rc-branch', data,
