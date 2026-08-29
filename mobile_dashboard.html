@@ -653,7 +653,7 @@ function buildForecast() {
         <div class="row1"><div class="name">${r.Product}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
         <div class="metrics">
-          <div class="metric"><div class="k">Predicted Qty</div><div class="v">${fmt(r.qty)}</div></div>
+          <div class="metric"><div class="k">Predicted Qty (strips)</div><div class="v">${fmt(r.qty)}</div></div>
           <div class="metric"><div class="k">Predicted Value</div><div class="v">${money(r.value)}</div></div>
         </div></div>`;
     }, 'No matching products.');
@@ -693,8 +693,8 @@ function buildStock() {
         <div class="row1"><div class="name">${r.Product}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.status}</span></div>
         <div class="metrics">
-          <div class="metric"><div class="k">Purchased</div><div class="v">${fmt(r.purch_qty)}</div></div>
-          <div class="metric"><div class="k">Sold</div><div class="v">${fmt(r.sold_qty)}</div></div>
+          <div class="metric"><div class="k">Purchased (strips)</div><div class="v">${fmt(r.purch_qty)}</div></div>
+          <div class="metric"><div class="k">Sold (strips)</div><div class="v">${fmt(r.sold_qty)}</div></div>
           <div class="metric"><div class="k">${grp.label}</div><div class="v">${money(Math.abs(r.value_impact))}</div></div>
         </div></div>`;
     }, 'No matching products.');
@@ -710,7 +710,7 @@ function buildProfit() {
         <div class="row1"><div class="name">${r.Product}</div>
           <span class="pill" style="color:${c};background:${bg}">${pct(r.margin_pct)}</span></div>
         <div class="metrics">
-          <div class="metric"><div class="k">Qty Sold</div><div class="v">${fmt(r.qty_sold)}</div></div>
+          <div class="metric"><div class="k">Qty Sold (strips)</div><div class="v">${fmt(r.qty_sold)}</div></div>
           <div class="metric"><div class="k">Revenue</div><div class="v">${money(r.revenue)}</div></div>
           <div class="metric"><div class="k">Gross Profit</div><div class="v">${money(r.gross_profit)}</div></div>
         </div></div>`;
@@ -950,7 +950,7 @@ function buildBranch() {
         <div class="row1"><div class="name">${r.Product}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
         <div class="metrics">
-          <div class="metric"><div class="k">Predicted Qty</div><div class="v">${fmt(r.qty)}</div></div>
+          <div class="metric"><div class="k">Predicted Qty (strips)</div><div class="v">${fmt(r.qty)}</div></div>
           <div class="metric"><div class="k">Predicted Value</div><div class="v">${money(r.value)}</div></div>
         </div></div>`;
     }, 'No matching products.');
@@ -1103,8 +1103,8 @@ function renderProductMonthlyChart(monthly) {
 
   container.innerHTML = `
     <div class="chart-legend">
-      <span><span class="sw" style="background:var(--accent)"></span>Sold (units)</span>
-      <span><span class="sw" style="background:var(--warn)"></span>Purchased (units, factor-adjusted)</span>
+      <span><span class="sw" style="background:var(--accent)"></span>Sold (strips)</span>
+      <span><span class="sw" style="background:var(--warn)"></span>Purchased (strips)</span>
     </div>
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Monthly sold vs purchased quantity">
       ${gridLines}
@@ -1114,8 +1114,8 @@ function renderProductMonthlyChart(monthly) {
   const touchPoints = [];
   monthly.forEach((m, i) => {
     const cx = padL + groupW * (i + 0.5);
-    touchPoints.push({ x: cx - barW / 2 - 3, label: `${m.month} sold: ${fmt(m.sold_qty)} (${money(m.sold_value)})` });
-    touchPoints.push({ x: cx + barW / 2 + 3, label: `${m.month} purchased: ${fmt(m.purch_qty)} (${money(m.purch_value)})` });
+    touchPoints.push({ x: cx - barW / 2 - 3, label: `${m.month} sold: ${fmt(m.sold_qty)} strips (${money(m.sold_value)})` });
+    touchPoints.push({ x: cx + barW / 2 + 3, label: `${m.month} purchased: ${fmt(m.purch_qty)} strips (${money(m.purch_value)})` });
   });
   makeChartTouchable(container, container.querySelector('svg'), touchPoints);
 }
@@ -1128,9 +1128,9 @@ function renderProductDetail(d) {
   const stats = [
     ['var(--accent)', s.avg_selling_price != null ? money(s.avg_selling_price) : '—', 'Avg selling price'],
     ['var(--ink-soft)', s.avg_cost_per_unit != null ? money(s.avg_cost_per_unit) : '—', 'Avg cost per unit'],
-    ['var(--ok)', fmt(s.total_sold_qty), 'Total sold (units)'],
+    ['var(--ok)', fmt(s.total_sold_qty), 'Total sold (strips)'],
     ['var(--ok)', money(s.total_sold_value), 'Total sale value'],
-    ['var(--warn)', fmt(s.total_purchased_units), 'Total purchased (units)'],
+    ['var(--warn)', fmt(s.total_purchased_units), 'Total purchased (strips)'],
     ['var(--warn)', money(s.total_purchase_value), 'Total purchase value'],
   ];
   document.getElementById('lookup-stats').innerHTML = stats.map(([color, n, l]) => `
@@ -1161,7 +1161,7 @@ function renderProductDetail(d) {
       <div class="row1"><div class="name">${r.Patient || '(no name)'}<div class="meta">${r.Date} · Inv ${r['Inv.No']} · ${r.Branch}</div></div>
         <span class="pill" style="color:var(--accent);background:var(--accent-soft)">${money(r.item_total)}</span></div>
       <div class="metrics">
-        <div class="metric"><div class="k">Qty</div><div class="v">${fmt(r.Qty)}</div></div>
+        <div class="metric"><div class="k">Qty (strips)</div><div class="v">${fmt(r.Qty)}</div></div>
         <div class="metric"><div class="k">MRP</div><div class="v">${money(r.MRP)}</div></div>
         <div class="metric"><div class="k">Disc %</div><div class="v">${pct(r['Disc Percentage'])}</div></div>
       </div></div>`).join('') : '<div class="empty">No sales records for this product.</div>';

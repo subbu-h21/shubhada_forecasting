@@ -125,12 +125,13 @@ def compute_all():
         'discount_shortfall_count': len(disc_missed),
     }
 
-    forecast_out = forecast.rename(columns={'Predicted_Qty': 'qty', 'Predicted_Value': 'value',
+    # qty fields sent to mobile are in strips (Qty / Factor), matching Excel
+    forecast_out = forecast.rename(columns={'Predicted_Qty_Strips': 'qty', 'Predicted_Value': 'value',
                                              'Trend': 'trend', 'Avg_Price': 'avg_price'})
-    over_under_out = over_under.rename(columns={'Sold_Qty': 'sold_qty', 'Purch_Qty': 'purch_qty',
-                                                 'Net_Qty': 'net_qty', 'Status': 'status',
+    over_under_out = over_under.rename(columns={'Sold_Qty_Strips': 'sold_qty', 'Purch_Qty_Strips': 'purch_qty',
+                                                 'Net_Qty_Strips': 'net_qty', 'Status': 'status',
                                                  'Net_Value_Approx': 'value_impact'})
-    profit_out = profit.rename(columns={'Qty_Sold': 'qty_sold', 'Gross_Profit': 'gross_profit',
+    profit_out = profit.rename(columns={'Qty_Sold_Strips': 'qty_sold', 'Gross_Profit': 'gross_profit',
                                          'Margin_Pct': 'margin_pct', 'Pretax_Revenue': 'revenue'})
     ptr_out = ptr_high.rename(columns={'Sale Rate': 'ptr', 'Item Total': 'item_total',
                                         'Excess': 'excess', 'Source_Month': 'month'})
@@ -145,7 +146,7 @@ def compute_all():
                                                           'Invoices': 'invoices', 'Patients': 'patients'})
     branch_summary_out.columns = [c if not c.startswith('Revenue_') else c.replace('Revenue_', 'rev_')
                                    for c in branch_summary_out.columns]
-    branch_forecast_out = branch_forecast.rename(columns={'Predicted_Qty': 'qty', 'Predicted_Value': 'value',
+    branch_forecast_out = branch_forecast.rename(columns={'Predicted_Qty_Strips': 'qty', 'Predicted_Value': 'value',
                                                            'Trend': 'trend', 'Avg_Price': 'avg_price'})
 
     footfall_daily_out = footfall_daily.copy()
@@ -186,7 +187,7 @@ def compute_all():
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),
-        'profit_unknown': df_records(profit_unknown.rename(columns={'Qty_Sold': 'qty_sold', 'Revenue': 'revenue'})),
+        'profit_unknown': df_records(profit_unknown.rename(columns={'Qty_Sold_Strips': 'qty_sold', 'Revenue': 'revenue'})),
         'ptr_high': df_records(ptr_out[['month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'ptr', 'Qty', 'excess']]),
         'mrp_variance': df_records(variance.rename(columns={'min': 'lo', 'max': 'hi', 'count': 'lines', 'ratio': 'ratio'})),
         'scheme_shortfall': df_records(scheme_out[['Date', 'Inv.No', 'Supplier', 'Product', 'qty', 'free_qty', 'free_ratio', 'typical_ratio', 'shortfall']]),
@@ -277,39 +278,55 @@ def api_product():
     s_hist = s.sort_values('Date', ascending=False)
     p_hist = p.sort_values('Date', ascending=False)
 
+    # Factor (pack size) is a physical attribute of the product - one
+    # representative value covers it. Sales Qty is individual units (needs
+    # /Factor to become strips); Purchase Qty is already in packs/strips.
+    factor_source = s['Factor'] if not s.empty else (p['Factor'] if not p.empty else pd.Series([1]))
+    mode = factor_source.mode()
+    factor = float(mode.iat[0]) if len(mode) else 1.0
+    if not factor:
+        factor = 1.0
+
     total_sold_qty = s['Qty'].sum() if not s.empty else 0
     total_sold_value = s['Item Total'].sum() if not s.empty else 0
     if not p.empty:
         p['Factor'] = p['Factor'].replace(0, 1).fillna(1)
         total_purch_units = (p['Qty'] * p['Factor']).sum()
+        total_purch_strips = p['Qty'].sum()
         total_purch_value = p['Item Total'].sum()
     else:
-        total_purch_units, total_purch_value = 0, 0
+        total_purch_units, total_purch_strips, total_purch_value = 0, 0, 0
 
     summary = {
         'product': name,
-        'total_sold_qty': float(total_sold_qty),
+        'factor': factor,
+        'total_sold_qty': round(float(total_sold_qty) / factor, 1),
         'total_sold_value': round(float(total_sold_value), 2),
         'avg_selling_price': round(float(total_sold_value / total_sold_qty), 2) if total_sold_qty else None,
-        'total_purchased_units': round(float(total_purch_units), 1),
+        'total_purchased_units': round(float(total_purch_strips), 1),
         'total_purchase_value': round(float(total_purch_value), 2),
         'avg_cost_per_unit': round(float(total_purch_value / total_purch_units), 4) if total_purch_units else None,
         'sale_lines': len(s), 'purchase_lines': len(p),
     }
 
-    sales_out = df_records(s_hist.rename(columns={'Item Total': 'item_total'})[
+    sales_hist_out = s_hist.copy()
+    if not sales_hist_out.empty:
+        sales_hist_out['Qty'] = (sales_hist_out['Qty'] / factor).round(1)
+    sales_out = df_records(sales_hist_out.rename(columns={'Item Total': 'item_total'})[
         ['Date', 'Inv.No', 'Patient', 'Branch', 'Qty', 'MRP', 'Disc Percentage', 'item_total']
     ]) if not s.empty else []
     purch_out = df_records(p_hist.rename(columns={'Item Total': 'item_total', 'Sale Rate': 'ptr'})[
         ['Date', 'Inv.No', 'Supplier', 'Qty', 'Factor', 'MRP', 'ptr', 'Free Qty', 'item_total']
     ]) if not p.empty else []
 
-    # Monthly trend for the chart - purchase qty is Factor-adjusted to individual
-    # units so it's on the same scale as sale qty (same fix as Over-Under Purchased).
+    # Monthly trend for the chart - qty in strips both sides: sales Qty/Factor,
+    # purchase Qty already in packs (same fix as Over-Under Purchased, just
+    # expressed as strips instead of individual units here).
     s_monthly = s.groupby('Source_Month').agg(sold_qty=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not s.empty else pd.DataFrame()
+    if not s_monthly.empty:
+        s_monthly['sold_qty'] = (s_monthly['sold_qty'] / factor).round(1)
     if not p.empty:
-        p['Physical_Qty'] = p['Qty'] * p['Factor']
-        p_monthly = p.groupby('Source_Month').agg(purch_qty=('Physical_Qty', 'sum'), purch_value=('Item Total', 'sum'))
+        p_monthly = p.groupby('Source_Month').agg(purch_qty=('Qty', 'sum'), purch_value=('Item Total', 'sum'))
     else:
         p_monthly = pd.DataFrame()
     monthly = pd.concat([s_monthly, p_monthly], axis=1).fillna(0).reset_index().rename(columns={'index': 'month', 'Source_Month': 'month'})

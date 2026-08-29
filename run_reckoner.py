@@ -129,6 +129,24 @@ def find_col(df, candidates):
     return None
 
 
+# Individual-unit quantities (tablets/ml/etc.) aren't how a pharmacist
+# actually thinks about stock - strips are. Qty / Factor converts to strips
+# wherever a product-level quantity is displayed. Factor is a physical
+# packaging attribute of the product, so one representative value (the most
+# common one seen) is used regardless of which month/invoice it came from.
+def build_product_factor_map(sales, purch=None):
+    f1 = sales.groupby('Product')['Factor'].agg(lambda s: s.mode().iat[0] if len(s.mode()) else 1)
+    if purch is not None:
+        f2 = purch.groupby('Product')['Factor'].agg(lambda s: s.mode().iat[0] if len(s.mode()) else 1)
+        f1 = f1.combine_first(f2)
+    return f1.replace(0, 1).fillna(1).to_dict()
+
+
+def to_strips(qty_series, product_series, factor_map):
+    factors = product_series.map(factor_map).fillna(1).replace(0, 1)
+    return (qty_series / factors).round(1)
+
+
 MONTH_DAYS = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
 
 
@@ -342,6 +360,8 @@ def build_demand_forecast(sales):
         include_groups=False)
     df['Avg_Price'] = df['Product'].map(price).fillna(0)
     df['Predicted_Value'] = (df['Predicted_Qty'] * df['Avg_Price']).round(2)
+    factor_map = build_product_factor_map(sales)
+    df['Predicted_Qty_Strips'] = to_strips(df['Predicted_Qty'], df['Product'], factor_map)
     df = df.sort_values('Predicted_Value', ascending=False).reset_index(drop=True)
     return df, target_month, months
 
@@ -699,6 +719,9 @@ def build_over_under(sales, purch):
         return 'Balanced'
 
     m['Status'] = m.apply(classify, axis=1)
+    factor_map = build_product_factor_map(sales, purch)
+    for col in ('Sold_Qty', 'Purch_Qty', 'Net_Qty'):
+        m[col + '_Strips'] = to_strips(m[col], m['Product'], factor_map)
     return m.sort_values('Net_Value_Approx', ascending=False).reset_index(drop=True)
 
 
@@ -820,9 +843,12 @@ def build_profit_margin(sales, purch):
     g['COGS'] = (g['Qty_Sold'] * g['Cost_Per_Unit']).round(2)
     g['Gross_Profit'] = (g['Pretax_Revenue'] - g['COGS']).round(2)
     g['Margin_Pct'] = np.where(g['Pretax_Revenue'] > 0, (g['Gross_Profit'] / g['Pretax_Revenue'] * 100).round(1), 0)
+    factor_map = build_product_factor_map(sales, purch)
+    g['Qty_Sold_Strips'] = to_strips(g['Qty_Sold'], g['Product'], factor_map)
     g = g.sort_values('Gross_Profit', ascending=False).reset_index(drop=True)
 
     unk = unknown.groupby('Product').agg(Qty_Sold=('Qty', 'sum'), Revenue=('Item Total', 'sum')).reset_index()
+    unk['Qty_Sold_Strips'] = to_strips(unk['Qty_Sold'], unk['Product'], factor_map)
     unk = unk.sort_values('Revenue', ascending=False).reset_index(drop=True)
 
     return g, unk
@@ -1033,13 +1059,15 @@ def build_report(sales, purch, out_path):
     # ---- Demand Forecast ----
     ws = wb.create_sheet('Demand Forecast')
     ws.sheet_view.showGridLines = False
-    df1 = forecast.rename(columns={'Predicted_Qty': f'Predicted Qty ({target_month})',
+    ws['A1'] = 'Qty shown in strips (Qty / Factor) - the pack size, not individual tablets/ml'
+    ws['A1'].font = Font(name=FONT, italic=True, size=9, color='555555')
+    df1 = forecast.rename(columns={'Predicted_Qty_Strips': f'Predicted Qty ({target_month}, strips)',
                                     'Avg_Price': 'Avg Selling Price',
                                     'Predicted_Value': f'Predicted Value ({target_month})'})
-    write_df(ws, df1, money_cols=['Avg Selling Price', f'Predicted Value ({target_month})'],
-             qty_cols=[f'Predicted Qty ({target_month})'])
-    autosize(ws, [38, 30, 16, 16, 18])
-    ws.freeze_panes = 'A2'
+    df1 = df1[['Product', 'Trend', f'Predicted Qty ({target_month}, strips)', 'Avg Selling Price', f'Predicted Value ({target_month})']]
+    write_df(ws, df1, start_row=2, money_cols=['Avg Selling Price', f'Predicted Value ({target_month})'])
+    autosize(ws, [38, 30, 20, 16, 18])
+    ws.freeze_panes = 'A3'
 
     # ---- Branch-wise ----
     ws = wb.create_sheet('Branch-wise')
@@ -1056,11 +1084,11 @@ def build_report(sales, purch, out_path):
                        qty_cols=['Invoices', 'Patients'])
 
     r4 = last_b + 3
-    ws.cell(row=r4, column=1, value=f'Per-branch product forecast for {target_month}').font = Font(name=FONT, bold=True, size=11)
-    bf = branch_forecast.rename(columns={'Predicted_Qty': 'Predicted Qty', 'Avg_Price': 'Avg Selling Price',
+    ws.cell(row=r4, column=1, value=f'Per-branch product forecast for {target_month} (qty in strips)').font = Font(name=FONT, bold=True, size=11)
+    bf = branch_forecast.rename(columns={'Predicted_Qty_Strips': 'Predicted Qty (strips)', 'Avg_Price': 'Avg Selling Price',
                                           'Predicted_Value': 'Predicted Value'})
-    bf = bf[['Branch', 'Product', 'Trend', 'Predicted Qty', 'Avg Selling Price', 'Predicted Value']]
-    write_df(ws, bf, start_row=r4 + 1, money_cols=['Avg Selling Price', 'Predicted Value'], qty_cols=['Predicted Qty'])
+    bf = bf[['Branch', 'Product', 'Trend', 'Predicted Qty (strips)', 'Avg Selling Price', 'Predicted Value']]
+    write_df(ws, bf, start_row=r4 + 1, money_cols=['Avg Selling Price', 'Predicted Value'])
     autosize(ws, [16, 38, 16, 16, 16, 16])
     ws.freeze_panes = 'A3'
 
@@ -1261,10 +1289,11 @@ def build_report(sales, purch, out_path):
     ws.freeze_panes = 'A4'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
-    ou = over_under.rename(columns={'Sold_Qty': 'Total Sold Qty', 'Purch_Qty': 'Total Purchased Qty',
-                                     'Net_Qty': 'Net Qty', 'Sold_Value': 'Total Sale Value',
+    # Qty columns are in strips (Qty / Factor), not individual tablets/ml.
+    ou = over_under.rename(columns={'Sold_Qty_Strips': 'Total Sold Qty (strips)', 'Purch_Qty_Strips': 'Total Purchased Qty (strips)',
+                                     'Net_Qty_Strips': 'Net Qty (strips)', 'Sold_Value': 'Total Sale Value',
                                      'Purch_Value': 'Total Purchase Value'})
-    base_cols = ['Product', 'Total Purchased Qty', 'Total Sold Qty', 'Net Qty', 'Rate',
+    base_cols = ['Product', 'Total Purchased Qty (strips)', 'Total Sold Qty (strips)', 'Net Qty (strips)', 'Rate',
                  'Total Purchase Value', 'Total Sale Value']
 
     over_df = ou[ou['Status'] == 'Over-purchased'].copy()
@@ -1289,60 +1318,55 @@ def build_report(sales, purch, out_path):
 
     ws = wb.create_sheet('Over-Purchased')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Bought at least 1.5x what was sold (and it did sell at least some) - biggest excess first'
+    ws['A1'] = 'Bought at least 1.5x what was sold (and it did sell at least some) - biggest excess first. Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    write_df(ws, over_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Excess Value (at cost)'],
-             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
-    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
+    write_df(ws, over_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Excess Value (at cost)'])
+    autosize(ws, [38, 18, 16, 14, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Dead Stock')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Purchased in this history but never sold at all - zero movement, highest value tied up first'
+    ws['A1'] = 'Purchased in this history but never sold at all - zero movement, highest value tied up first. Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    write_df(ws, dead_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Value Tied Up (at cost)'],
-             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
-    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
+    write_df(ws, dead_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Value Tied Up (at cost)'])
+    autosize(ws, [38, 18, 16, 14, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Under-Purchased')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Sold at least 2x what was purchased - biggest shortfall first (likely running down stock bought before this history)'
+    ws['A1'] = 'Sold at least 2x what was purchased - biggest shortfall first (likely running down stock bought before this history). Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    write_df(ws, under_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Shortfall Value (at cost)'],
-             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
-    autosize(ws, [38, 16, 14, 12, 12, 16, 16, 18])
+    write_df(ws, under_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Shortfall Value (at cost)'])
+    autosize(ws, [38, 18, 16, 14, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Other Purchase Status')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Balanced, sold-with-no-purchase-record (old stock), and no-activity products - sorted by sale value'
+    ws['A1'] = 'Balanced, sold-with-no-purchase-record (old stock), and no-activity products - sorted by sale value. Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    write_df(ws, other_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Net Value (at cost)'],
-             qty_cols=['Total Purchased Qty', 'Total Sold Qty', 'Net Qty'])
-    autosize(ws, [38, 16, 14, 12, 26, 12, 16, 16, 18])
+    write_df(ws, other_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Net Value (at cost)'])
+    autosize(ws, [38, 18, 16, 14, 26, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     # ---- Profit & Margin ----
     ws = wb.create_sheet('Profit & Margin')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Gross profit & margin, all history loaded so far (pre-tax on both revenue and cost - GST excluded as a pass-through)'
+    ws['A1'] = 'Gross profit & margin, all history loaded so far (pre-tax on both revenue and cost - GST excluded as a pass-through). Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    df_p = profit.rename(columns={'Qty_Sold': 'Qty Sold', 'Pretax_Revenue': 'Revenue (pre-tax)',
+    df_p = profit.rename(columns={'Qty_Sold_Strips': 'Qty Sold (strips)', 'Pretax_Revenue': 'Revenue (pre-tax)',
                                    'Cost_Per_Unit': 'Cost per Unit (pre-tax)', 'COGS': 'COGS (pre-tax)',
                                    'Gross_Profit': 'Gross Profit', 'Margin_Pct': 'Margin %'})
-    df_p = df_p[['Product', 'Qty Sold', 'Revenue', 'Revenue (pre-tax)', 'Cost per Unit (pre-tax)',
+    df_p = df_p[['Product', 'Qty Sold (strips)', 'Revenue', 'Revenue (pre-tax)', 'Cost per Unit (pre-tax)',
                  'COGS (pre-tax)', 'Gross Profit', 'Margin %']]
     last_p = write_df(ws, df_p, start_row=2,
                        money_cols=['Revenue', 'Revenue (pre-tax)', 'Cost per Unit (pre-tax)', 'COGS (pre-tax)',
-                                   'Gross Profit', 'Margin %'],
-                       qty_cols=['Qty Sold'])
+                                   'Gross Profit', 'Margin %'])
 
     r3 = last_p + 3
     ws.cell(row=r3, column=1,
             value='Cost unknown - sold with no purchase record in loaded history (from stock bought before this data started); excluded above').font = Font(name=FONT, bold=True, size=11)
-    df_u = profit_unknown.rename(columns={'Qty_Sold': 'Qty Sold'})
-    write_df(ws, df_u, start_row=r3 + 1, money_cols=['Revenue'], qty_cols=['Qty Sold'])
+    df_u = profit_unknown.rename(columns={'Qty_Sold_Strips': 'Qty Sold (strips)'})[['Product', 'Qty Sold (strips)', 'Revenue']]
+    write_df(ws, df_u, start_row=r3 + 1, money_cols=['Revenue'])
     autosize(ws, [38, 12, 14, 16, 20, 16, 14, 10])
     ws.freeze_panes = 'A3'
 
