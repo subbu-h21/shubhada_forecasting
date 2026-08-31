@@ -27,3 +27,7 @@ venv/
 # --- OS/editor cruft ---
 .DS_Store
 Thumbs.db
+
+# --- Machine-specific shortcuts ---
+# Desktop shortcuts point to an absolute local path - meaningless on another PC
+*.lnk
