@@ -1,5 +1,0 @@
-# Generated report contains real supplier/financial data - never commit
-Distributor Scorecard.xlsx
-
-# In case anyone ever copies the source CSV into this folder for testing
-*.csv

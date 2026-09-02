@@ -107,12 +107,14 @@ def compute_all():
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
-    employee_perf = rk.build_employee_performance(sales, purch)
+    dist_lines, _ = rk.compute_distributor_lines(purch)
+    employee_perf = rk.build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = rk.build_customer_loyalty(sales)
     monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
+    distributor_summary = rk.build_distributor_summary(dist_lines)
     latest_month = all_months[-1]
     ptr_high, mrp_missing, gifts, variance = rk.build_purchase_errors(purch, latest_month)
     scheme_missed, _ = rk.build_scheme_consistency(purch, latest_month)
@@ -155,6 +157,10 @@ def compute_all():
     disc_out = disc_missed.rename(columns={'Disc Percentage': 'disc_pct', 'Typical_Disc': 'typical_disc',
                                             'Disc_Gap_pct_pts': 'gap', 'Value_Lost_Approx': 'value_lost',
                                             'Qty': 'qty'})
+
+    distributor_summary_out = distributor_summary.rename(columns={
+        'Total_Invoice_Value': 'total_invoice_value', 'Embedded_Profit': 'embedded_profit',
+        'Margin_Pct': 'margin_pct', 'Invoices': 'invoices', 'Months_Active': 'months_active'})
 
     branch_summary_out = branch_summary.rename(columns={'Total_Revenue': 'total_revenue', 'Growth_Pct': 'growth_pct',
                                                           'Invoices': 'invoices', 'Patients': 'patients'})
@@ -200,6 +206,7 @@ def compute_all():
         'customer_loyalty_col': mobile_col,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
+        'distributor_summary': df_records(distributor_summary_out[['Supplier', 'invoices', 'total_invoice_value', 'embedded_profit', 'margin_pct', 'months_active']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),
         'profit_unknown': df_records(profit_unknown.rename(columns={'Qty_Sold_Strips': 'qty_sold', 'Revenue': 'revenue'})),
         'ptr_high': df_records(ptr_out[['month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'ptr', 'Qty', 'excess']]),

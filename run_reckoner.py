@@ -605,7 +605,7 @@ def build_daywise_forecast(sales, footfall_forecast):
 # Created By (purchase). None of these columns exist in any export yet;
 # this activates automatically the first time a file includes one of them.
 # ---------------------------------------------------------------------------
-def build_employee_performance(sales, purch):
+def build_employee_performance(sales, purch, dist_lines=None):
     billed_col = find_col(sales, BILLED_BY_CANDIDATES)
     given_col = find_col(sales, GIVEN_BY_CANDIDATES)
     created_col = find_col(purch, CREATED_BY_CANDIDATES)
@@ -637,6 +637,22 @@ def build_employee_performance(sales, purch):
         err_counts = errors.groupby(created_col)['Inv.No'].count().rename('PTR_Errors')
         g3 = g3.merge(err_counts, left_on='Employee', right_index=True, how='left')
         g3['PTR_Errors'] = g3['PTR_Errors'].fillna(0).astype(int)
+
+        # Whose purchase entries carry the best/worst supplier terms - same
+        # embedded-profit rule as the Distributor Scorecard (MRP-valid lines
+        # only), grouped by the same raw column values as everything else
+        # above so an employee's rows stay one consistent identity across
+        # every metric in this table.
+        if dist_lines is not None and created_col in dist_lines.columns:
+            pb = dist_lines[dist_lines[created_col].notna()].groupby(created_col).agg(
+                Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')
+            ).rename_axis('Employee')
+            g3 = g3.merge(pb, left_on='Employee', right_index=True, how='left')
+            g3['Max_Sell_Pretax'] = g3['Max_Sell_Pretax'].fillna(0)
+            g3['Embedded_Profit'] = g3['Embedded_Profit'].fillna(0)
+            g3['Margin_Pct'] = np.where(g3['Max_Sell_Pretax'] > 0, (g3['Embedded_Profit'] / g3['Max_Sell_Pretax'] * 100).round(1), 0)
+            g3 = g3.drop(columns=['Max_Sell_Pretax'])
+
         result['created_by'] = g3.sort_values('Value', ascending=False).reset_index(drop=True)
 
     return result
@@ -921,6 +937,79 @@ def build_discount_consistency(purch, latest_month):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 6: Distributor (Supplier) Profit Scorecard
+#
+# For each distributor, the POTENTIAL/embedded margin locked into what we
+# bought from them: if every unit received (including free-scheme goods)
+# were sold at MRP, what would that be worth versus what we actually paid.
+# A buying/negotiation KPI ("who gives the best terms") - NOT realized P&L,
+# since most of this stock is still unsold.
+#
+# Pre-tax on both sides (MRP is tax-inclusive, so GST is stripped out before
+# comparing). Bill Disc (invoice-level) is deliberately ignored - only
+# line-level PTR (Sale Rate) and Disc Amount count as cost. Lines with
+# MRP<=0 can't be valued and are excluded from every rollup below.
+# ---------------------------------------------------------------------------
+TOP_N_PRODUCTS_PER_DISTRIBUTOR = 15
+
+
+def compute_distributor_lines(purch):
+    p = purch.copy()
+    # Inv.No mixes plain ints, leading-zero codes, and slash-suffixed formats
+    # ('1274/26-27') across suppliers - force to string so grouping/counting
+    # by invoice can't silently split or miss rows over a dtype mismatch.
+    p['Inv.No'] = p['Inv.No'].astype(str)
+    p['Free Qty'] = p['Free Qty'].fillna(0)
+    p['Disc Amount'] = p['Disc Amount'].fillna(0)
+
+    excluded = p[p['MRP'] <= 0]
+    lines = p[p['MRP'] > 0].copy()
+    lines['Units_Received'] = lines['Qty'] + lines['Free Qty']
+    lines['Max_Sell_Pretax'] = (lines['MRP'] / (1 + lines['Tax Rate'] / 100)) * lines['Units_Received']
+    lines['Net_Cost_Pretax'] = lines['Qty'] * lines['Sale Rate'] - lines['Disc Amount']
+    lines['Embedded_Profit'] = lines['Max_Sell_Pretax'] - lines['Net_Cost_Pretax']
+    return lines, excluded
+
+
+def build_distributor_summary(lines):
+    g = lines.groupby('Supplier').agg(
+        Invoices=('Inv.No', 'nunique'), Lines=('Product', 'count'),
+        Total_Invoice_Value=('Item Total', 'sum'),
+        Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'), Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'),
+        Embedded_Profit=('Embedded_Profit', 'sum'), Months_Active=('Source_Month', 'nunique')).reset_index()
+    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    return g.sort_values('Embedded_Profit', ascending=False).reset_index(drop=True)
+
+
+def build_distributor_month(lines):
+    g = lines.groupby(['Supplier', 'Source_Month']).agg(
+        Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
+        Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
+    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    supplier_order = lines.groupby('Supplier')['Embedded_Profit'].sum().sort_values(ascending=False).index.tolist()
+    g['Supplier'] = pd.Categorical(g['Supplier'], categories=supplier_order, ordered=True)
+    return g.sort_values(['Supplier', 'Source_Month']).reset_index(drop=True), supplier_order
+
+
+def build_distributor_per_invoice(lines):
+    g = lines.groupby(['Inv.No', 'Supplier']).agg(
+        Date=('Date', 'first'), Source_Month=('Source_Month', 'first'), Lines=('Product', 'count'),
+        Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
+        Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
+    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    return g.sort_values('Embedded_Profit', ascending=False).reset_index(drop=True)
+
+
+def build_distributor_top_products(lines, supplier_order, top_n=TOP_N_PRODUCTS_PER_DISTRIBUTOR):
+    g = lines.groupby(['Supplier', 'Product']).agg(
+        Units_Received=('Units_Received', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
+        Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
+    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    parts = [g[g['Supplier'] == s].sort_values('Embedded_Profit', ascending=False).head(top_n) for s in supplier_order]
+    return pd.concat(parts, ignore_index=True) if parts else g.iloc[0:0]
+
+
+# ---------------------------------------------------------------------------
 # Excel report builder
 # ---------------------------------------------------------------------------
 FONT = 'Arial'
@@ -978,7 +1067,8 @@ def build_report(sales, purch, out_path):
     forecast, target_month, all_months = build_demand_forecast(sales)
     branch_summary, branch_forecast = build_branch_report(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
-    employee_perf = build_employee_performance(sales, purch)
+    dist_lines, dist_excluded = compute_distributor_lines(purch)
+    employee_perf = build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = build_customer_loyalty(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
@@ -988,6 +1078,10 @@ def build_report(sales, purch, out_path):
     ptr_high, mrp_missing, gifts, variance = build_purchase_errors(purch, latest_month)
     scheme_missed, scheme_baseline = build_scheme_consistency(purch, latest_month)
     disc_missed, disc_baseline = build_discount_consistency(purch, latest_month)
+    dist_summary = build_distributor_summary(dist_lines)
+    dist_month, dist_supplier_order = build_distributor_month(dist_lines)
+    dist_per_invoice = build_distributor_per_invoice(dist_lines)
+    dist_top_products = build_distributor_top_products(dist_lines, dist_supplier_order)
 
     wb = Workbook()
 
@@ -1018,6 +1112,10 @@ def build_report(sales, purch, out_path):
         ('Products with MRP varying 3x+ (all-time)', len(variance)),
         (f'Scheme (10+1 style) shortfalls in {latest_month}', len(scheme_missed)),
         (f'Discount shortfalls in {latest_month}', len(disc_missed)),
+        ('Distributors analyzed for embedded profit (purchase-side)', len(dist_summary)),
+        ('Top distributor by embedded profit (all-history)',
+         f"{dist_summary.iloc[0]['Supplier']} ({dist_summary.iloc[0]['Margin_Pct']}% margin)" if len(dist_summary) else 'n/a'),
+        ('Purchase lines excluded from Distributor Scorecard (MRP missing)', len(dist_excluded)),
     ]
     for label, val in stats:
         ws.cell(row=r, column=2, value=label).font = BODY_FONT
@@ -1045,6 +1143,10 @@ def build_report(sales, purch, out_path):
         'MRP Issues (missing/variance) - MRP=0 or same product priced very differently across bills.',
         'Scheme Shortfall - product+supplier pairs that normally get a free-qty scheme (10+1 etc.) but got less/none this month.',
         'Discount Shortfall - product+supplier pairs getting a noticeably lower discount % than their usual history.',
+        'Distributor Summary - potential profit margin embedded in what each distributor supplied, all history (max sellable at MRP vs what we paid, free-scheme goods included). A buying/negotiation KPI, NOT realized profit - most stock is still unsold.',
+        'Distributor x Month - the same, broken down by month per distributor, plus a supplier x month pivot.',
+        'Distributor Per Invoice - potential margin for each individual purchase invoice.',
+        f'Top Products by Distributor - each distributor\'s best-margin products, capped at top {TOP_N_PRODUCTS_PER_DISTRIBUTOR} per distributor.',
     ]
     for n in tab_notes:
         ws.cell(row=r, column=2, value='- ' + n).font = Font(name=FONT, size=9, italic=True, color='555555')
@@ -1259,12 +1361,18 @@ def build_report(sales, purch, out_path):
             df_g = employee_perf['given_by'].rename(columns={'Lines': 'Line Items', 'Qty': 'Total Qty', 'Value': 'Total Value'})
             r_emp = write_df(ws, df_g, start_row=r_emp + 1, qty_cols=['Line Items', 'Total Qty'], money_cols=['Total Value']) + 3
         if employee_perf['created_by'] is not None:
-            ws.cell(row=r_emp, column=1, value='Created By (purchase entries) - includes a cross-check against PTR-above-MRP errors from the Issues tabs').font = Font(name=FONT, bold=True, size=11)
+            ws.cell(row=r_emp, column=1,
+                    value='Created By (purchase entries) - cross-checked against PTR-above-MRP errors, and against '
+                          'the embedded profit/margin those entries carry (same rule as the Distributor Scorecard, '
+                          'MRP-valid lines only) - whose entries land the best/worst supplier terms').font = Font(name=FONT, bold=True, size=11)
             df_c = employee_perf['created_by'].rename(columns={'Entries': 'Invoices Entered', 'Lines': 'Line Items',
-                                                                 'Value': 'Total Purchase Value', 'PTR_Errors': 'PTR > MRP Errors'})
+                                                                 'Value': 'Total Purchase Value', 'PTR_Errors': 'PTR > MRP Errors',
+                                                                 'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
+            has_profit_cols = 'Embedded Profit' in df_c.columns
+            money_cols = ['Total Purchase Value'] + (['Embedded Profit', 'Margin %'] if has_profit_cols else [])
             write_df(ws, df_c, start_row=r_emp + 1, qty_cols=['Invoices Entered', 'Line Items', 'PTR > MRP Errors'],
-                     money_cols=['Total Purchase Value'])
-    autosize(ws, [26, 14, 16, 16, 16])
+                     money_cols=money_cols)
+    autosize(ws, [26, 14, 16, 16, 16, 16, 10])
     ws.freeze_panes = 'A2'
 
     # ---- Customer Loyalty ----
@@ -1441,6 +1549,80 @@ def build_report(sales, purch, out_path):
     write_df(ws, df6, start_row=2, qty_cols=['Purchased Qty'],
              money_cols=['Disc % Received', 'Usual Disc % (history)', 'Best Disc % Ever Seen', 'Gap (pct pts)', 'Approx Value Lost'])
     autosize(ws, [12, 14, 26, 32, 12, 14, 16, 16, 12, 14])
+    ws.freeze_panes = 'A3'
+
+    # ---- Distributor Summary ----
+    ws = wb.create_sheet('Distributor Summary')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = ('Potential profit embedded in what each distributor supplied, all history - if every unit received '
+                '(incl. free-scheme goods) sold at MRP, vs what we paid. Buying/negotiation KPI, NOT realized profit.')
+    ws['A1'].font = Font(name=FONT, italic=True, size=9, color='555555')
+    df_ds = dist_summary.rename(columns={
+        'Total_Invoice_Value': 'Total Invoice Value', 'Max_Sell_Pretax': 'Max Sell Value (pre-tax)',
+        'Net_Cost_Pretax': 'Net Cost (pre-tax)', 'Embedded_Profit': 'Embedded Profit',
+        'Margin_Pct': 'Margin %', 'Months_Active': 'Months Active'})
+    df_ds = df_ds[['Supplier', 'Invoices', 'Lines', 'Total Invoice Value', 'Max Sell Value (pre-tax)',
+                    'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %', 'Months Active']]
+    write_df(ws, df_ds, start_row=2,
+             money_cols=['Total Invoice Value', 'Max Sell Value (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %'],
+             qty_cols=['Invoices', 'Lines', 'Months Active'])
+    autosize(ws, [34, 11, 10, 18, 20, 18, 16, 10, 12])
+    ws.freeze_panes = 'A3'
+
+    # ---- Distributor x Month ----
+    ws = wb.create_sheet('Distributor x Month')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Supplier x Month detail'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    df_dm = dist_month.rename(columns={'Source_Month': 'Month', 'Invoice_Value': 'Invoice Value',
+                                        'Max_Sell_Pretax': 'Max Sell (pre-tax)', 'Net_Cost_Pretax': 'Net Cost (pre-tax)',
+                                        'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
+    df_dm = df_dm[['Supplier', 'Month', 'Invoice Value', 'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %']]
+    df_dm['Supplier'] = df_dm['Supplier'].astype(str)
+    last_dm = write_df(ws, df_dm, start_row=2,
+                        money_cols=['Invoice Value', 'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %'])
+
+    r_piv = last_dm + 3
+    ws.cell(row=r_piv, column=1, value='Pivot: Embedded Profit by Supplier x Month (suppliers ordered by all-history total)').font = \
+        Font(name=FONT, bold=True, size=11)
+    dist_pivot = dist_month.pivot(index='Supplier', columns='Source_Month', values='Embedded_Profit').fillna(0)
+    dist_pivot = dist_pivot.reindex(dist_supplier_order)
+    dist_pivot['Total'] = dist_pivot.sum(axis=1)
+    dist_pivot = dist_pivot.reset_index()
+    dist_pivot['Supplier'] = dist_pivot['Supplier'].astype(str)
+    write_df(ws, dist_pivot, start_row=r_piv + 1, money_cols=list(dist_pivot.columns[1:]))
+    autosize(ws, [34, 16, 16, 16, 16, 16])
+    ws.freeze_panes = 'A3'
+
+    # ---- Distributor Per Invoice ----
+    ws = wb.create_sheet('Distributor Per Invoice')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Potential profit per individual purchase invoice, biggest first'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    df_pi = dist_per_invoice.rename(columns={
+        'Source_Month': 'Month', 'Invoice_Value': 'Invoice Value', 'Max_Sell_Pretax': 'Max Sell (pre-tax)',
+        'Net_Cost_Pretax': 'Net Cost (pre-tax)', 'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
+    df_pi = df_pi[['Date', 'Inv.No', 'Supplier', 'Month', 'Lines', 'Invoice Value',
+                    'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %']]
+    write_df(ws, df_pi, start_row=2,
+             money_cols=['Invoice Value', 'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %'],
+             qty_cols=['Lines'])
+    autosize(ws, [12, 16, 30, 10, 8, 16, 16, 16, 16, 10])
+    ws.freeze_panes = 'A3'
+
+    # ---- Top Products by Distributor ----
+    ws = wb.create_sheet('Top Products by Distributor')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = f'Top {TOP_N_PRODUCTS_PER_DISTRIBUTOR} products by embedded profit, per distributor (suppliers ordered by all-history total)'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    df_tp = dist_top_products.rename(columns={
+        'Units_Received': 'Units Received', 'Max_Sell_Pretax': 'Max Sell (pre-tax)',
+        'Net_Cost_Pretax': 'Net Cost (pre-tax)', 'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
+    df_tp = df_tp[['Supplier', 'Product', 'Units Received', 'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %']]
+    write_df(ws, df_tp, start_row=2,
+             money_cols=['Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %'],
+             qty_cols=['Units Received'])
+    autosize(ws, [30, 32, 14, 16, 16, 16, 10])
     ws.freeze_panes = 'A3'
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
