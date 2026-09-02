@@ -29,6 +29,45 @@ CONFIG_PATH = ROOT / 'server_config.json'
 
 app = Flask(__name__)
 
+# --- Sessions -----------------------------------------------------------
+# Basic Auth (the old scheme here) has no real logout - once a browser has
+# cached the credentials, it keeps silently resending them forever, so a
+# phone left logged in stays logged in for anyone who picks it up. This
+# replaces it with a server-issued token that expires SESSION_TIMEOUT_SECONDS
+# after the last authenticated request touches it (a sliding window, not a
+# fixed one) - both "5 min of inactivity" and "5 min after the tab closes"
+# fall out of that one rule, since a closed tab just stops sending requests.
+SESSION_TIMEOUT_SECONDS = 5 * 60
+
+_sessions_lock = threading.Lock()
+_sessions = {}  # token -> {'username': str, 'last_active': float}
+
+
+def _create_session(username):
+    token = secrets.token_hex(32)
+    with _sessions_lock:
+        _sessions[token] = {'username': username, 'last_active': time.time()}
+    return token
+
+
+def _touch_session(token):
+    """Refresh a session's activity clock. Returns False if the token is
+    unknown or has been idle past the timeout (and drops it in that case)."""
+    with _sessions_lock:
+        sess = _sessions.get(token)
+        if not sess:
+            return False
+        if time.time() - sess['last_active'] > SESSION_TIMEOUT_SECONDS:
+            del _sessions[token]
+            return False
+        sess['last_active'] = time.time()
+        return True
+
+
+def _drop_session(token):
+    with _sessions_lock:
+        _sessions.pop(token, None)
+
 # compute_all() takes real time (branch-wise forecast alone runs the
 # per-product forecast 3x). Recomputing it on every page load makes the
 # mobile page feel hung, so cache the result and only recompute when data
@@ -82,13 +121,39 @@ def check_auth(username, password):
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return Response(
-                'Login required', 401,
-                {'WWW-Authenticate': 'Basic realm="Pharmacy Reckoner"'})
+        token = request.headers.get('X-Session-Token')
+        if not token or not _touch_session(token):
+            return jsonify({'error': 'Session expired or not logged in'}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    body = request.get_json(force=True, silent=True) or {}
+    username, password = body.get('username', ''), body.get('password', '')
+    if not check_auth(username, password):
+        return jsonify({'error': 'Incorrect username or password'}), 401
+    token = _create_session(username)
+    return jsonify({'token': token, 'username': username, 'timeout_seconds': SESSION_TIMEOUT_SECONDS})
+
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    token = request.headers.get('X-Session-Token')
+    if token:
+        _drop_session(token)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/ping', methods=['POST'])
+@requires_auth
+def api_ping():
+    # No-op endpoint - @requires_auth already refreshed the session's activity
+    # clock. The mobile page calls this on real user interaction (click/key/
+    # touch/scroll) so an actively-used-but-quiet tab (browsing already-loaded
+    # data, no new API calls) doesn't time out from under someone still there.
+    return jsonify({'ok': True})
 
 
 def df_records(df, limit=None):
@@ -382,8 +447,9 @@ def api_upload():
 
 
 @app.route('/')
-@requires_auth
 def index():
+    # Public shell - it's just markup/JS, no pharmacy data. The page itself
+    # shows a login form and every /api/* call is what's actually gated.
     return Response((ROOT / 'mobile_dashboard.html').read_text(encoding='utf-8'), mimetype='text/html')
 
 
@@ -401,6 +467,7 @@ if __name__ == '__main__':
     for c in CONFIG['credentials']:
         print(f'Login: {c["username"]} / {c["password"]}')
     print(f'(saved in server_config.json - change it any time)')
+    print(f'Auto-logout after {SESSION_TIMEOUT_SECONDS // 60} minutes of inactivity (or after closing the tab).')
     print()
     print(f'On your phone (same WiFi), open: http://{lan_ip}:8420')
     print('Press Ctrl+C to stop the server.')

@@ -185,16 +185,61 @@
   nav.bottom svg { width: 18px; height: 18px; }
 
   .login-banner { background: var(--warn-soft); color: var(--warn); font-size: 12px; padding: 8px 14px; text-align: center; }
+
+  /* Login screen */
+  #app-shell { display: none; }
+  #login-screen {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px; box-sizing: border-box;
+  }
+  .login-card {
+    background: var(--paper-raised); border: 1px solid var(--line); border-radius: 14px;
+    padding: 28px 24px; max-width: 320px; width: 100%; text-align: center;
+  }
+  .login-card h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 22px; margin: 0 0 2px; font-weight: 600;
+  }
+  .login-card .sub { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 20px; }
+  .login-card input {
+    width: 100%; font-family: inherit; font-size: 14px; padding: 10px 12px;
+    border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper);
+    color: var(--ink); margin-bottom: 10px; box-sizing: border-box;
+  }
+  .login-submit-btn {
+    width: 100%; font-family: inherit; background: var(--accent); color: white; border: none;
+    padding: 10px 18px; border-radius: 20px; font-weight: 600; font-size: 13.5px;
+    margin-top: 4px; cursor: pointer;
+  }
+  .login-submit-btn:disabled { opacity: .6; cursor: default; }
+  .login-error { color: var(--danger); font-size: 12.5px; margin-top: 12px; }
 </style>
 </head>
 <body>
 
+<div id="login-screen">
+  <div class="login-card">
+    <h1>Ready Reckoner</h1>
+    <div class="sub">Sign in to continue</div>
+    <form id="login-form">
+      <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit" class="login-submit-btn" id="login-submit">Log in</button>
+      <div class="login-error" id="login-error" style="display:none"></div>
+    </form>
+  </div>
+</div>
+
+<div id="app-shell">
 <header class="top">
   <div>
     <h1>Ready Reckoner</h1>
     <div class="sub" id="header-sub">Loading&hellip;</div>
   </div>
-  <button class="refresh-btn" id="refresh-btn">Refresh</button>
+  <div style="display:flex;gap:6px">
+    <button class="refresh-btn" id="refresh-btn">Refresh</button>
+    <button class="refresh-btn" id="logout-btn">Log out</button>
+  </div>
 </header>
 
 <main>
@@ -355,6 +400,7 @@
     People
   </button>
 </nav>
+</div>
 
 <script>
 let DATA = null;
@@ -362,6 +408,104 @@ let currentSub = 'ptr';
 let currentStockSub = 'over';
 let currentPeopleSub = 'employees';
 let currentBranch = null;
+
+// --- Session / auto-logout -----------------------------------------------
+// The server expires a session SESSION_TIMEOUT_MS after the last request
+// that touches it - a closed tab just stops sending requests, so "5 min
+// after closing the tab" falls out of the same rule as "5 min idle" without
+// needing separate handling. sessionStorage (not localStorage) also means a
+// closed tab loses the token client-side too, on top of the server timeout.
+const SESSION_TOKEN_KEY = 'reckoner_session_token';
+const INACTIVITY_MS = 5 * 60 * 1000;
+const PING_THROTTLE_MS = 30 * 1000;
+let inactivityTimer = null;
+let lastPingAt = 0;
+
+function getToken() { return sessionStorage.getItem(SESSION_TOKEN_KEY); }
+
+async function authFetch(url, opts) {
+  opts = opts || {};
+  const token = getToken();
+  const headers = Object.assign({}, opts.headers, token ? { 'X-Session-Token': token } : {});
+  const res = await fetch(url, Object.assign({}, opts, { headers }));
+  if (res.status === 401) {
+    showLoginScreen('Session expired — please log in again.');
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+function showLoginScreen(message) {
+  clearTimeout(inactivityTimer);
+  sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  document.getElementById('app-shell').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  const err = document.getElementById('login-error');
+  if (message) { err.textContent = message; err.style.display = 'block'; }
+  else { err.style.display = 'none'; }
+}
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app-shell').style.display = 'block';
+}
+
+function resetInactivityTimer() {
+  clearTimeout(inactivityTimer);
+  inactivityTimer = setTimeout(() => {
+    authFetch('/api/logout', { method: 'POST' }).catch(() => {});
+    showLoginScreen('Logged out after 5 minutes of inactivity.');
+  }, INACTIVITY_MS);
+}
+
+function onUserActivity() {
+  if (!getToken()) return;
+  resetInactivityTimer();
+  const now = Date.now();
+  if (now - lastPingAt > PING_THROTTLE_MS) {
+    lastPingAt = now;
+    authFetch('/api/ping', { method: 'POST' }).catch(() => {});
+  }
+}
+['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt =>
+  document.addEventListener(evt, onUserActivity, { passive: true }));
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const btn = document.getElementById('login-submit');
+  const err = document.getElementById('login-error');
+  err.style.display = 'none';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      err.textContent = 'Incorrect username or password.';
+      err.style.display = 'block';
+      return;
+    }
+    const out = await res.json();
+    sessionStorage.setItem(SESSION_TOKEN_KEY, out.token);
+    document.getElementById('login-password').value = '';
+    showApp();
+    resetInactivityTimer();
+    loadData();
+  } catch (e2) {
+    err.textContent = 'Could not reach the server.';
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  try { await authFetch('/api/logout', { method: 'POST' }); } catch (e) {}
+  showLoginScreen();
+});
 
 function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
 function money(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return '₹' + Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
@@ -372,7 +516,7 @@ async function loadData(force) {
   document.getElementById('home-content').style.display = 'none';
   document.getElementById('home-loading').textContent = force ? 'Recalculating…' : 'Loading your data…';
   try {
-    const res = await fetch('/api/data' + (force ? '?refresh=1' : ''));
+    const res = await authFetch('/api/data' + (force ? '?refresh=1' : ''));
     if (!res.ok) {
       const err = await res.json();
       document.getElementById('home-loading').textContent = err.error || 'No data yet.';
@@ -448,7 +592,7 @@ const DAY_TYPE_BG = {
 async function loadHolidayCalendar() {
   const container = document.getElementById('holiday-calendar');
   try {
-    const res = await fetch('/api/holidays_calendar');
+    const res = await authFetch('/api/holidays_calendar');
     if (!res.ok) { container.innerHTML = '<div class="chart-empty">Could not load calendar.</div>'; return; }
     const data = await res.json();
     document.getElementById('holiday-cal-title').textContent = `Mark holidays for forecast — ${data.month}`;
@@ -495,12 +639,12 @@ async function onCalendarDayTap(cell) {
   const isCustom = cell.dataset.custom === '1';
   if (isCustom) {
     if (!confirm(`Remove "${cell.dataset.label}" from ${date}?`)) return;
-    await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    await authFetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, name: null }) });
   } else {
     const name = prompt(`Mark ${date} as a holiday. Holiday name:`, cell.dataset.label || '');
     if (!name) return;
-    await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    await authFetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, name }) });
   }
   // Just refresh the calendar itself (cheap) - NOT the whole dashboard, so
@@ -1087,7 +1231,7 @@ let ALL_PRODUCTS = null;
 
 async function ensureProductList() {
   if (ALL_PRODUCTS) return ALL_PRODUCTS;
-  const res = await fetch('/api/products');
+  const res = await authFetch('/api/products');
   ALL_PRODUCTS = await res.json();
   return ALL_PRODUCTS;
 }
@@ -1116,7 +1260,7 @@ async function loadProductDetail(name) {
   sug.innerHTML = `<div class="empty">Loading…</div>`;
   document.getElementById('search-lookup').value = name;
   try {
-    const res = await fetch('/api/product?name=' + encodeURIComponent(name));
+    const res = await authFetch('/api/product?name=' + encodeURIComponent(name));
     if (!res.ok) {
       const err = await res.json();
       sug.innerHTML = `<div class="empty">${err.error || 'Not found.'}</div>`;
@@ -1273,7 +1417,7 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   const log = document.getElementById('upload-log');
   log.textContent = 'Uploading…';
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    const res = await authFetch('/api/upload', { method: 'POST', body: fd });
     const out = await res.json();
     log.textContent = (out.saved ? `Saved: ${out.saved.join(', ')}\n\n` : '') + (out.log || out.error || '');
     loadData();
@@ -1282,7 +1426,13 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   }
 });
 
-loadData();
+if (getToken()) {
+  showApp();
+  resetInactivityTimer();
+  loadData();
+} else {
+  showLoginScreen();
+}
 </script>
 </body>
 </html>
