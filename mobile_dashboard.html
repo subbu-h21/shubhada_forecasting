@@ -422,14 +422,13 @@ let inactivityTimer = null;
 let lastPingAt = 0;
 
 // A file upload or a forced recalculate is authorized once, when it starts -
-// if it's still running when the 5-minute mark hits, it finishes and
-// succeeds server-side regardless. The lock itself still happens exactly on
-// schedule (data hidden, token cleared - the security guarantee doesn't
-// wait on anything); only the INFORMATIVE message is deferred until the
-// request settles, so it can say what actually happened instead of a
-// generic line that would otherwise bury a real result with no confirmation.
+// if it's still running when the client's own lock timer fires, it finishes
+// and succeeds server-side regardless. The lock itself (hide data, clear
+// token) always happens exactly when the timer fires, whether or not a
+// request is still pending - only the INFORMATIVE message about what that
+// request did is deferred until it settles, via criticalRequest() below.
 let pendingCriticalRequests = 0;
-let logoutQueued = false;
+const INACTIVITY_LOGOUT_MSG = 'Logged out after 5 minutes of inactivity.';
 
 function getToken() { return sessionStorage.getItem(SESSION_TOKEN_KEY); }
 
@@ -439,7 +438,10 @@ async function authFetch(url, opts) {
   const headers = Object.assign({}, opts.headers, token ? { 'X-Session-Token': token } : {});
   const res = await fetch(url, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
-    showLoginScreen('Session expired — please log in again.');
+    // Only clear the CURRENT session if this request was actually using it -
+    // a slow request that started under an old token shouldn't be able to
+    // log out a session the user has since logged back into.
+    if (getToken() === token) showLoginScreen('Session expired — please log in again.');
     throw new Error('unauthorized');
   }
   return res;
@@ -469,7 +471,6 @@ function showApp() {
 
 function resetInactivityTimer() {
   clearTimeout(inactivityTimer);
-  logoutQueued = false;  // fresh activity cancels any logout that was waiting on a request
   inactivityTimer = setTimeout(handleInactivityTimeout, INACTIVITY_MS);
 }
 
@@ -482,18 +483,21 @@ function handleInactivityTimeout() {
   if (pendingCriticalRequests > 0) {
     // Lock on schedule regardless - only the follow-up message about what
     // the still-running request did waits for it to actually finish.
-    logoutQueued = true;
-    doLogout('Logged out after 5 minutes of inactivity. Finishing an in-progress action — the result will appear here shortly.');
+    doLogout(`${INACTIVITY_LOGOUT_MSG} Finishing an in-progress action — the result will appear here shortly.`);
     return;
   }
-  doLogout('Logged out after 5 minutes of inactivity.');
+  doLogout(INACTIVITY_LOGOUT_MSG);
 }
 
-// Wrap an upload/recalculate fetch so that if a logout happens while it's
-// still running, the login screen's message gets updated with the real
-// outcome once it settles, instead of staying on the generic placeholder.
-// fn must catch its own errors and RETURN a one-line outcome string - it
-// should not throw (nothing here handles that case specially).
+// Wrap an upload/recalculate fetch so that if the user ends up logged out
+// while it's still running - via the inactivity timer, a manual logout
+// click, or a stale request expiring - the login screen's message gets
+// updated with the real outcome once it settles, instead of staying on
+// whatever generic/placeholder text was showing (or none at all). Keyed off
+// "are we logged out right now", not off which specific path caused it, so
+// none of those paths can bypass this by not knowing to set a flag. fn must
+// catch its own errors and RETURN a one-line outcome string - it should not
+// throw (nothing here handles that case specially).
 async function criticalRequest(fn) {
   pendingCriticalRequests++;
   let result = 'The action finished.';
@@ -502,9 +506,8 @@ async function criticalRequest(fn) {
     return result;
   } finally {
     pendingCriticalRequests--;
-    if (pendingCriticalRequests === 0 && logoutQueued) {
-      logoutQueued = false;
-      setLoginMessage(`${result} Logged out after 5 minutes of inactivity.`);
+    if (pendingCriticalRequests === 0 && !getToken()) {
+      setLoginMessage(result);
     }
   }
 }
@@ -553,10 +556,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   }
 });
 
-document.getElementById('logout-btn').addEventListener('click', async () => {
-  try { await authFetch('/api/logout', { method: 'POST' }); } catch (e) {}
-  showLoginScreen();
-});
+document.getElementById('logout-btn').addEventListener('click', () => doLogout());
 
 function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
 function money(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return '₹' + Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
