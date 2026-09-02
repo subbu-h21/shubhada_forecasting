@@ -423,9 +423,11 @@ let lastPingAt = 0;
 
 // A file upload or a forced recalculate is authorized once, when it starts -
 // if it's still running when the 5-minute mark hits, it finishes and
-// succeeds server-side regardless, but yanking the screen to the login page
-// mid-request buries that outcome with no confirmation. Defer the actual
-// logout until every such request has settled, then show what happened.
+// succeeds server-side regardless. The lock itself still happens exactly on
+// schedule (data hidden, token cleared - the security guarantee doesn't
+// wait on anything); only the INFORMATIVE message is deferred until the
+// request settles, so it can say what actually happened instead of a
+// generic line that would otherwise bury a real result with no confirmation.
 let pendingCriticalRequests = 0;
 let logoutQueued = false;
 
@@ -448,6 +450,13 @@ function showLoginScreen(message) {
   sessionStorage.removeItem(SESSION_TOKEN_KEY);
   document.getElementById('app-shell').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
+  setLoginMessage(message);
+}
+
+// Updates just the message text, without touching the shell/token/timer -
+// safe to call later even if the user has since logged back in (it'll just
+// write into the now-hidden login screen's error area, harmlessly).
+function setLoginMessage(message) {
   const err = document.getElementById('login-error');
   if (message) { err.textContent = message; err.style.display = 'block'; }
   else { err.style.display = 'none'; }
@@ -464,27 +473,38 @@ function resetInactivityTimer() {
   inactivityTimer = setTimeout(handleInactivityTimeout, INACTIVITY_MS);
 }
 
-function handleInactivityTimeout() {
-  if (pendingCriticalRequests > 0) {
-    logoutQueued = true;
-    return;
-  }
+function doLogout(message) {
   authFetch('/api/logout', { method: 'POST' }).catch(() => {});
-  showLoginScreen('Logged out after 5 minutes of inactivity.');
+  showLoginScreen(message);
 }
 
-// Wrap an upload/recalculate fetch so a queued logout waits for it to finish
-// and then reports what happened, instead of silently swallowing the result.
-async function criticalRequest(fn, describeResult) {
+function handleInactivityTimeout() {
+  if (pendingCriticalRequests > 0) {
+    // Lock on schedule regardless - only the follow-up message about what
+    // the still-running request did waits for it to actually finish.
+    logoutQueued = true;
+    doLogout('Logged out after 5 minutes of inactivity. Finishing an in-progress action — the result will appear here shortly.');
+    return;
+  }
+  doLogout('Logged out after 5 minutes of inactivity.');
+}
+
+// Wrap an upload/recalculate fetch so that if a logout happens while it's
+// still running, the login screen's message gets updated with the real
+// outcome once it settles, instead of staying on the generic placeholder.
+// fn must catch its own errors and RETURN a one-line outcome string - it
+// should not throw (nothing here handles that case specially).
+async function criticalRequest(fn) {
   pendingCriticalRequests++;
+  let result = 'The action finished.';
   try {
-    return await fn();
+    result = await fn();
+    return result;
   } finally {
     pendingCriticalRequests--;
     if (pendingCriticalRequests === 0 && logoutQueued) {
       logoutQueued = false;
-      authFetch('/api/logout', { method: 'POST' }).catch(() => {});
-      showLoginScreen(`${describeResult()} Logged out after 5 minutes of inactivity.`);
+      setLoginMessage(`${result} Logged out after 5 minutes of inactivity.`);
     }
   }
 }
@@ -546,27 +566,26 @@ async function loadData(force) {
   document.getElementById('home-loading').style.display = 'block';
   document.getElementById('home-content').style.display = 'none';
   document.getElementById('home-loading').textContent = force ? 'Recalculating…' : 'Loading your data…';
-  let outcome = 'Recalculation finished.';
   const fetchOnce = async () => {
     try {
       const res = await authFetch('/api/data' + (force ? '?refresh=1' : ''));
       if (!res.ok) {
         const err = await res.json();
         document.getElementById('home-loading').textContent = err.error || 'No data yet.';
-        outcome = 'Recalculation failed.';
-        return;
+        return 'Recalculation failed.';
       }
       DATA = await res.json();
       render();
+      return 'Recalculation finished.';
     } catch (e) {
       document.getElementById('home-loading').textContent = 'Could not reach the server. Check the PC is on and you\'re on the same WiFi.';
-      outcome = 'Recalculation failed.';
+      return 'Recalculation failed.';
     }
   };
   // Only the forced (manual "Recalculate now") path is slow enough to risk
   // outlasting the inactivity timer - the plain cached load is quick and
   // doesn't need the same protection.
-  if (force) await criticalRequest(fetchOnce, () => outcome);
+  if (force) await criticalRequest(fetchOnce);
   else await fetchOnce();
 }
 
@@ -1457,21 +1476,22 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   for (const f of files) fd.append('files', f);
   const log = document.getElementById('upload-log');
   log.textContent = 'Uploading…';
-  let outcome = 'Your upload finished.';
   await criticalRequest(async () => {
     try {
       const res = await authFetch('/api/upload', { method: 'POST', body: fd });
       const out = await res.json();
       log.textContent = (out.saved ? `Saved: ${out.saved.join(', ')}\n\n` : '') + (out.log || out.error || '');
-      outcome = out.saved && out.saved.length
+      // Awaited - the upload isn't "done" from criticalRequest's point of view
+      // until this follow-up reload has settled too, not just been kicked off.
+      await loadData();
+      return out.saved && out.saved.length
         ? `Your upload finished (${out.saved.length} file${out.saved.length > 1 ? 's' : ''} saved).`
         : 'Your upload finished, but no files were saved.';
-      loadData();
     } catch (err) {
       log.textContent = 'Upload failed: ' + err;
-      outcome = 'Your upload failed.';
+      return 'Your upload failed.';
     }
-  }, () => outcome);
+  });
 });
 
 if (getToken()) {
