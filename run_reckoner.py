@@ -628,6 +628,10 @@ def build_employee_performance(sales, purch, dist_lines=None):
     if created_col:
         p = purch.copy()
         p['Factor'] = p['Factor'].replace(0, 1).fillna(1)
+        # Same person gets keyed in with inconsistent casing/whitespace across
+        # entries (e.g. 'NaReNdRa DeVaDiGa' / 'Narendra Devadiga' / trailing
+        # spaces) - normalize before grouping so their rows don't fragment.
+        p[created_col] = p[created_col].str.strip().str.title()
         g3 = p[p[created_col].notna()].groupby(created_col).agg(
             Entries=('Inv.No', 'nunique'), Lines=('Product', 'count'), Value=('Item Total', 'sum')
         ).reset_index().rename(columns={created_col: 'Employee'})
@@ -640,11 +644,12 @@ def build_employee_performance(sales, purch, dist_lines=None):
 
         # Whose purchase entries carry the best/worst supplier terms - same
         # embedded-profit rule as the Distributor Scorecard (MRP-valid lines
-        # only), grouped by the same raw column values as everything else
+        # only), grouped by the same normalized identity as everything else
         # above so an employee's rows stay one consistent identity across
         # every metric in this table.
         if dist_lines is not None and created_col in dist_lines.columns:
-            pb = dist_lines[dist_lines[created_col].notna()].groupby(created_col).agg(
+            dist_names = dist_lines[created_col].str.strip().str.title()
+            pb = dist_lines.groupby(dist_names).agg(
                 Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')
             ).rename_axis('Employee')
             g3 = g3.merge(pb, left_on='Employee', right_index=True, how='left')
@@ -961,9 +966,15 @@ def compute_distributor_lines(purch):
     p['Inv.No'] = p['Inv.No'].astype(str)
     p['Free Qty'] = p['Free Qty'].fillna(0)
     p['Disc Amount'] = p['Disc Amount'].fillna(0)
+    p['Tax Rate'] = p['Tax Rate'].fillna(0)
 
-    excluded = p[p['MRP'] <= 0]
-    lines = p[p['MRP'] > 0].copy()
+    # "MRP <= 0" and "MRP > 0" look complementary but aren't - a blank (NaN)
+    # MRP cell satisfies neither, so it would silently vanish from both
+    # excluded and lines. Splitting on valid_mrp/~valid_mrp instead guarantees
+    # every row lands in exactly one bucket.
+    valid_mrp = p['MRP'] > 0
+    excluded = p[~valid_mrp]
+    lines = p[valid_mrp].copy()
     lines['Units_Received'] = lines['Qty'] + lines['Free Qty']
     lines['Max_Sell_Pretax'] = (lines['MRP'] / (1 + lines['Tax Rate'] / 100)) * lines['Units_Received']
     lines['Net_Cost_Pretax'] = lines['Qty'] * lines['Sale Rate'] - lines['Disc Amount']
