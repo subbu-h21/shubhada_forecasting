@@ -655,7 +655,7 @@ def build_employee_performance(sales, purch, dist_lines=None):
             g3 = g3.merge(pb, left_on='Employee', right_index=True, how='left')
             g3['Max_Sell_Pretax'] = g3['Max_Sell_Pretax'].fillna(0)
             g3['Embedded_Profit'] = g3['Embedded_Profit'].fillna(0)
-            g3['Margin_Pct'] = np.where(g3['Max_Sell_Pretax'] > 0, (g3['Embedded_Profit'] / g3['Max_Sell_Pretax'] * 100).round(1), 0)
+            g3['Margin_Pct'] = _margin_pct(g3['Embedded_Profit'], g3['Max_Sell_Pretax'])
             g3 = g3.drop(columns=['Max_Sell_Pretax'])
 
         result['created_by'] = g3.sort_values('Value', ascending=False).reset_index(drop=True)
@@ -982,13 +982,21 @@ def compute_distributor_lines(purch):
     return lines, excluded
 
 
+def _margin_pct(embedded_profit, max_sell):
+    """Embedded margin % = profit / max-sellable-at-MRP, guarding the zero
+    denominator. Shared by every distributor rollup (and the Created By
+    cross-check) so no two tabs can drift to different rounding or zero-
+    handling for the same underlying figures."""
+    return np.where(max_sell > 0, (embedded_profit / max_sell * 100).round(1), 0)
+
+
 def build_distributor_summary(lines):
     g = lines.groupby('Supplier').agg(
         Invoices=('Inv.No', 'nunique'), Lines=('Product', 'count'),
         Total_Invoice_Value=('Item Total', 'sum'),
         Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'), Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'),
         Embedded_Profit=('Embedded_Profit', 'sum'), Months_Active=('Source_Month', 'nunique')).reset_index()
-    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     return g.sort_values('Embedded_Profit', ascending=False).reset_index(drop=True)
 
 
@@ -996,18 +1004,22 @@ def build_distributor_month(lines):
     g = lines.groupby(['Supplier', 'Source_Month']).agg(
         Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
         Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
-    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     supplier_order = lines.groupby('Supplier')['Embedded_Profit'].sum().sort_values(ascending=False).index.tolist()
     g['Supplier'] = pd.Categorical(g['Supplier'], categories=supplier_order, ordered=True)
     return g.sort_values(['Supplier', 'Source_Month']).reset_index(drop=True), supplier_order
 
 
 def build_distributor_per_invoice(lines):
-    g = lines.groupby(['Inv.No', 'Supplier']).agg(
-        Date=('Date', 'first'), Source_Month=('Source_Month', 'first'), Lines=('Product', 'count'),
+    # Source_Month is part of the key, not a 'first' pick: a supplier can reuse
+    # the same invoice number in a different month (e.g. an annual numbering
+    # reset), and keying on (Inv.No, Supplier) alone would silently merge those
+    # into one row - summed profit, dated to whichever month happened to sort first.
+    g = lines.groupby(['Inv.No', 'Supplier', 'Source_Month']).agg(
+        Date=('Date', 'first'), Lines=('Product', 'count'),
         Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
         Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
-    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     return g.sort_values('Embedded_Profit', ascending=False).reset_index(drop=True)
 
 
@@ -1015,7 +1027,7 @@ def build_distributor_top_products(lines, supplier_order, top_n=TOP_N_PRODUCTS_P
     g = lines.groupby(['Supplier', 'Product']).agg(
         Units_Received=('Units_Received', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
         Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
-    g['Margin_Pct'] = np.where(g['Max_Sell_Pretax'] > 0, (g['Embedded_Profit'] / g['Max_Sell_Pretax'] * 100).round(1), 0)
+    g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     parts = [g[g['Supplier'] == s].sort_values('Embedded_Profit', ascending=False).head(top_n) for s in supplier_order]
     return pd.concat(parts, ignore_index=True) if parts else g.iloc[0:0]
 
