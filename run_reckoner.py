@@ -116,7 +116,7 @@ def extract_branch(inv_no):
 MOBILE_CANDIDATES = ['Mobile Number', 'Mobile No', 'Mobile', 'Phone Number', 'Phone', 'Patient Mobile', 'Contact Number']
 TIMESTAMP_CANDIDATES = ['Time Stamp', 'Timestamp', 'Time', 'Bill Time']
 BILLED_BY_CANDIDATES = ['Billed By', 'Billed by', 'Biller', 'Cashier', 'Bill By']
-GIVEN_BY_CANDIDATES = ['Item Given By', 'Given By', 'Dispensed By', 'Issued By']
+GIVEN_BY_CANDIDATES = ['Item Given By', 'Given By', 'Given by', 'Dispensed By', 'Issued By']
 CREATED_BY_CANDIDATES = ['Created By', 'Created by', 'Entry By', 'Entered By']
 
 

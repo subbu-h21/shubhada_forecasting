@@ -235,6 +235,7 @@
       <button class="subtab" data-stocksub="under">Under-Purchased</button>
       <button class="subtab" data-stocksub="other">Other</button>
     </div>
+    <div class="stat-grid" id="stock-total" style="margin-bottom:14px"></div>
     <div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input type="text" id="search-stock" placeholder="Search product…">
@@ -683,27 +684,40 @@ const STOCK_GROUPS = {
     statuses: ['Over-purchased'],
     sort: (a, b) => b.value_impact - a.value_impact,
     label: 'Excess value',
+    color: 'var(--danger)',
   },
   dead: {
     statuses: ['Purchased, never sold (dead stock)'],
     sort: (a, b) => b.value_impact - a.value_impact,
     label: 'Value tied up',
+    color: 'var(--danger)',
   },
   under: {
     statuses: ['Under-purchased'],
     sort: (a, b) => a.value_impact - b.value_impact,
     label: 'Shortfall value',
+    color: 'var(--warn)',
   },
   other: {
     statuses: ['Balanced', 'Sold, never purchased (old stock)', 'No activity'],
     sort: (a, b) => Math.abs(b.value_impact) - Math.abs(a.value_impact),
     label: 'Value impact',
+    color: 'var(--ink-soft)',
   },
 };
 
 function buildStock() {
   const grp = STOCK_GROUPS[currentStockSub];
   const data = DATA.over_under.filter(r => grp.statuses.includes(r.status)).sort(grp.sort);
+
+  // Total always reflects every product in this tab, regardless of the search box.
+  const total = data.reduce((sum, r) => sum + Math.abs(r.value_impact), 0);
+  document.getElementById('stock-total').innerHTML = `
+    <div class="stat-card" style="--stripe:${grp.color};grid-column:1/-1">
+      <div class="n">${money(total)}</div>
+      <div class="l">Total ${grp.label.toLowerCase()} — ${fmt(data.length)} products</div>
+    </div>`;
+
   setupSearch('search-stock', 'list-stock', 'rc-stock', data,
     (r, q) => r.Product.toLowerCase().includes(q),
     r => {
