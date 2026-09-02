@@ -421,6 +421,14 @@ const PING_THROTTLE_MS = 30 * 1000;
 let inactivityTimer = null;
 let lastPingAt = 0;
 
+// A file upload or a forced recalculate is authorized once, when it starts -
+// if it's still running when the 5-minute mark hits, it finishes and
+// succeeds server-side regardless, but yanking the screen to the login page
+// mid-request buries that outcome with no confirmation. Defer the actual
+// logout until every such request has settled, then show what happened.
+let pendingCriticalRequests = 0;
+let logoutQueued = false;
+
 function getToken() { return sessionStorage.getItem(SESSION_TOKEN_KEY); }
 
 async function authFetch(url, opts) {
@@ -452,10 +460,33 @@ function showApp() {
 
 function resetInactivityTimer() {
   clearTimeout(inactivityTimer);
-  inactivityTimer = setTimeout(() => {
-    authFetch('/api/logout', { method: 'POST' }).catch(() => {});
-    showLoginScreen('Logged out after 5 minutes of inactivity.');
-  }, INACTIVITY_MS);
+  logoutQueued = false;  // fresh activity cancels any logout that was waiting on a request
+  inactivityTimer = setTimeout(handleInactivityTimeout, INACTIVITY_MS);
+}
+
+function handleInactivityTimeout() {
+  if (pendingCriticalRequests > 0) {
+    logoutQueued = true;
+    return;
+  }
+  authFetch('/api/logout', { method: 'POST' }).catch(() => {});
+  showLoginScreen('Logged out after 5 minutes of inactivity.');
+}
+
+// Wrap an upload/recalculate fetch so a queued logout waits for it to finish
+// and then reports what happened, instead of silently swallowing the result.
+async function criticalRequest(fn, describeResult) {
+  pendingCriticalRequests++;
+  try {
+    return await fn();
+  } finally {
+    pendingCriticalRequests--;
+    if (pendingCriticalRequests === 0 && logoutQueued) {
+      logoutQueued = false;
+      authFetch('/api/logout', { method: 'POST' }).catch(() => {});
+      showLoginScreen(`${describeResult()} Logged out after 5 minutes of inactivity.`);
+    }
+  }
 }
 
 function onUserActivity() {
@@ -515,18 +546,28 @@ async function loadData(force) {
   document.getElementById('home-loading').style.display = 'block';
   document.getElementById('home-content').style.display = 'none';
   document.getElementById('home-loading').textContent = force ? 'Recalculating…' : 'Loading your data…';
-  try {
-    const res = await authFetch('/api/data' + (force ? '?refresh=1' : ''));
-    if (!res.ok) {
-      const err = await res.json();
-      document.getElementById('home-loading').textContent = err.error || 'No data yet.';
-      return;
+  let outcome = 'Recalculation finished.';
+  const fetchOnce = async () => {
+    try {
+      const res = await authFetch('/api/data' + (force ? '?refresh=1' : ''));
+      if (!res.ok) {
+        const err = await res.json();
+        document.getElementById('home-loading').textContent = err.error || 'No data yet.';
+        outcome = 'Recalculation failed.';
+        return;
+      }
+      DATA = await res.json();
+      render();
+    } catch (e) {
+      document.getElementById('home-loading').textContent = 'Could not reach the server. Check the PC is on and you\'re on the same WiFi.';
+      outcome = 'Recalculation failed.';
     }
-    DATA = await res.json();
-    render();
-  } catch (e) {
-    document.getElementById('home-loading').textContent = 'Could not reach the server. Check the PC is on and you\'re on the same WiFi.';
-  }
+  };
+  // Only the forced (manual "Recalculate now") path is slow enough to risk
+  // outlasting the inactivity timer - the plain cached load is quick and
+  // doesn't need the same protection.
+  if (force) await criticalRequest(fetchOnce, () => outcome);
+  else await fetchOnce();
 }
 
 function render() {
@@ -1416,14 +1457,21 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   for (const f of files) fd.append('files', f);
   const log = document.getElementById('upload-log');
   log.textContent = 'Uploading…';
-  try {
-    const res = await authFetch('/api/upload', { method: 'POST', body: fd });
-    const out = await res.json();
-    log.textContent = (out.saved ? `Saved: ${out.saved.join(', ')}\n\n` : '') + (out.log || out.error || '');
-    loadData();
-  } catch (err) {
-    log.textContent = 'Upload failed: ' + err;
-  }
+  let outcome = 'Your upload finished.';
+  await criticalRequest(async () => {
+    try {
+      const res = await authFetch('/api/upload', { method: 'POST', body: fd });
+      const out = await res.json();
+      log.textContent = (out.saved ? `Saved: ${out.saved.join(', ')}\n\n` : '') + (out.log || out.error || '');
+      outcome = out.saved && out.saved.length
+        ? `Your upload finished (${out.saved.length} file${out.saved.length > 1 ? 's' : ''} saved).`
+        : 'Your upload finished, but no files were saved.';
+      loadData();
+    } catch (err) {
+      log.textContent = 'Upload failed: ' + err;
+      outcome = 'Your upload failed.';
+    }
+  }, () => outcome);
 });
 
 if (getToken()) {
