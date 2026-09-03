@@ -96,7 +96,7 @@ PURCH_SIGNATURE = {'Supplier', 'Invoice Amount', 'Product', 'Qty'}
 BRANCH_MAP = {
     '2627WS': 'Shivaji Chowk',
     '2627WH': 'Hospet Road',
-    '2627WB': 'Herur',
+    '2627WB': 'B2B / Wholesale',  # not a retail branch - wholesale bills, quantities in strips
 }
 BRANCH_PREFIX_RE = re.compile(r'^(\d+[A-Za-z]+)')
 
@@ -107,6 +107,34 @@ def extract_branch(inv_no):
         return 'Unknown branch'
     code = m.group(1).upper()
     return BRANCH_MAP.get(code, f'Unknown branch ({code})')
+
+
+# Bill-series codes whose SALE Qty is recorded in STRIPS (packs), not in the
+# individual units (tablets/ml) the retail series use. These are the B2B /
+# wholesale bills - the 'WB' series. Retail bills (WS = Shivaji Chowk,
+# WH = Hospet Road) record Qty in individual units. Verified from the data:
+# on WB lines the price per Qty-unit tracks the per-PACK MRP, on WS/WH lines it
+# tracks the per-TABLET MRP (MRP / Factor). Add codes here if new B2B series
+# appear.
+B2B_STRIP_CODES = {'2627WB'}
+
+
+def normalize_sale_units(sales):
+    """Return sales with B2B (strip-billed) rows converted to individual units,
+    so every downstream calc - all of which assume Sale Qty is in individual
+    units - is correct for the B2B channel too. Non-destructive: works on a
+    copy and never rewrites the stored master, so it's safe to apply on every
+    read (idempotent as long as it's fed raw master data)."""
+    if sales is None or sales.empty or 'Inv.No' not in sales.columns:
+        return sales
+    s = sales.copy()
+    code = s['Inv.No'].astype(str).str.extract(BRANCH_PREFIX_RE)[0].str.upper()
+    is_b2b = code.isin(B2B_STRIP_CODES)
+    if is_b2b.any():
+        factor = pd.to_numeric(s['Factor'], errors='coerce').replace(0, 1).fillna(1)
+        qty = pd.to_numeric(s['Qty'], errors='coerce').fillna(0)
+        s.loc[is_b2b, 'Qty'] = qty[is_b2b] * factor[is_b2b]
+    return s
 
 
 # Columns not present in any export yet (as of building this) - employee and
@@ -288,6 +316,7 @@ def ingest():
 
     sales = pd.read_csv(SALES_MASTER) if SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(PURCH_MASTER) if PURCH_MASTER.exists() else pd.DataFrame()
+    sales = normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
     return sales, purch
 
 
@@ -1033,6 +1062,77 @@ def build_distributor_top_products(lines, supplier_order, top_n=TOP_N_PRODUCTS_P
 
 
 # ---------------------------------------------------------------------------
+# Data-quality guard: sale lines whose Qty looks like it was entered in STRIPS
+# instead of individual tablets/units.
+#
+# The whole tool assumes Sale Qty is in individual units (see the Factor notes
+# above). A tablet cannot sell above its own per-tablet MRP (MRP / Factor), so
+# if a line's pre-tax price per sold unit comes out several times higher than
+# MRP / Factor, that Qty was almost certainly keyed in strips (or the Factor is
+# wrong). Left uncaught, those lines charge only a few tablets' cost against a
+# whole strip's revenue - inflating that product's profit/margin and making it
+# look over-purchased. This ONLY WARNS; it never edits the data, because the
+# correct fix is at data entry, and silently rewriting real financials could
+# hide a genuine mistake or introduce a new one.
+# ---------------------------------------------------------------------------
+UNIT_PRICE_MRP_MULTIPLE = 3.0  # price/unit this many x above per-tablet MRP => suspicious
+
+
+def detect_sale_unit_inconsistencies(sales, threshold=UNIT_PRICE_MRP_MULTIPLE):
+    """Returns (flagged, valid): the suspicious sale lines and the full set of
+    lines that could be checked (valid MRP, Factor>1, Qty>0, Item Total>0)."""
+    s = sales.copy()
+    for col in ('Qty', 'MRP', 'Factor', 'Item Total', 'Tax Rate'):
+        if col in s.columns:
+            s[col] = pd.to_numeric(s[col], errors='coerce')
+    valid = s[(s['Qty'] > 0) & (s['MRP'] > 0) & (s['Factor'] > 1) & (s['Item Total'] > 0)].copy()
+    if valid.empty:
+        return valid, valid
+    tax = valid['Tax Rate'].fillna(0) if 'Tax Rate' in valid.columns else 0
+    valid['Unit_Price'] = (valid['Item Total'] / (1 + tax / 100)) / valid['Qty']
+    valid['MRP_Per_Unit'] = valid['MRP'] / valid['Factor']
+    valid['Price_Vs_MRP'] = (valid['Unit_Price'] / valid['MRP_Per_Unit']).round(1)
+    flagged = valid[valid['Price_Vs_MRP'] > threshold].sort_values('Item Total', ascending=False)
+    return flagged, valid
+
+
+def warn_sale_unit_inconsistencies(sales, threshold=UNIT_PRICE_MRP_MULTIPLE):
+    """Print a console warning if any sale lines look strip-priced. Returns the
+    flagged DataFrame (empty if none) so callers can reuse it."""
+    flagged, valid = detect_sale_unit_inconsistencies(sales, threshold)
+    if len(flagged) == 0:
+        return flagged
+    total_rev = pd.to_numeric(sales['Item Total'], errors='coerce').sum()
+    flag_rev = flagged['Item Total'].sum()
+    valid_lines = valid.groupby('Product').size()
+    per_prod = flagged.groupby('Product').agg(flag_lines=('Product', 'size'), value=('Item Total', 'sum'))
+    per_prod['total_lines'] = valid_lines.reindex(per_prod.index)
+    per_prod['share'] = per_prod['flag_lines'] / per_prod['total_lines']
+    systematic = per_prod[(per_prod['share'] >= 0.8) & (per_prod['total_lines'] >= 5)]
+
+    bar = '!' * 66
+    print()
+    print(bar)
+    print('DATA WARNING - sale lines where Qty looks like STRIPS, not tablets')
+    print(bar)
+    print(f'  {len(flagged):,} sale line(s) across {flagged["Product"].nunique():,} product(s) charge a price')
+    print(f'  above {threshold:g}x the per-tablet MRP (MRP / Factor) - not possible if Qty')
+    print(f'  were really in tablets, so Qty was likely entered in strips (or the')
+    print(f'  Factor is wrong).')
+    print(f'  Value on these lines: Rs {flag_rev:,.0f} ({flag_rev / total_rev * 100:.1f}% of all sales).')
+    print(f'  Effect: these products read too HIGH on profit/margin and can look')
+    print(f'  over-purchased. This only warns - fix Qty (or Factor) at data entry.')
+    if len(systematic):
+        print(f'  {len(systematic)} product(s) are affected on 80%+ of their lines (systematic):')
+        top = systematic.sort_values('value', ascending=False).head(15)
+        for prod, row in top.iterrows():
+            print(f'    - {prod}: {int(row["flag_lines"])}/{int(row["total_lines"])} lines, Rs {row["value"]:,.0f}')
+    print(bar)
+    print()
+    return flagged
+
+
+# ---------------------------------------------------------------------------
 # Excel report builder
 # ---------------------------------------------------------------------------
 FONT = 'Arial'
@@ -1666,6 +1766,11 @@ def main():
     print(f'History months: {sorted(sales["Source_Month"].unique())}')
     print(f'Latest month analyzed for issues: {latest_month}')
     print(f'Forecasting: {target_month}')
+
+    # Data-quality guard: warn (do not edit) on sale lines whose Qty looks like
+    # it was entered in strips rather than tablets - these silently inflate the
+    # affected products' profit/margin. Printed last so it's the most visible.
+    warn_sale_unit_inconsistencies(sales)
 
 
 if __name__ == '__main__':

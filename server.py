@@ -166,6 +166,7 @@ def df_records(df, limit=None):
 def compute_all():
     sales = pd.read_csv(rk.SALES_MASTER) if rk.SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(rk.PURCH_MASTER) if rk.PURCH_MASTER.exists() else pd.DataFrame()
+    sales = rk.normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
     if sales.empty or purch.empty:
         return None
 
@@ -352,6 +353,7 @@ def api_product():
 
     sales = pd.read_csv(rk.SALES_MASTER) if rk.SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(rk.PURCH_MASTER) if rk.PURCH_MASTER.exists() else pd.DataFrame()
+    sales = rk.normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
 
     s = sales[sales['Product'] == name].copy()
     p = purch[purch['Product'] == name].copy()
