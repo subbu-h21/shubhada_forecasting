@@ -235,6 +235,7 @@
   <div>
     <h1>Ready Reckoner</h1>
     <div class="sub" id="header-sub">Loading&hellip;</div>
+    <div class="sub" id="header-updated"></div>
   </div>
   <div style="display:flex;gap:6px">
     <button class="refresh-btn" id="refresh-btn">Refresh</button>
@@ -291,6 +292,7 @@
 
   <!-- PROFIT -->
   <div class="view" id="view-profit">
+    <div id="channel-profit" style="margin-bottom:16px"></div>
     <div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input type="text" id="search-profit" placeholder="Search product…">
@@ -474,16 +476,29 @@ function resetInactivityTimer() {
   inactivityTimer = setTimeout(handleInactivityTimeout, INACTIVITY_MS);
 }
 
-function doLogout(message) {
-  authFetch('/api/logout', { method: 'POST' }).catch(() => {});
+function doLogout(message, options) {
+  options = options || {};
+  // Skipped only when the inactivity timer fires mid-upload (see below) - an
+  // explicit /api/logout revokes the session on the server immediately, with
+  // no grace period for another in-flight request already using that same
+  // token. Sending it there raced the pending upload's own request and could
+  // 401 it right as the timer fired. A manual "Logout" click always sends it
+  // - that's a deliberate action, not an auto-timeout.
+  if (!options.skipServerLogout) {
+    authFetch('/api/logout', { method: 'POST' }).catch(() => {});
+  }
   showLoginScreen(message);
 }
 
 function handleInactivityTimeout() {
   if (pendingCriticalRequests > 0) {
-    // Lock on schedule regardless - only the follow-up message about what
-    // the still-running request did waits for it to actually finish.
-    doLogout(`${INACTIVITY_LOGOUT_MSG} Finishing an in-progress action — the result will appear here shortly.`);
+    // Lock the UI on schedule regardless, but let the server-side session
+    // expire on its own sliding-window timeout instead of revoking it here -
+    // that's what actually lets the still-running request finish and succeed
+    // server-side. The follow-up message about what it did waits for it to
+    // settle, via criticalRequest() below.
+    doLogout(`${INACTIVITY_LOGOUT_MSG} Finishing an in-progress action — the result will appear here shortly.`,
+              { skipServerLogout: true });
     return;
   }
   doLogout(INACTIVITY_LOGOUT_MSG);
@@ -562,6 +577,20 @@ function fmt(n) { if (n === null || n === undefined || isNaN(n)) return '—'; r
 function money(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return '₹' + Number(n).toLocaleString('en-IN', {maximumFractionDigits: 0}); }
 function pct(n) { if (n === null || n === undefined || isNaN(n)) return '—'; return Number(n).toFixed(1) + '%'; }
 
+// So staleness is something she can SEE, not something the system just has
+// to get right invisibly - computed_at already came from the server on
+// every /api/data response, it just used to be thrown away unread.
+function timeAgo(unixSeconds) {
+  if (!unixSeconds) return null;
+  const mins = Math.max(0, Math.round((Date.now() / 1000 - unixSeconds) / 60));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days > 1 ? 's' : ''} ago`;
+}
+
 async function loadData(force) {
   document.getElementById('home-loading').style.display = 'block';
   document.getElementById('home-content').style.display = 'none';
@@ -595,6 +624,12 @@ function render() {
   const s = DATA.summary;
   document.getElementById('header-sub').textContent =
     `History: ${s.months.join(', ')} · Forecasting ${s.target_month}`;
+
+  const updatedEl = document.getElementById('header-updated');
+  const ago = timeAgo(DATA.computed_at);
+  const hoursOld = DATA.computed_at ? (Date.now() / 1000 - DATA.computed_at) / 3600 : 0;
+  updatedEl.textContent = ago ? `Updated ${ago}` : '';
+  updatedEl.style.color = hoursOld > 24 ? 'var(--warn)' : 'var(--ink-soft)';
 
   const stats = [
     ['var(--accent)', fmt(s.predicted_value) === '—' ? '—' : money(s.predicted_value), `Predicted sales, ${s.target_month}`],
@@ -741,9 +776,9 @@ function buildPeople() {
 
 function employeeCard(color, name, metrics) {
   return `<div class="card" style="--card-stripe:${color}">
-    <div class="row1"><div class="name">${name}</div></div>
+    <div class="row1"><div class="name">${escHtml(name)}</div></div>
     <div class="metrics">
-      ${metrics.map(([k, v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}
+      ${metrics.map(([k, v]) => `<div class="metric"><div class="k">${escHtml(k)}</div><div class="v">${v}</div></div>`).join('')}
     </div></div>`;
 }
 
@@ -899,7 +934,7 @@ function buildForecast() {
     r => {
       const [c, bg] = trendColor(r.trend);
       return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
-        <div class="row1"><div class="name">${r.Product}</div>
+        <div class="row1"><div class="name">${escHtml(r.Product)}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
         <div class="metrics">
           <div class="metric"><div class="k">Predicted Qty (strips)</div><div class="v">${fmt(r.qty)}</div></div>
@@ -928,7 +963,7 @@ const STOCK_GROUPS = {
     color: 'var(--warn)',
   },
   other: {
-    statuses: ['Balanced', 'Sold, never purchased (old stock)', 'No activity'],
+    statuses: ['Balanced', 'Sold, never purchased (old stock)', 'No activity', 'Returns exceed sales'],
     sort: (a, b) => Math.abs(b.value_impact) - Math.abs(a.value_impact),
     label: 'Value impact',
     color: 'var(--ink-soft)',
@@ -952,7 +987,7 @@ function buildStock() {
     r => {
       const [c, bg] = statusColor(r.status);
       return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
-        <div class="row1"><div class="name">${r.Product}</div>
+        <div class="row1"><div class="name">${escHtml(r.Product)}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.status}</span></div>
         <div class="metrics">
           <div class="metric"><div class="k">Purchased (strips)</div><div class="v">${fmt(r.purch_qty)}</div></div>
@@ -962,14 +997,32 @@ function buildStock() {
     }, 'No matching products.');
 }
 
+function renderChannelProfit() {
+  const el = document.getElementById('channel-profit');
+  const rows = DATA.channel_profit;
+  if (!rows || !rows.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="section-title" style="margin-top:0">Profit by channel</div><div class="card-list">' +
+    rows.map(r => {
+      const c = marginColor(r.margin_pct), bg = marginBg(r.margin_pct);
+      return `<div class="card" style="--card-stripe:${c}">
+        <div class="row1"><div class="name">${escHtml(r.channel)}<div class="meta">${escHtml(r.type)} · ${fmt(r.invoices)} bills</div></div>
+          <span class="pill" style="color:${c};background:${bg}">${pct(r.margin_pct)}</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Revenue (pre-tax)</div><div class="v">${money(r.revenue)}</div></div>
+          <div class="metric"><div class="k">Gross Profit</div><div class="v">${money(r.gross_profit)}</div></div>
+        </div></div>`;
+    }).join('') + '</div>';
+}
+
 function buildProfit() {
+  renderChannelProfit();
   const data = DATA.profit;
   setupSearch('search-profit', 'list-profit', 'rc-profit', data,
     (r, q) => r.Product.toLowerCase().includes(q),
     r => {
       const c = marginColor(r.margin_pct), bg = marginBg(r.margin_pct);
       return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
-        <div class="row1"><div class="name">${r.Product}</div>
+        <div class="row1"><div class="name">${escHtml(r.Product)}</div>
           <span class="pill" style="color:${c};background:${bg}">${pct(r.margin_pct)}</span></div>
         <div class="metrics">
           <div class="metric"><div class="k">Qty Sold (strips)</div><div class="v">${fmt(r.qty_sold)}</div></div>
@@ -984,7 +1037,7 @@ const issueRenderers = {
     data: () => DATA.ptr_high,
     filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
     render: r => `<div class="card" style="--card-stripe:var(--danger)">
-      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+      <div class="row1"><div class="name">${escHtml(r.Product)}<div class="meta">${escHtml(r.Supplier)} · ${r.Date}</div></div>
         <span class="pill" style="color:var(--danger);background:var(--danger-soft)">+${money(r.excess)}/unit</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">MRP</div><div class="v">${money(r.MRP)}</div></div>
@@ -997,7 +1050,7 @@ const issueRenderers = {
     data: () => DATA.mrp_variance,
     filter: (r, q) => r.Product.toLowerCase().includes(q),
     render: r => `<div class="card" style="--card-stripe:var(--warn)">
-      <div class="row1"><div class="name">${r.Product}</div>
+      <div class="row1"><div class="name">${escHtml(r.Product)}</div>
         <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${Number(r.ratio).toFixed(1)}×</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">Lowest MRP</div><div class="v">${money(r.lo)}</div></div>
@@ -1010,7 +1063,7 @@ const issueRenderers = {
     data: () => DATA.scheme_shortfall,
     filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
     render: r => `<div class="card" style="--card-stripe:var(--warn)">
-      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+      <div class="row1"><div class="name">${escHtml(r.Product)}<div class="meta">${escHtml(r.Supplier)} · ${r.Date}</div></div>
         <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${(r.free_ratio*100).toFixed(0)}% got</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">Usual free %</div><div class="v">${(r.typical_ratio*100).toFixed(0)}%</div></div>
@@ -1023,7 +1076,7 @@ const issueRenderers = {
     data: () => DATA.discount_shortfall,
     filter: (r, q) => r.Product.toLowerCase().includes(q) || r.Supplier.toLowerCase().includes(q),
     render: r => `<div class="card" style="--card-stripe:var(--warn)">
-      <div class="row1"><div class="name">${r.Product}<div class="meta">${r.Supplier} · ${r.Date}</div></div>
+      <div class="row1"><div class="name">${escHtml(r.Product)}<div class="meta">${escHtml(r.Supplier)} · ${r.Date}</div></div>
         <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${money(r.value_lost)} lost</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">Disc % received</div><div class="v">${pct(r.disc_pct)}</div></div>
@@ -1043,7 +1096,7 @@ function buildBranchTabs() {
   const branches = DATA.branch_summary.map(b => b.Branch);
   if (!currentBranch || !branches.includes(currentBranch)) currentBranch = branches[0];
   const tabs = document.getElementById('branch-tabs');
-  tabs.innerHTML = branches.map(b => `<button class="subtab${b === currentBranch ? ' active' : ''}" data-branch="${b}">${b}</button>`).join('');
+  tabs.innerHTML = branches.map(b => `<button class="subtab${b === currentBranch ? ' active' : ''}" data-branch="${escAttr(b)}">${escHtml(b)}</button>`).join('');
   tabs.querySelectorAll('.subtab').forEach(btn => {
     btn.addEventListener('click', () => {
       currentBranch = btn.dataset.branch;
@@ -1209,7 +1262,7 @@ function buildBranch() {
     r => {
       const [c, bg] = trendColor(r.trend);
       return `<div class="card" style="--card-stripe:${c};cursor:pointer" data-lookup="${escAttr(r.Product)}">
-        <div class="row1"><div class="name">${r.Product}</div>
+        <div class="row1"><div class="name">${escHtml(r.Product)}</div>
           <span class="pill" style="color:${c};background:${bg}">${r.trend}</span></div>
         <div class="metrics">
           <div class="metric"><div class="k">Predicted Qty (strips)</div><div class="v">${fmt(r.qty)}</div></div>
@@ -1219,6 +1272,12 @@ function buildBranch() {
 }
 
 function escAttr(s) { return String(s).replace(/"/g, '&quot;'); }
+// Free-text fields (product/patient/supplier/branch names) come from manual
+// pharmacy POS entry and are rendered as innerHTML text content in many
+// places below - escape before interpolating so a name that happens to
+// contain <, >, &, or a quote can't break the card markup or be read as tags.
+const ESC_HTML_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escHtml(s) { return String(s).replace(/[&<>"']/g, c => ESC_HTML_MAP[c]); }
 
 // Reusable tap/click-to-reveal-value for hand-rolled SVG charts. `points` is
 // an array of {x, y, label} in the SVG's own viewBox units (y optional - used
@@ -1407,7 +1466,7 @@ function renderProductDetail(d) {
   const purchList = document.getElementById('lookup-purchases');
   purchList.innerHTML = d.purchases.length ? d.purchases.slice(0, 150).map(r => `
     <div class="card" style="--card-stripe:var(--warn)">
-      <div class="row1"><div class="name">${r.Supplier}<div class="meta">${r.Date} · Inv ${r['Inv.No']}</div></div>
+      <div class="row1"><div class="name">${escHtml(r.Supplier)}<div class="meta">${r.Date} · Inv ${escHtml(r['Inv.No'])}</div></div>
         <span class="pill" style="color:var(--warn);background:var(--warn-soft)">${money(r.item_total)}</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">Qty (packs)</div><div class="v">${fmt(r.Qty)}</div></div>
@@ -1420,7 +1479,7 @@ function renderProductDetail(d) {
   const salesList = document.getElementById('lookup-sales');
   salesList.innerHTML = d.sales.length ? d.sales.slice(0, 150).map(r => `
     <div class="card" style="--card-stripe:var(--accent)">
-      <div class="row1"><div class="name">${r.Patient || '(no name)'}<div class="meta">${r.Date} · Inv ${r['Inv.No']} · ${r.Branch}</div></div>
+      <div class="row1"><div class="name">${r.Patient ? escHtml(r.Patient) : '(no name)'}<div class="meta">${r.Date} · Inv ${escHtml(r['Inv.No'])} · ${escHtml(r.Branch)}</div></div>
         <span class="pill" style="color:var(--accent);background:var(--accent-soft)">${money(r.item_total)}</span></div>
       <div class="metrics">
         <div class="metric"><div class="k">Qty (strips)</div><div class="v">${fmt(r.Qty)}</div></div>

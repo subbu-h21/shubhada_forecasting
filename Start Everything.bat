@@ -20,7 +20,7 @@ if "%FOUND%"=="1" (
 echo.
 
 echo [2/3] Refreshing data and reports (run_reckoner.py)...
-python run_reckoner.py
+"%~dp0venv\Scripts\python.exe" run_reckoner.py
 if errorlevel 1 (
     echo.
     echo       Something went wrong above - check the message before continuing.
@@ -32,6 +32,6 @@ echo.
 echo [3/3] Starting the mobile server...
 echo ============================================================
 echo.
-python server.py
+"%~dp0venv\Scripts\python.exe" server.py
 
 pause

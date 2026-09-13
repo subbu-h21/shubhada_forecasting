@@ -2,5 +2,5 @@
 cd /d "%~dp0"
 echo Starting Pharmacy Ready Reckoner server...
 echo.
-python server.py
+"%~dp0venv\Scripts\python.exe" server.py
 pause

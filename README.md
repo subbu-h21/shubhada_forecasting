@@ -86,6 +86,32 @@ For access away from your home network, this is designed to be used over
 [Tailscale](https://tailscale.com/) (a private device-to-device tunnel) —
 **not** by exposing the port to the public internet.
 
+## Backups & recovery
+
+Every time `run_reckoner.py` (directly, via a `.bat` file, or through a mobile
+upload) actually ingests something new, it copies `data/processed/`,
+`holidays.json`, and `server_config.json` into a timestamped folder under
+`backups/`, keeping the most recent 8. This is a **local** safety net against
+a bad ingest, an accidental delete, or a corrupted file — it lives on the
+same PC, so it does **not** protect against a failed hard drive. For real
+disaster recovery, periodically copy the `backups/` folder (or `data/processed/`
+directly) to a second location — a synced OneDrive/Google Drive folder is
+enough.
+
+**If `data/processed/` is ever lost or corrupted anyway:** the original
+`.xlsx` files in `data/raw/` are kept indefinitely, so the full history can be
+rebuilt from scratch:
+1. Stop the mobile server if it's running.
+2. Move (don't delete) the broken `data/processed/` folder aside, in case
+   anything in it is still useful.
+3. Run `python run_reckoner.py` — it re-ingests every file in `data/raw/`
+   from zero and rebuilds `sales_master.csv`, `purchase_master.csv`, and
+   `manifest.json` from them.
+4. Compare the new report's `History months` against what you expect. If a
+   month is missing, its file may have been removed from `data/raw/` at some
+   point — check the `backups/` folders for an older `data/raw/`-equivalent,
+   or the original export if it's saved elsewhere.
+
 ## Security notes for anyone cloning this repo
 
 This repo intentionally does **not** include:
@@ -94,6 +120,7 @@ This repo intentionally does **not** include:
 - `data/raw/` and `data/processed/` — the actual Sale/Purchase data. This is
   real patient and business financial data and must never be committed.
 - `reports/**/*.xlsx` — generated reports contain real revenue/profit figures.
+- `backups/` — copies of the same real data (see Backups & recovery, above).
 
 If you fork or clone this to reuse the *tool* (not the data), you start with
 empty `data/raw/` and `data/processed/` folders and feed it your own files.

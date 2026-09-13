@@ -12,22 +12,62 @@ Then on your phone (same WiFi as this PC), open:
 """
 import io
 import json
+import logging
 import secrets
 import threading
 import time
+import traceback
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from flask import Flask, request, Response, jsonify
+from werkzeug.exceptions import HTTPException
+from werkzeug.utils import secure_filename
 
 import run_reckoner as rk
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
 
+# --- Logging --------------------------------------------------------------
+# Without this, a crash or a repeated silent error while nobody's watching
+# the console window (overnight, or a minimized/closed terminal) leaves no
+# record anywhere. A small rotating file is enough for a single-PC tool -
+# console output is kept too, for whoever does have the window open.
+LOG_PATH = ROOT / 'server.log'
+logger = logging.getLogger('reckoner_server')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _file_handler = RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding='utf-8')
+    _file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logger.addHandler(_file_handler)
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logger.addHandler(_console_handler)
+
+# Master CSVs may still be in the pre-normalization format (B2B rows stored
+# in strips) from before this fix - migrate once, up front, before anything
+# in this process reads SALES_MASTER directly (compute_all/api_product do).
+rk.ensure_sales_master_normalized()
+
 app = Flask(__name__)
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_error(e):
+    # HTTPException (404 on a typo'd/bot-scanned URL, 405, a 400 from bad
+    # input) is Flask/Werkzeug's own normal control flow, not a bug - it's
+    # also an Exception subclass, so without this check every routine 404
+    # would get logged as a crash (drowning out real ones) and re-served as
+    # a wrong, scarier 500. Let Flask handle its own HTTP errors normally;
+    # only genuine unhandled exceptions reach the logging below.
+    if isinstance(e, HTTPException):
+        return e
+    logger.error('Unhandled error on %s %s:\n%s', request.method, request.path, traceback.format_exc())
+    return jsonify({'error': 'Something went wrong on the server. Check server.log for details.'}), 500
 
 # --- Sessions -----------------------------------------------------------
 # Basic Auth (the old scheme here) has no real logout - once a browser has
@@ -71,16 +111,35 @@ def _drop_session(token):
 # compute_all() takes real time (branch-wise forecast alone runs the
 # per-product forecast 3x). Recomputing it on every page load makes the
 # mobile page feel hung, so cache the result and only recompute when data
-# actually changed (a file was ingested) or the client explicitly asks to.
+# actually changed or the client explicitly asks to.
+#
+# "Changed" isn't only "this server's own upload/holiday handler ran" - the
+# README's own monthly instruction is to run `python run_reckoner.py`
+# directly, which this process has no other way to hear about. Rather than
+# trust every write path to remember to call invalidate_cache() (a mobile
+# upload does; a CLI run started separately never did), the cache checks the
+# master files' own modification time on every request and treats a change
+# there - from ANY source - as a reason to recompute.
 _cache_lock = threading.Lock()
-_cache = {'data': None, 'stamp': None}
+_cache = {'data': None, 'stamp': None, 'source_mtime': None}
+
+
+def _master_files_mtime():
+    paths = [rk.SALES_MASTER, rk.PURCH_MASTER, rk.MANIFEST_PATH]
+    mtimes = [p.stat().st_mtime for p in paths if p.exists()]
+    return max(mtimes) if mtimes else None
 
 
 def get_cached_data(force=False):
     with _cache_lock:
-        if force or _cache['data'] is None:
+        current_mtime = _master_files_mtime()
+        stale = _cache['data'] is not None and current_mtime != _cache['source_mtime']
+        if force or _cache['data'] is None or stale:
+            if stale and not force:
+                logger.info('Master data changed on disk since last compute (e.g. a CLI run_reckoner.py run) - recomputing.')
             _cache['data'] = compute_all()
             _cache['stamp'] = time.time()
+            _cache['source_mtime'] = current_mtime
         return _cache['data'], _cache['stamp']
 
 
@@ -115,7 +174,10 @@ CONFIG = load_or_create_config()
 
 
 def check_auth(username, password):
-    return any(c['username'] == username and c['password'] == password for c in CONFIG['credentials'])
+    # secrets.compare_digest instead of == - a plain string compare leaks
+    # timing information about how many leading characters matched.
+    return any(c['username'] == username and secrets.compare_digest(c['password'], password)
+               for c in CONFIG['credentials'])
 
 
 def requires_auth(f):
@@ -128,13 +190,45 @@ def requires_auth(f):
     return decorated
 
 
+# --- Login throttling ----------------------------------------------------
+# This app is reachable to anyone on the home WiFi / Tailscale tailnet, and
+# had no brute-force protection at all - unlimited login attempts against a
+# default 8-hex-char generated password. A simple per-source-IP counter with
+# a short lockout after repeated failures is enough for a single-pharmacy
+# tool without adding a dependency.
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 60
+
+_login_attempts_lock = threading.Lock()
+_login_attempts = {}  # ip -> {'count': int, 'locked_until': float}
+
+
 @app.route('/api/login', methods=['POST'])
 def api_login():
+    ip = request.remote_addr or 'unknown'
+    now = time.time()
+    with _login_attempts_lock:
+        entry = _login_attempts.get(ip)
+        if entry and entry['locked_until'] > now:
+            wait = int(entry['locked_until'] - now) + 1
+            return jsonify({'error': f'Too many attempts - try again in {wait}s'}), 429
+
     body = request.get_json(force=True, silent=True) or {}
     username, password = body.get('username', ''), body.get('password', '')
     if not check_auth(username, password):
+        with _login_attempts_lock:
+            entry = _login_attempts.setdefault(ip, {'count': 0, 'locked_until': 0})
+            entry['count'] += 1
+            if entry['count'] >= LOGIN_MAX_ATTEMPTS:
+                entry['locked_until'] = time.time() + LOGIN_LOCKOUT_SECONDS
+                entry['count'] = 0
+                logger.warning('Login locked out for %s after %d failed attempts (user "%s")', ip, LOGIN_MAX_ATTEMPTS, username)
         return jsonify({'error': 'Incorrect username or password'}), 401
+
+    with _login_attempts_lock:
+        _login_attempts.pop(ip, None)
     token = _create_session(username)
+    logger.info('Login OK: user "%s" from %s', username, ip)
     return jsonify({'token': token, 'username': username, 'timeout_seconds': SESSION_TIMEOUT_SECONDS})
 
 
@@ -164,9 +258,11 @@ def df_records(df, limit=None):
 
 
 def compute_all():
+    # SALES_MASTER is normalized once, at ingest time - never call
+    # normalize_sale_units() again here, it would double-convert B2B rows.
     sales = pd.read_csv(rk.SALES_MASTER) if rk.SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(rk.PURCH_MASTER) if rk.PURCH_MASTER.exists() else pd.DataFrame()
-    sales = rk.normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
+    purch = rk.ensure_purch_defaults(purch)  # older master CSVs may predate an optional column
     if sales.empty or purch.empty:
         return None
 
@@ -180,6 +276,7 @@ def compute_all():
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
+    channel_profit = rk.build_channel_profit(sales, purch)
     distributor_summary = rk.build_distributor_summary(dist_lines)
     latest_month = all_months[-1]
     ptr_high, mrp_missing, gifts, variance = rk.build_purchase_errors(purch, latest_month)
@@ -275,6 +372,10 @@ def compute_all():
         'distributor_summary': df_records(distributor_summary_out[['Supplier', 'invoices', 'total_invoice_value', 'embedded_profit', 'margin_pct', 'months_active']]),
         'profit': df_records(profit_out[['Product', 'qty_sold', 'revenue', 'gross_profit', 'margin_pct']]),
         'profit_unknown': df_records(profit_unknown.rename(columns={'Qty_Sold_Strips': 'qty_sold', 'Revenue': 'revenue'})),
+        'channel_profit': df_records(channel_profit.rename(columns={
+            'Branch': 'channel', 'Type': 'type', 'Invoices': 'invoices', 'Revenue': 'revenue',
+            'COGS': 'cogs', 'Gross_Profit': 'gross_profit', 'Margin_Pct': 'margin_pct',
+            'Revenue_Cost_Unknown': 'revenue_cost_unknown'})),
         'ptr_high': df_records(ptr_out[['month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'ptr', 'Qty', 'excess']]),
         'mrp_variance': df_records(variance.rename(columns={'min': 'lo', 'max': 'hi', 'count': 'lines', 'ratio': 'ratio'})),
         'scheme_shortfall': df_records(scheme_out[['Date', 'Inv.No', 'Supplier', 'Product', 'qty', 'free_qty', 'free_ratio', 'typical_ratio', 'shortfall']]),
@@ -332,6 +433,7 @@ def api_holidays_post():
         return jsonify({'error': 'invalid date'}), 400
     rk.save_holiday(date_str, name)
     invalidate_cache()
+    logger.info('Holiday %s: %s (%s)', 'set' if name else 'cleared', date_str, name or '')
     return jsonify({'ok': True, 'date': date_str, 'name': name})
 
 
@@ -351,9 +453,11 @@ def api_product():
     if not name:
         return jsonify({'error': 'name is required'}), 400
 
+    # SALES_MASTER is normalized once, at ingest time - never call
+    # normalize_sale_units() again here, it would double-convert B2B rows.
     sales = pd.read_csv(rk.SALES_MASTER) if rk.SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(rk.PURCH_MASTER) if rk.PURCH_MASTER.exists() else pd.DataFrame()
-    sales = rk.normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
+    purch = rk.ensure_purch_defaults(purch)  # older master CSVs may predate an optional column
 
     s = sales[sales['Product'] == name].copy()
     p = purch[purch['Product'] == name].copy()
@@ -437,14 +541,26 @@ def api_upload():
     for f in files:
         if not f.filename.lower().endswith('.xlsx'):
             continue
-        dest = rk.RAW_DIR / f.filename
+        # secure_filename strips path separators and '..' segments - without
+        # it, an uploaded filename is used to build the save path as-is, and
+        # a crafted name could write outside data/raw/.
+        safe_name = secure_filename(f.filename)
+        if not safe_name:
+            continue
+        dest = rk.RAW_DIR / safe_name
         f.save(dest)
-        saved.append(f.filename)
+        saved.append(safe_name)
     log = io.StringIO()
     import contextlib
-    with contextlib.redirect_stdout(log):
-        rk.ingest()
+    try:
+        with contextlib.redirect_stdout(log):
+            rk.ingest()
+    except Exception:
+        logger.error('Ingest failed during upload of %s:\n%s', saved, traceback.format_exc())
+        return jsonify({'saved': saved, 'log': log.getvalue(),
+                         'error': 'The file was saved but could not be processed - see server.log.'}), 500
     invalidate_cache()
+    logger.info('Upload processed: %s', saved)
     return jsonify({'saved': saved, 'log': log.getvalue()})
 
 
@@ -479,5 +595,6 @@ if __name__ == '__main__':
     get_cached_data()
     print('Ready.')
     print()
+    logger.info('Server starting on http://%s:8420', lan_ip)
     from waitress import serve
     serve(app, host='0.0.0.0', port=8420)

@@ -14,6 +14,10 @@ data/processed/*
 # Generated reports also contain real figures (revenue, profit, margins)
 reports/**/*.xlsx
 
+# Local rotating backups of data/processed - same real business data, just
+# copied. Not a substitute for an off-site backup (see README).
+backups/
+
 # --- Logs ---
 server.log
 *.log

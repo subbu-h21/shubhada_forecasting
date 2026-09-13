@@ -13,7 +13,10 @@ Output:
 """
 import hashlib
 import json
+import math
 import re
+import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +35,81 @@ MANIFEST_PATH = PROC_DIR / 'manifest.json'
 SALES_MASTER = PROC_DIR / 'sales_master.csv'
 PURCH_MASTER = PROC_DIR / 'purchase_master.csv'
 HOLIDAYS_PATH = ROOT / 'holidays.json'
+CONFIG_PATH = ROOT / 'server_config.json'
+BACKUPS_DIR = ROOT / 'backups'
+BACKUPS_TO_KEEP = 8
+
+
+def _atomic_write_text(path, text):
+    """Write text to `path` without ever leaving a half-written file behind -
+    write to a temp file first, then rename, which is atomic on the same
+    filesystem (including Windows, via Path.replace/os.replace). Without
+    this, a process killed mid-write (closed terminal, power loss) leaves a
+    truncated file that crashes every future load with no recovery."""
+    tmp = path.with_name(path.name + f'.tmp{time.time_ns()}')
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def _load_json_resilient(path, default):
+    """Load JSON from `path`, tolerating a corrupted file (from a past
+    interrupted write) by moving it aside and starting fresh instead of
+    crashing every run from now on."""
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        corrupt_path = path.with_name(path.name + '.corrupt')
+        print(f"Warning: {path.name} is corrupted (invalid JSON) - ignoring it "
+              f"and starting fresh. The corrupted file was kept as {corrupt_path.name} "
+              f"in case it needs manual recovery.")
+        try:
+            path.replace(corrupt_path)
+        except OSError:
+            pass
+        return default
+
+
+class _FileLock:
+    """Minimal cross-process advisory lock via exclusive file creation, so
+    the mobile server (multi-threaded) and a manually-run `python
+    run_reckoner.py` can't both read-modify-write manifest.json/
+    holidays.json/the master CSVs at the same time and silently lose one
+    side's update. A lock file older than STALE_SECONDS is treated as
+    abandoned (its owner crashed without cleaning up) and reclaimed."""
+    STALE_SECONDS = 60
+    ACQUIRE_TIMEOUT = 15
+
+    def __init__(self, name):
+        self.path = PROC_DIR / f'.{name}.lock'
+
+    def __enter__(self):
+        PROC_DIR.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + self.ACQUIRE_TIMEOUT
+        while True:
+            try:
+                self._fd = open(self.path, 'x')
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.STALE_SECONDS:
+                        self.path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.time() > deadline:
+                    raise TimeoutError(
+                        f'Could not acquire {self.path.name} within {self.ACQUIRE_TIMEOUT}s - '
+                        f'another run may be stuck. Delete {self.path} if you are sure nothing else is running.')
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        self._fd.close()
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def load_holidays():
@@ -40,22 +118,19 @@ def load_holidays():
     calendar festivals (Diwali, Ganesh Chaturthi, Eid, etc.) shift every
     year, so they're deliberately not guessed here; add the confirmed date
     for the specific year yourself."""
-    if not HOLIDAYS_PATH.exists():
-        return {}
-    entries = json.loads(HOLIDAYS_PATH.read_text())
+    entries = _load_json_resilient(HOLIDAYS_PATH, [])
     return {e['date']: e['name'] for e in entries}
 
 
 def save_holiday(date_str, name):
     """Add or update one holiday. Pass name=None to remove that date."""
-    entries = []
-    if HOLIDAYS_PATH.exists():
-        entries = json.loads(HOLIDAYS_PATH.read_text())
-    entries = [e for e in entries if e['date'] != date_str]
-    if name:
-        entries.append({'date': date_str, 'name': name})
-    entries.sort(key=lambda e: e['date'])
-    HOLIDAYS_PATH.write_text(json.dumps(entries, indent=2))
+    with _FileLock('holidays'):
+        entries = _load_json_resilient(HOLIDAYS_PATH, [])
+        entries = [e for e in entries if e['date'] != date_str]
+        if name:
+            entries.append({'date': date_str, 'name': name})
+        entries.sort(key=lambda e: e['date'])
+        _atomic_write_text(HOLIDAYS_PATH, json.dumps(entries, indent=2))
 
 
 def is_nth_weekday_of_month(d, weekday, n):
@@ -93,10 +168,11 @@ PURCH_SIGNATURE = {'Supplier', 'Invoice Amount', 'Product', 'Qty'}
 # next financial year; only the trailing letter reliably identifies the
 # branch. Add new codes here as they show up - unmapped codes are labelled
 # 'Unknown branch (<code>)' rather than dropped, so nothing goes missing.
+WHOLESALE_LABEL = 'B2B / Wholesale'  # not a retail branch - wholesale bills, quantities in strips
 BRANCH_MAP = {
     '2627WS': 'Shivaji Chowk',
     '2627WH': 'Hospet Road',
-    '2627WB': 'B2B / Wholesale',  # not a retail branch - wholesale bills, quantities in strips
+    '2627WB': WHOLESALE_LABEL,
 }
 BRANCH_PREFIX_RE = re.compile(r'^(\d+[A-Za-z]+)')
 
@@ -122,9 +198,14 @@ B2B_STRIP_CODES = {'2627WB'}
 def normalize_sale_units(sales):
     """Return sales with B2B (strip-billed) rows converted to individual units,
     so every downstream calc - all of which assume Sale Qty is in individual
-    units - is correct for the B2B channel too. Non-destructive: works on a
-    copy and never rewrites the stored master, so it's safe to apply on every
-    read (idempotent as long as it's fed raw master data)."""
+    units - is correct for the B2B channel too.
+
+    NOT idempotent - calling this twice on the same rows double-converts them.
+    It is applied exactly once, at ingest time (per-file, before appending to
+    SALES_MASTER, and once as a startup migration for rows already on disk
+    from before that fix - see ensure_sales_master_normalized()). Every
+    reader of SALES_MASTER can therefore trust Qty is already in individual
+    units and must NOT call this again."""
     if sales is None or sales.empty or 'Inv.No' not in sales.columns:
         return sales
     s = sales.copy()
@@ -192,17 +273,15 @@ def file_hash(path):
 
 
 def load_manifest():
-    if MANIFEST_PATH.exists():
-        m = json.loads(MANIFEST_PATH.read_text())
-        m.setdefault('files', {})
-        m.setdefault('chosen', {})
-        return m
-    return {'files': {}, 'chosen': {}}
+    m = _load_json_resilient(MANIFEST_PATH, {'files': {}, 'chosen': {}})
+    m.setdefault('files', {})
+    m.setdefault('chosen', {})
+    return m
 
 
 def save_manifest(m):
     PROC_DIR.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(m, indent=2))
+    _atomic_write_text(MANIFEST_PATH, json.dumps(m, indent=2))
 
 
 def fix_date_column(df, dominant_year, dominant_month):
@@ -231,6 +310,9 @@ def detect_type_and_load(path):
 
     raw_parsed = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     ym_counts = raw_parsed.dt.to_period('M').value_counts()
+    if ym_counts.empty:
+        raise ValueError(f'{path.name}: no usable dates found in the Date column '
+                          f'(blank, unparseable, or an empty file) - check the export.')
     dominant_period = ym_counts.index[0]
     fixed_dates = fix_date_column(df, dominant_period.year, dominant_period.month)
     df['Date'] = fixed_dates
@@ -243,81 +325,211 @@ def detect_type_and_load(path):
     return kind, df, coverage
 
 
-def _remove_file_rows(master_path, filename):
+def _remove_file_rows(master_path, filename, month):
+    """Remove the rows a specific (filename, month) contributed. Scoped to
+    both, not filename alone - a filename that was ever reused for a
+    different month must not take that other month's rows down with it."""
     if not master_path.exists():
         return
     existing = pd.read_csv(master_path)
-    if 'Source_File' in existing.columns and (existing['Source_File'] == filename).any():
-        existing = existing[existing['Source_File'] != filename]
+    if 'Source_File' not in existing.columns:
+        return
+    mask = existing['Source_File'] == filename
+    if 'Source_Month' in existing.columns:
+        mask &= existing['Source_Month'] == month
+    if mask.any():
+        existing = existing[~mask]
         existing.to_csv(master_path, index=False)
 
 
 def _append_rows(master_path, df):
+    """Append df's rows, replacing any existing rows from the same
+    (Source_File, Source_Month) pair - covers both "this exact file was
+    re-ingested" (hash changed, same month) and, defensively, "this filename
+    was reused for a different month" (only that other month's rows are left
+    alone, not silently deleted)."""
+    filename = df['Source_File'].iloc[0]
+    month = df['Source_Month'].iloc[0]
     if master_path.exists():
         existing = pd.read_csv(master_path)
-        existing = existing[existing['Source_File'] != df['Source_File'].iloc[0]]
+        if 'Source_File' in existing.columns:
+            mask = existing['Source_File'] == filename
+            if 'Source_Month' in existing.columns:
+                mask &= existing['Source_Month'] == month
+            existing = existing[~mask]
         combined = pd.concat([existing, df], ignore_index=True)
     else:
         combined = df
     combined.to_csv(master_path, index=False)
 
 
+SALES_NORMALIZED_MARKER = PROC_DIR / '.sales_normalized'
+
+
+def ensure_sales_master_normalized():
+    """One-time migration: SALES_MASTER used to store B2B (WB) rows exactly as
+    exported (in strips), relying on every reader remembering to call
+    normalize_sale_units() before touching Qty. New rows are normalized once,
+    at ingest time, before they're ever written (see ingest() below) - but
+    rows already on disk from before that fix still need converting, exactly
+    once, so the file matches its new contract. Safe to call from anywhere
+    that's about to read SALES_MASTER directly (server.py does, at import
+    time) - a no-op after the first successful run.
+
+    Deliberately tracked by its OWN marker file, not a flag inside
+    manifest.json: manifest.json is designed to recover from corruption by
+    resetting to a fresh default (see load_manifest/_load_json_resilient),
+    and a flag stored there would silently reappear as "not yet migrated"
+    after exactly that recovery - re-running this against already-normalized
+    data and DOUBLE-converting every B2B quantity. A dedicated marker file
+    doesn't share that failure mode."""
+    with _FileLock('ingest'):
+        if SALES_NORMALIZED_MARKER.exists():
+            return
+        if SALES_MASTER.exists():
+            sales = pd.read_csv(SALES_MASTER)
+            sales = normalize_sale_units(sales)
+            sales.to_csv(SALES_MASTER, index=False)
+            print('One-time migration: normalized B2B (WB) sale quantities already in sales_master.csv.')
+        PROC_DIR.mkdir(parents=True, exist_ok=True)
+        SALES_NORMALIZED_MARKER.touch()
+
+
+# Purchase-register columns that PURCH_SIGNATURE doesn't require (so a file
+# can be recognized and ingested without them) but several analyses read
+# unconditionally. Defaulted here so a POS export template that omits one
+# doesn't crash cost/scheme/discount calcs with a KeyError.
+OPTIONAL_PURCH_COLUMNS = {'Disc Amount': 0, 'Free Qty': 0}
+
+
+def ensure_purch_defaults(purch):
+    if purch is None or purch.empty:
+        return purch
+    for col, default in OPTIONAL_PURCH_COLUMNS.items():
+        if col not in purch.columns:
+            purch[col] = default
+    return purch
+
+
+def backup_processed_data():
+    """Copy the permanent history (data/processed - years of sales/purchase
+    records that exist nowhere else) plus holidays.json and
+    server_config.json into a timestamped folder under backups/, keeping the
+    most recent BACKUPS_TO_KEEP. This is a LOCAL safety net against a bad
+    ingest, an accidental delete, or a corrupted file - it lives on the same
+    disk, so it does not protect against a failed drive. For that, this
+    backups/ folder (or data/processed/ itself) still needs copying
+    somewhere else - a synced cloud folder, another drive - on a regular
+    basis. Runs after every ingest that actually changes something; never
+    lets a backup problem fail the ingest itself."""
+    try:
+        if not PROC_DIR.exists():
+            return
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        dest = BACKUPS_DIR / stamp
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(PROC_DIR, dest / 'processed', dirs_exist_ok=True)
+        for extra in (HOLIDAYS_PATH, CONFIG_PATH):
+            if extra.exists():
+                shutil.copy2(extra, dest / extra.name)
+
+        backups = sorted((p for p in BACKUPS_DIR.iterdir() if p.is_dir()), key=lambda p: p.name)
+        for old in backups[:-BACKUPS_TO_KEEP]:
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception as e:
+        # A failed backup should never be the reason a month's data doesn't
+        # get ingested - surface it loudly instead.
+        print(f'Warning: backup failed ({e}) - ingestion still completed normally.')
+
+
 def ingest():
-    manifest = load_manifest()
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    PROC_DIR.mkdir(parents=True, exist_ok=True)
-    master_for = {'sale': SALES_MASTER, 'purchase': PURCH_MASTER}
-    changed = False
+    ensure_sales_master_normalized()  # acquires its own lock - call before, not inside, ours below
+    with _FileLock('ingest'):
+        manifest = load_manifest()
+        RAW_DIR.mkdir(parents=True, exist_ok=True)
+        PROC_DIR.mkdir(parents=True, exist_ok=True)
+        master_for = {'sale': SALES_MASTER, 'purchase': PURCH_MASTER}
+        changed = False
 
-    for path in sorted(RAW_DIR.glob('*.xlsx')):
-        if path.name.startswith('~$'):
-            continue
-        h = file_hash(path)
-        prior_meta = manifest['files'].get(path.name)
-        if prior_meta and prior_meta.get('hash') == h:
-            continue  # this exact file already processed, nothing changed
+        for path in sorted(RAW_DIR.glob('*.xlsx')):
+            if path.name.startswith('~$'):
+                continue
+            h = file_hash(path)
+            prior_meta = manifest['files'].get(path.name)
+            if prior_meta and prior_meta.get('hash') == h:
+                continue  # this exact file already processed, nothing changed
 
-        kind, df, coverage = detect_type_and_load(path)
-        month = df['Source_Month'].iloc[0]
-        key = f'{kind}:{month}'
-        chosen_name = manifest['chosen'].get(key)
+            try:
+                kind, df, coverage = detect_type_and_load(path)
+            except Exception as e:
+                # One malformed file (blank dates, unrecognized layout, corrupt
+                # workbook) shouldn't take down every other file in this batch.
+                print(f"Skipped {path.name}: could not read it - {e}")
+                manifest['files'][path.name] = {'hash': h, 'status': 'error', 'error': str(e)}
+                changed = True
+                continue
 
-        if chosen_name is None or chosen_name == path.name:
-            # first file seen for this month+type, or this exact file was updated in place
-            replace, reason = True, 'first file for this month' if chosen_name is None else 'file updated in place'
-        else:
-            prior_cov = manifest['files'].get(chosen_name, {})
-            prior_days = prior_cov.get('unique_days', 0)
-            prior_rows = prior_cov.get('rows', 0)
-            if (coverage['unique_days'], coverage['rows']) > (prior_days, prior_rows):
-                replace = True
-                reason = f"wider date coverage ({coverage['unique_days']} days) than '{chosen_name}' ({prior_days} days) - replacing it"
+            if kind == 'sale':
+                # Normalize once, here, before this ever reaches disk - so
+                # SALES_MASTER always stores individual units and no reader
+                # has to remember to convert B2B rows themselves.
+                df = normalize_sale_units(df)
+
+            month = df['Source_Month'].iloc[0]
+            key = f'{kind}:{month}'
+            chosen_name = manifest['chosen'].get(key)
+
+            if chosen_name is None or chosen_name == path.name:
+                # first file seen for this month+type, or this exact file was updated in place
+                replace, reason = True, 'first file for this month' if chosen_name is None else 'file updated in place'
             else:
-                replace = False
-                reason = f"narrower/equal date coverage ({coverage['unique_days']} days) vs current '{chosen_name}' ({prior_days} days) - skipped as duplicate month"
+                prior_cov = manifest['files'].get(chosen_name, {})
+                prior_days = prior_cov.get('unique_days', 0)
+                prior_rows = prior_cov.get('rows', 0)
+                prior_hash = prior_cov.get('hash')
+                shape = (coverage['unique_days'], coverage['rows'])
+                prior_shape = (prior_days, prior_rows)
+                if shape > prior_shape:
+                    replace = True
+                    reason = f"wider date coverage ({coverage['unique_days']} days) than '{chosen_name}' ({prior_days} days) - replacing it"
+                elif shape == prior_shape and h != prior_hash:
+                    # Same shape but different bytes - not a duplicate, a
+                    # correction (e.g. a fixed MRP/typo re-exported). A true
+                    # duplicate would have matched hashes and been skipped
+                    # already, above.
+                    replace = True
+                    reason = f"same date coverage as '{chosen_name}' but different content - treating as a correction and replacing it"
+                else:
+                    replace = False
+                    reason = f"narrower/equal date coverage ({coverage['unique_days']} days) vs current '{chosen_name}' ({prior_days} days) - skipped as duplicate month"
 
-        if replace:
-            if chosen_name and chosen_name != path.name:
-                _remove_file_rows(master_for[kind], chosen_name)
-                if chosen_name in manifest['files']:
-                    manifest['files'][chosen_name]['status'] = 'superseded'
-            _append_rows(master_for[kind], df)
-            manifest['chosen'][key] = path.name
-            manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'active', **coverage}
-            print(f"Ingested {path.name} as {kind.upper()} -> {month} ({coverage['rows']} rows, {coverage['unique_days']} days): {reason}")
+            if replace:
+                if chosen_name and chosen_name != path.name:
+                    _remove_file_rows(master_for[kind], chosen_name, month)
+                    if chosen_name in manifest['files']:
+                        manifest['files'][chosen_name]['status'] = 'superseded'
+                _append_rows(master_for[kind], df)
+                manifest['chosen'][key] = path.name
+                manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'active', **coverage}
+                print(f"Ingested {path.name} as {kind.upper()} -> {month} ({coverage['rows']} rows, {coverage['unique_days']} days): {reason}")
+            else:
+                manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'rejected', **coverage}
+                print(f"Skipped {path.name}: {reason}")
+            changed = True
+
+        save_manifest(manifest)
+        if not changed:
+            print('No new files found in data\\raw - nothing to ingest.')
         else:
-            manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'rejected', **coverage}
-            print(f"Skipped {path.name}: {reason}")
-        changed = True
+            backup_processed_data()
 
-    save_manifest(manifest)
-    if not changed:
-        print('No new files found in data\\raw - nothing to ingest.')
-
-    sales = pd.read_csv(SALES_MASTER) if SALES_MASTER.exists() else pd.DataFrame()
-    purch = pd.read_csv(PURCH_MASTER) if PURCH_MASTER.exists() else pd.DataFrame()
-    sales = normalize_sale_units(sales)  # B2B (WB) bills are in strips - convert to units
-    return sales, purch
+        # SALES_MASTER is normalized once, at write time, above - never call
+        # normalize_sale_units() on data read back out of it (see that
+        # function's docstring for why calling it twice corrupts B2B rows).
+        sales = pd.read_csv(SALES_MASTER) if SALES_MASTER.exists() else pd.DataFrame()
+        purch = pd.read_csv(PURCH_MASTER) if PURCH_MASTER.exists() else pd.DataFrame()
+        purch = ensure_purch_defaults(purch)
+        return sales, purch
 
 
 def next_month_str(ym_str):
@@ -755,6 +967,11 @@ def build_over_under(sales, purch):
 
     def classify(row):
         sold, p = row['Sold_Qty'], row['Purch_Qty']
+        # Net returns/credit notes can make Sold_Qty negative - that's not
+        # "under-purchased" (the p/sold ratio would go negative and read as
+        # exactly that), it's a distinct condition worth its own label.
+        if sold < 0:
+            return 'Returns exceed sales'
         if p == 0 and sold > 0:
             return 'Sold, never purchased (old stock)'
         if sold == 0 and p > 0:
@@ -877,6 +1094,7 @@ def build_profit_margin(sales, purch):
 
     cost = purch.groupby('Product').agg(
         Physical_Qty=('Physical_Qty', 'sum'), Pretax_Value=('Pretax_Value', 'sum')).reset_index()
+    ever_purchased = set(cost['Product'])  # has purchase records at all, even if unusable below
     cost = cost[cost['Physical_Qty'] > 0]
     cost['Cost_Per_Unit'] = (cost['Pretax_Value'] / cost['Physical_Qty']).round(4)
     cost_map = cost.set_index('Product')['Cost_Per_Unit']
@@ -899,9 +1117,89 @@ def build_profit_margin(sales, purch):
 
     unk = unknown.groupby('Product').agg(Qty_Sold=('Qty', 'sum'), Revenue=('Item Total', 'sum')).reset_index()
     unk['Qty_Sold_Strips'] = to_strips(unk['Qty_Sold'], unk['Product'], factor_map)
+    # A product can land here for two very different reasons - distinguish
+    # them instead of silently lumping both under "cost unknown": genuinely
+    # never purchased, vs. purchase records exist but net quantity across
+    # history is zero/negative (e.g. a large return or stock correction
+    # posted after normal purchases), which makes a per-unit cost unusable
+    # even though real cost data exists.
+    unk['Cost_Note'] = np.where(unk['Product'].isin(ever_purchased),
+                                 'Purchase records exist, but net qty is zero/negative (return or correction?)',
+                                 'No purchase record found')
     unk = unk.sort_values('Revenue', ascending=False).reset_index(drop=True)
 
     return g, unk
+
+
+# ---------------------------------------------------------------------------
+# Analysis 2c: Profit & margin split by sales CHANNEL (branch).
+#
+# Same pre-tax cost/revenue basis as build_profit_margin(), but grouped by the
+# channel each bill came from (from the Inv.No prefix): the retail branches vs
+# the B2B/Wholesale series. Retail earns a normal markup; B2B sells near cost,
+# so a single blended margin hides both - this shows them side by side.
+# Assumes sales are already unit-normalized (WB in individual units).
+#
+# RETAIL_BRANCHES is derived from BRANCH_MAP itself (everything that isn't the
+# wholesale label), not a separately-maintained list - so a new retail branch
+# added to BRANCH_MAP is automatically Retail here too, with nothing to forget.
+# ---------------------------------------------------------------------------
+RETAIL_BRANCHES = tuple(v for v in BRANCH_MAP.values() if v != WHOLESALE_LABEL)
+
+
+def build_channel_profit(sales, purch):
+    p = purch.copy()
+    p['Factor'] = p['Factor'].replace(0, 1).fillna(1)
+    p['Physical_Qty'] = p['Qty'] * p['Factor']
+    p['Pretax_Value'] = p['Qty'] * p['Sale Rate'] - p['Disc Amount'].fillna(0)
+    cost = p.groupby('Product').agg(Physical_Qty=('Physical_Qty', 'sum'), Pretax_Value=('Pretax_Value', 'sum'))
+    cost = cost[cost['Physical_Qty'] > 0]
+    cost_map = cost['Pretax_Value'] / cost['Physical_Qty']
+
+    s = sales.copy()
+    s['Branch'] = s['Inv.No'].apply(extract_branch)
+    s['Pretax_Revenue'] = s['Item Total'] / (1 + s['Tax Rate'].fillna(0) / 100)
+    s['Cost_Per_Unit'] = s['Product'].map(cost_map)
+    # Only products with a known cost count toward profit (same rule as the
+    # Profit & Margin tab); revenue with unknown cost is reported separately so
+    # the margin isn't quietly overstated.
+    known = s[s['Cost_Per_Unit'].notna()].copy()
+    known['COGS'] = known['Qty'] * known['Cost_Per_Unit']
+
+    # Every branch that has ANY sales this period gets a row - even one whose
+    # sales are 100% unknown-cost, which would otherwise vanish from the
+    # report entirely (grouping `known` alone drops branches with zero known-
+    # cost rows) instead of showing up with Revenue=0, Revenue_Cost_Unknown>0.
+    all_branches = pd.Index(s['Branch'].unique(), name='Branch')
+    g = known.groupby('Branch').agg(Revenue=('Pretax_Revenue', 'sum'), COGS=('COGS', 'sum'))
+    g = g.reindex(all_branches, fill_value=0).reset_index()
+    # Invoice count is over ALL of a branch's sales, not just its known-cost
+    # lines, so a branch isn't shown with a suspiciously low bill count just
+    # because some of its invoices only contain not-yet-costed products.
+    total_invoices = s.groupby('Branch')['Inv.No'].nunique()
+    g['Invoices'] = g['Branch'].map(total_invoices).fillna(0).astype(int)
+
+    # Revenue whose cost is unknown, per branch - shown for honesty, not in margin.
+    unknown_rev = s[s['Cost_Per_Unit'].isna()].groupby('Branch')['Pretax_Revenue'].sum()
+    g['Revenue_Cost_Unknown'] = g['Branch'].map(unknown_rev).fillna(0).round(2)
+    g['Gross_Profit'] = (g['Revenue'] - g['COGS']).round(2)
+    g['Margin_Pct'] = np.where(g['Revenue'] > 0, (g['Gross_Profit'] / g['Revenue'] * 100).round(1), 0)
+    # A branch that doesn't match a known retail name AND isn't the mapped
+    # wholesale branch is an invoice prefix BRANCH_MAP doesn't recognize
+    # (extract_branch's 'Unknown branch (...)' fallback) - flag it as such
+    # instead of silently folding it into 'B2B', which would quietly corrupt
+    # the B2B-vs-retail margin split this report exists to protect.
+    g['Type'] = np.select(
+        [g['Branch'].isin(RETAIL_BRANCHES), g['Branch'] == WHOLESALE_LABEL],
+        ['Retail', 'B2B'],
+        default='Unrecognized (check BRANCH_MAP)')
+    g['Revenue'] = g['Revenue'].round(2)
+    g['COGS'] = g['COGS'].round(2)
+    # Retail branches first (by revenue), B2B next, unrecognized last (most visible).
+    type_order = {'Retail': 0, 'B2B': 1}
+    g['_order'] = g['Type'].map(type_order).fillna(2)
+    g = g.sort_values(['_order', 'Revenue'], ascending=[True, False]).drop(columns='_order').reset_index(drop=True)
+    return g[['Branch', 'Type', 'Invoices', 'Revenue', 'COGS', 'Gross_Profit', 'Margin_Pct', 'Revenue_Cost_Unknown']]
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +1228,13 @@ def build_purchase_errors(purch, latest_month):
 def build_scheme_consistency(purch, latest_month):
     hist = purch[purch['Source_Month'] != latest_month]
     latest = purch[purch['Source_Month'] == latest_month].copy()
-    latest['FreeRatio'] = np.where(latest['Qty'] > 0, latest['Free Qty'].fillna(0) / latest['Qty'], np.nan)
+    # A return/credit-note line (Qty <= 0) isn't a purchase that could have
+    # earned a scheme - without this, Qty<=0 makes FreeRatio NaN, which
+    # fillna(0) below then reads as "0% free, well short of the typical
+    # ratio," flagging return lines as missed schemes with a meaningless
+    # (often negative) shortfall.
+    latest = latest[latest['Qty'] > 0].copy()
+    latest['FreeRatio'] = latest['Free Qty'].fillna(0) / latest['Qty']
 
     scheme_hist = hist[hist['Free Qty'].fillna(0) > 0].copy()
     scheme_hist['FreeRatio'] = np.where(scheme_hist['Qty'] > 0,
@@ -1159,6 +1463,13 @@ def write_df(ws, df, start_row=1, money_cols=None, qty_cols=None, highlight_col=
         c.border = BORDER
     for i, row in enumerate(df.itertuples(index=False), start=start_row + 1):
         for j, val in enumerate(row, start=1):
+            # openpyxl raises ValueError on NaN/Infinity, which would crash the
+            # entire report build over one bad cell. Every current division in
+            # this file is guarded against that, but that's convention, not
+            # enforcement - write a blank cell instead of trusting every caller
+            # forever.
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                val = None
             c = ws.cell(row=i, column=j, value=val)
             c.font = BODY_FONT
             c.border = BORDER
@@ -1197,6 +1508,7 @@ def build_report(sales, purch, out_path):
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
     over_under = build_over_under(sales, purch)
     profit, profit_unknown = build_profit_margin(sales, purch)
+    channel_profit = build_channel_profit(sales, purch)
     latest_month = all_months[-1]
     ptr_high, mrp_missing, gifts, variance = build_purchase_errors(purch, latest_month)
     scheme_missed, scheme_baseline = build_scheme_consistency(purch, latest_month)
@@ -1229,6 +1541,8 @@ def build_report(sales, purch, out_path):
         ('Dead stock products (purchased, never sold)', int((over_under['Status'] == 'Purchased, never sold (dead stock)').sum())),
         ('Gross profit, all history (pre-tax, known-cost products)', round(profit['Gross_Profit'].sum(), 2)),
         ('Overall gross margin %, known-cost products', round(profit['Gross_Profit'].sum() / profit['Pretax_Revenue'].sum() * 100, 1) if profit['Pretax_Revenue'].sum() > 0 else 0),
+        ('Gross margin % by channel (Retail vs B2B)',
+         '  |  '.join(f"{r['Branch']}: {r['Margin_Pct']}%" for _, r in channel_profit.iterrows())),
         ('Revenue with cost unknown (excluded from profit above)', round(profit_unknown['Revenue'].sum(), 2)),
         (f'PTR-higher-than-MRP entries in {latest_month}', len(ptr_high)),
         (f'MRP missing entries in {latest_month}', len(mrp_missing)),
@@ -1260,7 +1574,8 @@ def build_report(sales, purch, out_path):
         'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
         'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
-        'Other Purchase Status - balanced, old-stock, and no-activity products, for reference.',
+        'Other Purchase Status - balanced, old-stock, no-activity, and net-returns products, for reference.',
+        'Sales by Channel - gross profit and margin split by channel (retail branches vs B2B/Wholesale), so the thin B2B margin does not hide inside the blended number.',
         'Profit & Margin - gross profit and margin % per product, pre-tax, all history. Products with no purchase record are listed separately (cost unknown).',
         'PTR Higher Than MRP - purchase rate above MRP this month - fix these entries.',
         'MRP Issues (missing/variance) - MRP=0 or same product priced very differently across bills.',
@@ -1542,7 +1857,7 @@ def build_report(sales, purch, out_path):
     under_df = under_df.sort_values('Shortfall Value (at cost)', ascending=False)
     under_df = under_df[base_cols + ['Shortfall Value (at cost)']]
 
-    other_df = ou[ou['Status'].isin(['Balanced', 'Sold, never purchased (old stock)', 'No activity'])].copy()
+    other_df = ou[ou['Status'].isin(['Balanced', 'Sold, never purchased (old stock)', 'No activity', 'Returns exceed sales'])].copy()
     other_df = other_df.rename(columns={'Net_Value_Approx': 'Net Value (at cost)'})
     other_df = other_df.sort_values('Total Sale Value', ascending=False)
     other_df = other_df[base_cols[:4] + ['Status'] + base_cols[4:] + ['Net Value (at cost)']]
@@ -1573,13 +1888,29 @@ def build_report(sales, purch, out_path):
 
     ws = wb.create_sheet('Other Purchase Status')
     ws.sheet_view.showGridLines = False
-    ws['A1'] = 'Balanced, sold-with-no-purchase-record (old stock), and no-activity products - sorted by sale value. Qty in strips.'
+    ws['A1'] = 'Balanced, sold-with-no-purchase-record (old stock), no-activity, and net-returns products - sorted by sale value. Qty in strips.'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
     write_df(ws, other_df, start_row=2, money_cols=['Rate', 'Total Purchase Value', 'Total Sale Value', 'Net Value (at cost)'])
     autosize(ws, [38, 18, 16, 14, 26, 12, 16, 16, 18])
     ws.freeze_panes = 'A3'
 
     # ---- Profit & Margin ----
+    ws = wb.create_sheet('Sales by Channel')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = 'Gross profit & margin split by sales channel (from the Inv.No prefix) - retail branches vs B2B/Wholesale. Pre-tax, known-cost products only.'
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    ws['A2'] = 'Retail earns a normal markup; B2B/Wholesale sells near cost (thin margin). A single blended margin hides that difference.'
+    ws['A2'].font = SUBTITLE_FONT
+    df_ch = channel_profit.rename(columns={'Branch': 'Channel', 'Revenue': 'Revenue (pre-tax)',
+                                            'COGS': 'COGS (pre-tax)', 'Gross_Profit': 'Gross Profit',
+                                            'Margin_Pct': 'Margin %', 'Revenue_Cost_Unknown': 'Revenue (cost unknown)'})
+    df_ch = df_ch[['Channel', 'Type', 'Invoices', 'Revenue (pre-tax)', 'COGS (pre-tax)', 'Gross Profit', 'Margin %', 'Revenue (cost unknown)']]
+    write_df(ws, df_ch, start_row=4,
+             money_cols=['Revenue (pre-tax)', 'COGS (pre-tax)', 'Gross Profit', 'Margin %', 'Revenue (cost unknown)'],
+             qty_cols=['Invoices'])
+    autosize(ws, [18, 10, 12, 18, 18, 16, 10, 20])
+    ws.freeze_panes = 'A5'
+
     ws = wb.create_sheet('Profit & Margin')
     ws.sheet_view.showGridLines = False
     ws['A1'] = 'Gross profit & margin, all history loaded so far (pre-tax on both revenue and cost - GST excluded as a pass-through). Qty in strips.'
@@ -1595,10 +1926,19 @@ def build_report(sales, purch, out_path):
 
     r3 = last_p + 3
     ws.cell(row=r3, column=1,
-            value='Cost unknown - sold with no purchase record in loaded history (from stock bought before this data started); excluded above').font = Font(name=FONT, bold=True, size=11)
-    df_u = profit_unknown.rename(columns={'Qty_Sold_Strips': 'Qty Sold (strips)'})[['Product', 'Qty Sold (strips)', 'Revenue']]
+            value='Cost unknown - excluded above. Either sold with no purchase record at all (stock bought before '
+                  'this data started), or purchase records exist but a return/correction left the net purchased '
+                  'quantity at zero or negative - see the reason column.').font = Font(name=FONT, bold=True, size=11)
+    # 'Why cost is unknown' lands in column D - the same column as the table
+    # above's 'Revenue (pre-tax)'. autosize() sets width per column LETTER for
+    # the whole sheet, not per table, so column D's width has to serve both:
+    # a numeric column above (any reasonable width works) and a full sentence
+    # below (needs to actually be readable) - widen D itself, not a column
+    # nothing is written to.
+    df_u = profit_unknown.rename(columns={'Qty_Sold_Strips': 'Qty Sold (strips)', 'Cost_Note': 'Why cost is unknown'})[
+        ['Product', 'Qty Sold (strips)', 'Revenue', 'Why cost is unknown']]
     write_df(ws, df_u, start_row=r3 + 1, money_cols=['Revenue'])
-    autosize(ws, [38, 12, 14, 16, 20, 16, 14, 10])
+    autosize(ws, [38, 12, 14, 48, 20, 16, 14, 10])
     ws.freeze_panes = 'A3'
 
     # ---- PTR Higher Than MRP ----
