@@ -29,7 +29,7 @@ manually exported and dropped in data/employee_targets/.
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -428,12 +428,105 @@ def get_employee_targets(name=None):
         return {
             'employee': emp_name, 'exported_file': path.name,
             'exported_at': datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M'),
+            # shubhadahealth.com's export file does NOT include the From/To date
+            # range that was selected on-screen when it was generated - only
+            # exported_at (when the file was created) is known, not what period
+            # the numbers themselves cover. Say so rather than implying a period.
+            'period_note': 'the source export does not record which date range these numbers cover - '
+                            'only when the file was exported (exported_at); do not assume it is the current month',
             'total_earned_amount': _round(df['Earned Amount'].sum()) if 'Earned Amount' in df.columns else None,
             'categories': categories,
         }
 
     matches.sort(key=lambda x: x[1].stat().st_mtime, reverse=True)
     return {'available': True, 'reports': [load_one(emp, f) for emp, f in matches]}
+
+
+# ---------------------------------------------------------------------------
+# Employee attendance / leave-pattern - also from shubhadahealth.com, also
+# on-demand (no credential stored for that site, same as get_employee_targets
+# above). That page has no Export button, so a snapshot is saved manually
+# while the owner is logged in there live (each snapshot explicitly records
+# the from/to date range it covers - unlike the targets export, which does
+# not - see get_employee_targets' period_note). Nothing is fetched live by
+# this tool; it only reads whatever snapshot already exists on disk.
+# ---------------------------------------------------------------------------
+EMPLOYEE_ATTENDANCE_DIR = Path(__file__).parent / 'data' / 'employee_attendance'
+WEEKDAY_NAMES_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def get_employee_attendance(name=None):
+    """On-demand employee attendance / leave-pattern from the separate
+    shubhadahealth.com system: which days in the snapshot's date range the
+    employee has NO punch record (absent), which weekday each falls on,
+    whether absences cluster into consecutive-day blocks (more likely a
+    planned/multi-day leave) or are scattered single days, and whether
+    absences correlate with weekends (a consistent day-off pattern) or not.
+    The covered period (from_date/to_date) is always given explicitly -
+    NEVER assume it means the current month. NOT live - only available once
+    a snapshot has been saved (while the owner is logged into that site) to
+    data/employee_attendance/. If nothing matches, say so plainly and ask
+    the owner to pull up that employee's Attendance Transaction report live,
+    then ask again - don't guess or substitute reckoner figures instead.
+    `name` filters to snapshots whose employee name contains it
+    (case-insensitive); omit to list every snapshot currently available."""
+    if not EMPLOYEE_ATTENDANCE_DIR.exists():
+        return {'available': False, 'reason': 'no employee_attendance folder yet'}
+    files = list(EMPLOYEE_ATTENDANCE_DIR.glob('*.json'))
+    if name:
+        name_lower = name.strip().lower()
+        files = [f for f in files if name_lower in f.stem.lower()]
+    if not files:
+        who = f' for "{name}"' if name else ''
+        return {'available': False,
+                'reason': f'no attendance snapshot{who} in data/employee_attendance/ - pull up that employee\'s '
+                          'Attendance Transaction report live on shubhadahealth.com and ask for it to be saved, '
+                          'then ask again'}
+
+    def load_one(path):
+        snap = json.loads(path.read_text(encoding='utf-8'))
+        from_d = datetime.strptime(snap['from_date'], '%Y-%m-%d').date()
+        to_d = datetime.strptime(snap['to_date'], '%Y-%m-%d').date()
+        # A day that hasn't finished yet has no punch simply because it isn't
+        # over - that's not an absence. Cap the range at yesterday whenever
+        # to_date reaches today or later, so "today" never gets miscounted.
+        last_complete_day = datetime.now().date() - timedelta(days=1)
+        effective_to = min(to_d, last_complete_day)
+        present_dates = sorted({datetime.strptime(p['date'], '%d/%m/%Y').date() for p in snap['punches']})
+        present_set = set(present_dates)
+        all_days = [from_d + timedelta(days=i) for i in range((effective_to - from_d).days + 1)] if effective_to >= from_d else []
+        absent_dates = [d for d in all_days if d not in present_set]
+
+        # Group consecutive absent dates into blocks - a 2+ day block reads
+        # very differently (planned leave) than isolated single-day gaps.
+        blocks, current = [], []
+        for d in absent_dates:
+            if current and (d - current[-1]).days == 1:
+                current.append(d)
+            else:
+                if current:
+                    blocks.append(current)
+                current = [d]
+        if current:
+            blocks.append(current)
+
+        weekend_absences = sum(1 for d in absent_dates if d.weekday() >= 5)
+        weekday_absences = len(absent_dates) - weekend_absences
+        present_in_range = [d for d in present_dates if from_d <= d <= effective_to]
+        avg_punches_per_present_day = round(len(snap['punches']) / len(present_dates), 1) if present_dates else None
+
+        return {
+            'employee': snap['employee'], 'branch': snap.get('branch'),
+            'from_date': snap['from_date'], 'to_date': snap['to_date'], 'snapshot_saved_at': snap.get('saved_at'),
+            'days_in_range': len(all_days), 'days_present': len(present_in_range), 'days_absent': len(absent_dates),
+            'absent_dates': [{'date': d.isoformat(), 'weekday': WEEKDAY_NAMES_SHORT[d.weekday()]} for d in absent_dates],
+            'absence_blocks': [{'start': b[0].isoformat(), 'end': b[-1].isoformat(), 'days': len(b)} for b in blocks if len(b) >= 2],
+            'weekend_absences': weekend_absences, 'weekday_absences': weekday_absences,
+            'avg_punches_per_present_day': avg_punches_per_present_day,
+        }
+
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    return {'available': True, 'reports': [load_one(f) for f in files]}
 
 
 def get_top_customers(n=10, by='spend'):
@@ -502,8 +595,9 @@ def identify_person(name, limit=20):
     could be either and the right follow-up tool differs:
       - kind='employee': name matched Billed By / Item Given By / Created By.
         Follow up with get_employee_performance() for their full detail, and
-        get_employee_targets() too if the question wants minute detail,
-        targets, or earned/incentive amounts.
+        get_employee_targets() + get_employee_attendance() too if the
+        question wants minute detail, targets, earned/incentive amounts, or
+        leave/attendance behavior.
       - kind='customer_candidates': name matched one or more Patient names
         (partial/case-insensitive), each returned with their real mobile
         number, spend, and line count, highest-spend first, capped at
@@ -710,6 +804,9 @@ TOOLS = [
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}})},
+    {'name': 'get_employee_attendance', 'fn': get_employee_attendance,
+     'description': get_employee_attendance.__doc__,
      'parameters': _schema({'name': {'type': 'string'}})},
     {'name': 'get_top_customers', 'fn': get_top_customers,
      'description': get_top_customers.__doc__,

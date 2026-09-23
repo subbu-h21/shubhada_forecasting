@@ -20,6 +20,12 @@ data/processed/*
 data/employee_targets/*
 !data/employee_targets/.gitkeep
 
+# Same for on-demand attendance/leave snapshots (that site has no export for
+# this report, so it's saved manually from a live logged-in session instead)
+# - real employee names + daily punch times.
+data/employee_attendance/*
+!data/employee_attendance/.gitkeep
+
 # Generated reports also contain real figures (revenue, profit, margins)
 reports/**/*.xlsx
 
