@@ -160,7 +160,14 @@ def _openrouter_answer(question, verbose=False):
     # and a stronger reasoning model writes the actual final answer (the
     # money-aware recommendation + Kannada summary) once the data is in hand.
     fast_model = os.environ.get('OPENROUTER_MODEL_FAST', 'google/gemini-3.1-flash-lite')
-    reasoning_model = os.environ.get('OPENROUTER_MODEL_REASONING', 'google/gemini-3.1-pro-preview')
+    # google/gemini-3.1-pro-preview (the only "3.1 pro" tier OpenRouter has -
+    # there's no non-preview release yet) was found to silently return empty
+    # content for some tool-result payloads (confirmed reproducible: certain
+    # combinations of get_employee_performance's sections, finish_reason
+    # "stop", no refusal, just nothing - a provider/model-side issue, not a
+    # bug here). google/gemini-2.5-pro (GA, stable) handles the identical
+    # payload correctly, so it's the default until 3.1 pro leaves preview.
+    reasoning_model = os.environ.get('OPENROUTER_MODEL_REASONING', 'google/gemini-2.5-pro')
 
     client = OpenAI(
         base_url='https://openrouter.ai/api/v1', api_key=api_key,
@@ -215,7 +222,19 @@ def _openrouter_answer(question, verbose=False):
     if verbose:
         print(f'  → answering with [{reasoning_model}]')
     resp = complete(reasoning_model, with_tools=False)
-    return resp.choices[0].message.content
+    answer = resp.choices[0].message.content
+    if answer:
+        return answer
+    # Some models occasionally return empty content with finish_reason=stop
+    # and no refusal (a provider-side quirk, seen and confirmed reproducible
+    # with a "-preview" model) - rather than show the user a blank/"(no
+    # answer)" response, fall back to the fast model for one attempt, which
+    # has already proven able to answer directly when it skips tool calls.
+    if verbose:
+        print(f'  → [{reasoning_model}] returned empty, retrying with [{fast_model}]')
+    resp = complete(fast_model, with_tools=False)
+    answer = resp.choices[0].message.content
+    return answer or "Sorry, I couldn't generate an answer for that - try rephrasing the question."
 
 
 def ask(question, verbose=False):
