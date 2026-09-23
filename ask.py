@@ -3,9 +3,11 @@ Ask the Reckoner - a conversational BI over your pharmacy data
 ==============================================================
 Type a question in plain English; a model answers by calling the local report
 tools in ask_tools.py - it never sees the raw tables or any patient identity.
-Product and supplier names/figures go out in full (business info); customer
-identity is pseudonymous - see get_top_customers/get_customer_trends in
-ask_tools.py, which only ever hand out a one-way 'Cust_xxxxxx' code.
+Product, supplier, and employee names/figures go out in full (business info -
+employee performance is an internal staff-review view, same as the Excel
+report); customer identity is pseudonymous - see get_top_customers/
+get_customer_trends in ask_tools.py, which only ever hand out a one-way
+'Cust_xxxxxx' code.
 
     python ask.py "is my wholesale channel profitable?"
     python ask.py --dry-run "..."   # show exactly what would be sent out,
@@ -16,9 +18,12 @@ ask_tools.py, which only ever hand out a one-way 'Cust_xxxxxx' code.
 Two backends, chosen by env ASK_BACKEND (default "openrouter"):
 
   openrouter (default) - https://openrouter.ai, any hosted model, via the
-  OpenAI SDK pointed at OpenRouter's OpenAI-compatible endpoint:
+  OpenAI SDK pointed at OpenRouter's OpenAI-compatible endpoint. Two-tier
+  routing: a fast/cheap model drives the tool-calling loop, a stronger model
+  writes the final answer:
     - env: OPENROUTER_API_KEY=<your key>        (get one at openrouter.ai/keys)
-           OPENROUTER_MODEL=google/gemini-2.5-flash   (any OpenRouter model id)
+           OPENROUTER_MODEL_FAST=google/gemini-3.1-flash-lite      (default)
+           OPENROUTER_MODEL_REASONING=google/gemini-3.1-pro-preview (default)
     Then:  pip install openai
 
   vertex - Gemini directly on Google Vertex AI:
@@ -148,9 +153,14 @@ def _openrouter_answer(question, verbose=False):
     from openai import APIStatusError, OpenAI
 
     api_key = os.environ.get('OPENROUTER_API_KEY')
-    model = os.environ.get('OPENROUTER_MODEL', 'google/gemini-2.5-flash')
     if not api_key:
         raise RuntimeError('Set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys).')
+    # Two-tier routing: a fast/cheap model drives the tool-calling loop
+    # ("which tool, what args" is mechanical, doesn't need a strong model),
+    # and a stronger reasoning model writes the actual final answer (the
+    # money-aware recommendation + Kannada summary) once the data is in hand.
+    fast_model = os.environ.get('OPENROUTER_MODEL_FAST', 'google/gemini-3.1-flash-lite')
+    reasoning_model = os.environ.get('OPENROUTER_MODEL_REASONING', 'google/gemini-3.1-pro-preview')
 
     client = OpenAI(
         base_url='https://openrouter.ai/api/v1', api_key=api_key,
@@ -164,7 +174,7 @@ def _openrouter_answer(question, verbose=False):
         {'role': 'user', 'content': T.scrub_question(question)},
     ]
 
-    def complete(with_tools):
+    def complete(model, with_tools):
         kwargs = {'model': model, 'messages': messages}
         if with_tools:
             kwargs['tools'] = tools
@@ -175,10 +185,10 @@ def _openrouter_answer(question, verbose=False):
             raise RuntimeError(f'OpenRouter API error {e.status_code}: {detail}') from None
 
     for _ in range(MAX_STEPS):
-        resp = complete(with_tools=True)
+        resp = complete(fast_model, with_tools=True)
         msg = resp.choices[0].message
         if not msg.tool_calls:
-            return msg.content
+            break  # fast model has everything it needs; hand off for the actual answer
         # Record the model's turn (incl. its tool_calls) in the wire format,
         # not a raw SDK object dump - keeps only the fields the API expects
         # back on the next call.
@@ -195,12 +205,16 @@ def _openrouter_answer(question, verbose=False):
             except json.JSONDecodeError:
                 args = {}
             if verbose:
-                print(f'  → tool: {name}({json.dumps(args, default=str)})')
+                print(f'  → tool [{fast_model}]: {name}({json.dumps(args, default=str)})')
             result = T.run_tool(name, args)
             messages.append({'role': 'tool', 'tool_call_id': tc.id,
                              'content': json.dumps(result, default=str)})
-    # ran out of steps - ask for a final answer with no more tools
-    resp = complete(with_tools=False)
+    # Final answer: the reasoning model synthesizes the actual response from
+    # whatever the fast model already gathered above - no tools needed here,
+    # the data's already in hand. Also the fallback if MAX_STEPS ran out.
+    if verbose:
+        print(f'  → answering with [{reasoning_model}]')
+    resp = complete(reasoning_model, with_tools=False)
     return resp.choices[0].message.content
 
 
@@ -256,6 +270,7 @@ def selftest():
         ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
+        ('get_employee_performance', {}),
         ('get_top_customers', {'n': 5, 'by': 'spend'}),
         ('get_customer_trends', {'churn_limit': 5}),
         ('query_sales', {'group_by': ['branch'], 'metric': 'revenue'}),

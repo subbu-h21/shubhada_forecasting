@@ -27,6 +27,7 @@ from flask import Flask, request, Response, jsonify
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+import ask as ask_mod
 import run_reckoner as rk
 
 ROOT = Path(__file__).parent
@@ -564,11 +565,36 @@ def api_upload():
     return jsonify({'saved': saved, 'log': log.getvalue()})
 
 
+@app.route('/api/ask', methods=['POST'])
+@requires_auth
+def api_ask():
+    body = request.get_json(force=True, silent=True) or {}
+    question = (body.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'question is required'}), 400
+    try:
+        answer = ask_mod.ask(question)
+    except Exception as e:
+        # Missing/bad API key, no network, model provider error, etc. - not a
+        # bug in this server, so log it quietly and hand the reason to the
+        # page rather than a generic 500.
+        logger.warning('Ask failed for "%s": %s: %s', question, type(e).__name__, e)
+        return jsonify({'error': f'Could not reach the model ({type(e).__name__}: {e}).'}), 502
+    return jsonify({'answer': answer})
+
+
 @app.route('/')
 def index():
     # Public shell - it's just markup/JS, no pharmacy data. The page itself
     # shows a login form and every /api/* call is what's actually gated.
     return Response((ROOT / 'mobile_dashboard.html').read_text(encoding='utf-8'), mimetype='text/html')
+
+
+@app.route('/ask')
+def ask_page():
+    # Public shell, same pattern as index() above - the page checks for a
+    # session token client-side and calls /api/ask (gated) to do anything.
+    return Response((ROOT / 'ask_dashboard.html').read_text(encoding='utf-8'), mimetype='text/html')
 
 
 if __name__ == '__main__':

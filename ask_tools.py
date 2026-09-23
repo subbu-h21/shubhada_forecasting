@@ -37,17 +37,33 @@ _cache = {}
 
 
 # ---------------------------------------------------------------------------
-# Data loading (once) and cheap cached rollups
+# Data loading (once per data version) and cheap cached rollups
 # ---------------------------------------------------------------------------
+def _master_files_mtime():
+    paths = [rk.SALES_MASTER, rk.PURCH_MASTER, rk.MANIFEST_PATH]
+    mtimes = [p.stat().st_mtime for p in paths if p.exists()]
+    return max(mtimes) if mtimes else None
+
+
 def _load():
-    if 'sales' not in _cache:
+    # Re-read whenever the master files changed on disk since the last call -
+    # from ANY source (a CLI `python run_reckoner.py`, a mobile upload, or
+    # this same process's own /api/ask route). A one-shot `python ask.py`
+    # run only ever calls this once anyway, so the check is free there; a
+    # long-running server process (server.py's /api/ask) would otherwise
+    # answer every question from data as of its own startup, forever.
+    current_mtime = _master_files_mtime()
+    if 'sales' not in _cache or _cache.get('_mtime') != current_mtime:
         sales = pd.read_csv(rk.SALES_MASTER, low_memory=False) if rk.SALES_MASTER.exists() else pd.DataFrame()
         purch = pd.read_csv(rk.PURCH_MASTER, low_memory=False) if rk.PURCH_MASTER.exists() else pd.DataFrame()
+        purch = rk.ensure_purch_defaults(purch)  # older master CSVs may predate an optional column
         # SALES_MASTER is normalized once, at ingest time (see
         # run_reckoner.normalize_sale_units docstring) - never call
         # normalize_sale_units() again here, it would double-convert B2B rows.
+        _cache.clear()  # drop every derived rollup below too - they're stale now
         _cache['sales'] = sales
         _cache['purch'] = purch
+        _cache['_mtime'] = current_mtime
     return _cache['sales'], _cache['purch']
 
 
@@ -314,6 +330,31 @@ def get_purchase_issues(n=10):
     })
 
 
+def get_employee_performance():
+    """Staff performance, by whichever of these columns this export has:
+    'Billed By' (revenue/bills/avg-bill-value per employee), 'Item Given By'
+    (lines/qty/value dispensed per employee), 'Created By' (purchase entries,
+    PTR-above-MRP error count, and embedded-margin quality per employee who
+    keyed them in). Real employee names - this is an internal staff-review
+    tool the owner reads, not customer-facing, unlike get_top_customers/
+    get_customer_trends which pseudonymize identity. Sections not present in
+    this export yet are simply omitted."""
+    s, p = _load()
+    lines, _ = rk.compute_distributor_lines(p)
+    perf = rk.build_employee_performance(s, p, lines)
+    out = {'available': any(v is not None for v in perf.values())}
+    if perf['billed_by'] is not None:
+        out['billed_by'] = _records(perf['billed_by'], ['Employee', 'Bills', 'Revenue', 'Patients', 'Avg_Bill_Value'])
+    if perf['given_by'] is not None:
+        out['given_by'] = _records(perf['given_by'], ['Employee', 'Lines', 'Qty', 'Value'])
+    if perf['created_by'] is not None:
+        cols = ['Employee', 'Entries', 'Lines', 'Value', 'PTR_Errors']
+        if 'Margin_Pct' in perf['created_by'].columns:
+            cols.append('Margin_Pct')
+        out['created_by'] = _records(perf['created_by'], cols)
+    return _guard_no_pii(out)
+
+
 def get_top_customers(n=10, by='spend'):
     """Top customers ranked by total spend or visit count. Each customer is
     identified only by a one-way pseudonymous code ('Cust_xxxxxx') derived
@@ -449,6 +490,8 @@ TOOLS = [
     {'name': 'get_purchase_issues', 'fn': get_purchase_issues,
      'description': get_purchase_issues.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}})},
+    {'name': 'get_employee_performance', 'fn': get_employee_performance,
+     'description': get_employee_performance.__doc__, 'parameters': _schema({})},
     {'name': 'get_top_customers', 'fn': get_top_customers,
      'description': get_top_customers.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}, 'by': {'type': 'string', 'enum': ['spend', 'visits']}})},

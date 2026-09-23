@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ask the Reckoner</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --paper: #F6F3EC;
+    --paper-raised: #FFFFFF;
+    --ink: #23262B;
+    --ink-soft: #5B6169;
+    --ink-faint: #8B9096;
+    --accent: #1F6F78;
+    --accent-soft: #DCEEEE;
+    --danger: #B23A32;
+    --danger-soft: #F6DEDB;
+    --line: #E4DFD3;
+    --line-strong: #D2CBB9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181B; --paper-raised: #1D2124; --ink: #ECEDEE; --ink-soft: #9BA1A7; --ink-faint: #6B7177;
+      --accent: #59BFBF; --accent-soft: #1C3435; --danger: #E2857C; --danger-soft: #3A2320;
+      --line: #2B2F33; --line-strong: #383D42;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--paper); border-bottom: 1px solid var(--line-strong);
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  header a.back {
+    color: var(--ink-soft); text-decoration: none; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 3px; flex: none;
+  }
+  header h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 18px; margin: 0; font-weight: 600; flex: 1;
+  }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .msg { max-width: 88%; padding: 10px 13px; border-radius: 14px; font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.assistant { align-self: flex-start; background: var(--paper-raised); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.error { align-self: flex-start; background: var(--danger-soft); color: var(--danger); border-bottom-left-radius: 4px; }
+  .msg.pending { align-self: flex-start; background: var(--paper-raised); border: 1px solid var(--line); color: var(--ink-faint); font-style: italic; }
+  #empty-hint { color: var(--ink-faint); font-size: 13.5px; text-align: center; margin-top: 24px; padding: 0 20px; line-height: 1.6; }
+  #empty-hint .ex { display: inline-block; margin: 3px 4px; padding: 5px 10px; border-radius: 14px; background: var(--paper-raised); border: 1px solid var(--line); cursor: pointer; }
+  form#ask-form {
+    display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: var(--paper); border-top: 1px solid var(--line-strong); position: sticky; bottom: 0;
+  }
+  #question {
+    flex: 1; border: 1px solid var(--line-strong); border-radius: 20px; background: var(--paper-raised);
+    color: var(--ink); padding: 10px 15px; font-size: 15px; outline: none;
+  }
+  #question:focus { border-color: var(--accent); }
+  #send-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 20px;
+    padding: 0 18px; font-weight: 600; font-size: 14px; cursor: pointer; flex: none;
+  }
+  #send-btn:disabled { opacity: .5; }
+  #login-gate {
+    display: none; flex: 1; align-items: center; justify-content: center; text-align: center;
+    padding: 30px; color: var(--ink-soft); font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <a class="back" href="/">&larr; Reckoner</a>
+  <h1>Ask the Reckoner</h1>
+</header>
+
+<div id="login-gate">Please log in from the main dashboard first&hellip;<br><a href="/">Go to dashboard</a></div>
+
+<div id="chat">
+  <div id="empty-hint">
+    Ask anything about your pharmacy's sales, purchases, profit, or customers.<br>
+    <span class="ex" onclick="askExample(this)">Which branch makes the most profit?</span>
+    <span class="ex" onclick="askExample(this)">Is the wholesale channel worth it?</span>
+    <span class="ex" onclick="askExample(this)">What's dead stock, biggest value first?</span>
+    <span class="ex" onclick="askExample(this)">Who are my top 10 customers?</span>
+  </div>
+</div>
+
+<form id="ask-form">
+  <input type="text" id="question" placeholder="Ask a question…" autocomplete="off">
+  <button type="submit" id="send-btn">Send</button>
+</form>
+
+<script>
+const SESSION_TOKEN_KEY = 'reckoner_session_token';
+function getToken() { return sessionStorage.getItem(SESSION_TOKEN_KEY); }
+
+if (!getToken()) {
+  document.getElementById('login-gate').style.display = 'flex';
+  document.getElementById('chat').style.display = 'none';
+  document.getElementById('ask-form').style.display = 'none';
+}
+
+const chat = document.getElementById('chat');
+const form = document.getElementById('ask-form');
+const input = document.getElementById('question');
+const sendBtn = document.getElementById('send-btn');
+const emptyHint = document.getElementById('empty-hint');
+
+function addMsg(text, cls) {
+  if (emptyHint) emptyHint.style.display = 'none';
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text;
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+function askExample(el) { input.value = el.textContent; form.requestSubmit(); }
+
+async function ask(question) {
+  addMsg(question, 'user');
+  const pending = addMsg('Thinking… (can take up to 30s)', 'pending');
+  sendBtn.disabled = true;
+  try {
+    const res = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Token': getToken() },
+      body: JSON.stringify({ question }),
+    });
+    if (res.status === 401) {
+      pending.remove();
+      addMsg('Session expired - please log in again from the main dashboard.', 'error');
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
+      return;
+    }
+    const out = await res.json().catch(() => ({}));
+    pending.remove();
+    if (!res.ok) { addMsg(out.error || 'Something went wrong.', 'error'); return; }
+    addMsg(out.answer || '(no answer)', 'assistant');
+  } catch (e) {
+    pending.remove();
+    addMsg('Could not reach the server - check your connection and try again.', 'error');
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = '';
+  ask(q);
+});
+</script>
+</body>
+</html>
