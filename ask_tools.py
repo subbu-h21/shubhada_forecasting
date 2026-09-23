@@ -422,12 +422,78 @@ def get_customer_trends(churn_limit=20):
 
 
 # ---------------------------------------------------------------------------
-# Patient-identifying tools - the two deliberate exceptions to the PII guard.
-# The owner explicitly asked for real name/mobile/per-transaction lookup by
-# phone number and by product; PII_ALLOWED_TOOLS (near run_tool, below) is
-# what actually exempts these two from _guard_no_pii - see this module's
-# docstring for the full tradeoff.
+# Patient-identifying tools - deliberate exceptions to the PII guard. The
+# owner explicitly asked for real name/mobile/per-transaction lookup by
+# phone number, by product, and now by a bare NAME (which could be either an
+# employee or a customer, and needs disambiguating first); PII_ALLOWED_TOOLS
+# (near run_tool, below) is what actually exempts these from _guard_no_pii -
+# see this module's docstring for the full tradeoff.
 # ---------------------------------------------------------------------------
+def identify_person(name, limit=20):
+    """Given a bare NAME (not a phone number) - figure out whether it's an
+    EMPLOYEE or a CUSTOMER before pulling any detail, since the same name
+    could be either and the right follow-up tool differs:
+      - kind='employee': name matched Billed By / Item Given By / Created By.
+        Follow up with get_employee_performance() for their full detail.
+      - kind='customer_candidates': name matched one or more Patient names
+        (partial/case-insensitive), each returned with their real mobile
+        number, spend, and line count, highest-spend first, capped at
+        `limit` (total_matches gives the true count - a common first name
+        can match 50+ people, so ask the owner to narrow it, e.g. with a
+        fuller name or branch, rather than dumping all of them). If there's
+        exactly one candidate, follow up with get_patient_history using
+        their mobile for full detail. If there are several, list them (name,
+        approx spend) and ask the user which one before pulling anyone's
+        full history.
+      - kind='not_found': no employee or patient name matched.
+    Always try this FIRST when a question names a person, before assuming
+    which kind of lookup applies."""
+    s, p = _load()
+    name_lower = (name or '').strip().lower()
+    if not name_lower:
+        return {'error': 'name is required'}
+
+    lines, _ = rk.compute_distributor_lines(p)
+    perf = rk.build_employee_performance(s, p, lines)
+    employee_matches = set()
+    for section in ('billed_by', 'given_by', 'created_by'):
+        df = perf.get(section)
+        if df is not None and 'Employee' in df.columns:
+            hits = df[df['Employee'].str.lower().str.contains(name_lower, na=False)]
+            employee_matches.update(hits['Employee'].tolist())
+    if employee_matches:
+        return {
+            'name_searched': name, 'kind': 'employee',
+            'employee_names_matched': sorted(employee_matches),
+            'hint': 'call get_employee_performance() for full detail on these employees',
+        }
+
+    if 'Patient' not in s.columns:
+        return {'name_searched': name, 'kind': 'not_found',
+                'reason': 'no matching employee, and no Patient column in the data'}
+    col = _mobile_col()
+    hits = s[s['Patient'].notna() & s['Patient'].str.lower().str.contains(name_lower, na=False)].copy()
+    if hits.empty:
+        return {'name_searched': name, 'kind': 'not_found', 'reason': 'no matching employee or patient name found'}
+
+    hits['_mobile'] = hits[col] if col else None
+    g = hits.groupby('Patient').agg(
+        Lines=('Product', 'count'), Spend=('Item Total', 'sum'),
+        Mobile=('_mobile', lambda x: next((v for v in x if pd.notna(v)), None)),
+    ).reset_index().sort_values('Spend', ascending=False)
+    total_matches = len(g)
+    candidates = _records_with_pii(g.head(int(limit)), ['Patient', 'Mobile', 'Lines', 'Spend'])
+    return {
+        'name_searched': name, 'kind': 'customer_candidates',
+        'total_matches': total_matches, 'candidates': candidates,
+        'hint': ('exactly one candidate - call get_patient_history with their Mobile for full detail'
+                 if total_matches == 1 else
+                 f'{total_matches} candidates (showing top {len(candidates)} by spend) - ask the user '
+                 'which one before calling get_patient_history for anyone; if too many, ask them to '
+                 'narrow the name or give a phone number instead'),
+    }
+
+
 def get_patient_history(mobile, limit=100):
     """Full, row-level sale history for ONE patient, found by (all or part
     of) their mobile number - every product they've bought, with their real
@@ -586,6 +652,9 @@ TOOLS = [
          'metric': {'type': 'string', 'enum': list(QUERY_METRICS)},
          'product': {'type': 'string'}, 'branch': {'type': 'string'},
          'month': {'type': 'string'}, 'top_n': {'type': 'integer'}})},
+    {'name': 'identify_person', 'fn': identify_person,
+     'description': identify_person.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['name'])},
     {'name': 'get_patient_history', 'fn': get_patient_history,
      'description': get_patient_history.__doc__,
      'parameters': _schema({'mobile': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['mobile'])},
@@ -596,9 +665,9 @@ TOOLS = [
 
 TOOL_FNS = {t['name']: t['fn'] for t in TOOLS}
 
-# The only two tools allowed to return patient identity (name/mobile) - see
-# this module's docstring. Every other tool still goes through _guard_no_pii.
-PII_ALLOWED_TOOLS = {'get_patient_history', 'get_product_patient_history'}
+# The only tools allowed to return patient identity (name/mobile) - see this
+# module's docstring. Every other tool still goes through _guard_no_pii.
+PII_ALLOWED_TOOLS = {'identify_person', 'get_patient_history', 'get_product_patient_history'}
 
 
 def run_tool(name, args):
