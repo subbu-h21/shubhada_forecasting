@@ -8,25 +8,30 @@ functions below - it never touches the raw Sale/Purchase tables directly. So:
     (business info, sent to the configured model provider),
   * patient identity (name, mobile number) is withheld by default - a guard
     (_guard_no_pii) refuses any tool payload that carries a PII_COLUMNS key -
-  * EXCEPT two tools the owner explicitly asked for, listed in
-    PII_ALLOWED_TOOLS: get_patient_history (a named patient's full purchase
-    history, looked up by phone number) and get_product_patient_history (one
-    product's transactions with buyer identity). Calling either sends that
-    real name + mobile number + purchase history to the external AI provider
-    - that's the deliberate, understood tradeoff of those two tools, not a
-    leak. Every other tool still pseudonymizes (customers, via
-    get_top_customers/get_customer_trends) or omits (patients) identity.
+  * EXCEPT the tools explicitly asked for, listed in PII_ALLOWED_TOOLS:
+    identify_person, get_patient_history, and get_product_patient_history -
+    each can surface a real patient's name/mobile/purchase history. Calling
+    one sends that to the external AI provider - the deliberate, understood
+    tradeoff of those tools, not a leak. Every other tool still pseudonymizes
+    (customers, via get_top_customers/get_customer_trends) or omits
+    (patients) identity.
 
 Adding heavier measures later (proxy names, category labels, magnitude
 buckets) means editing only this file - the model loop in ask.py never changes.
 
 Everything here is read-only over data\processed and reuses run_reckoner's
-analysis functions, so the numbers always match the report.
+analysis functions, so the numbers always match the report. The one
+exception is get_employee_targets, which reads on-demand exports from the
+separate shubhadahealth.com system (see that function's docstring) - never
+fetched live (no stored credentials for that site), only what's been
+manually exported and dropped in data/employee_targets/.
 """
 import hashlib
 import json
 import re
+from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -369,6 +374,68 @@ def get_employee_performance():
     return _guard_no_pii(out)
 
 
+# ---------------------------------------------------------------------------
+# On-demand employee KPI/target report from the SEPARATE shubhadahealth.com
+# system - not part of the reckoner's own data, and never fetched live: that
+# site needs a login, and no credential for it is stored anywhere in this
+# codebase (a deliberate choice - see this module's docstring). Instead, the
+# owner exports a report from that site (Employee Performance Report -> pick
+# employee -> Export) whenever a question needs it and drops the file in
+# EMPLOYEE_TARGETS_DIR; this tool reads whatever's there, fresh, each call.
+# Nothing here is cached beyond the file itself, and no history accumulates.
+# ---------------------------------------------------------------------------
+EMPLOYEE_TARGETS_DIR = Path(__file__).parent / 'data' / 'employee_targets'
+_TARGET_FILENAME_RE = re.compile(r'^Performance Chart of (.+)\.xlsx$', re.IGNORECASE)
+
+
+def get_employee_targets(name=None):
+    """On-demand employee KPI/target report from the separate
+    shubhadahealth.com system: target vs achieved quantity/amount, an
+    incentive 'Earned Amount', and Performance % - per KPI category (Sales,
+    Sales-Packed, DC Created/Checked, Purchase Created, Re-Order Items/
+    Placed/Collected/Return, Stock Transfer, Dump List, Item Shelfed,
+    Sales-Return, Non Cash Receipt). NOT part of the reckoner's own data, and
+    NOT live - only available once the owner has exported it from that site
+    (Employee Performance Report -> pick employee -> Export) and dropped the
+    file in data/employee_targets/. If nothing matches, say so plainly and
+    ask the owner to export+drop the file, then ask again - do not guess or
+    substitute reckoner figures instead. `name` filters to exports whose
+    employee name contains it (case-insensitive); omit to list every export
+    currently available."""
+    if not EMPLOYEE_TARGETS_DIR.exists():
+        return {'available': False, 'reason': 'no employee_targets folder yet'}
+    matches = []
+    for f in EMPLOYEE_TARGETS_DIR.glob('*.xlsx'):
+        m = _TARGET_FILENAME_RE.match(f.name)
+        if m:
+            matches.append((m.group(1).strip(), f))
+    if name:
+        name_lower = name.strip().lower()
+        matches = [(emp, f) for emp, f in matches if name_lower in emp.lower()]
+    if not matches:
+        who = f' for "{name}"' if name else ''
+        return {'available': False,
+                'reason': f'no exported performance file{who} in data/employee_targets/ - export it from '
+                          'shubhadahealth.com (Employee Performance Report -> pick employee -> Export) and '
+                          'drop the file there, then ask again'}
+
+    def load_one(emp_name, path):
+        df = pd.read_excel(path, sheet_name='data')
+        df = df.rename(columns={'Category Name': 'Category', 'Achived Qty': 'Achieved_Qty',
+                                 'Achived Amount': 'Achieved_Amount', 'Factor': 'Conversion_Factor'})
+        categories = _records(df, ['Category', 'Target Qty', 'Achieved_Qty', 'Target Amount',
+                                    'Achieved_Amount', 'Conversion_Factor', 'Earned Amount', 'Performance %'])
+        return {
+            'employee': emp_name, 'exported_file': path.name,
+            'exported_at': datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M'),
+            'total_earned_amount': _round(df['Earned Amount'].sum()) if 'Earned Amount' in df.columns else None,
+            'categories': categories,
+        }
+
+    matches.sort(key=lambda x: x[1].stat().st_mtime, reverse=True)
+    return {'available': True, 'reports': [load_one(emp, f) for emp, f in matches]}
+
+
 def get_top_customers(n=10, by='spend'):
     """Top customers ranked by total spend or visit count. Each customer is
     identified only by a one-way pseudonymous code ('Cust_xxxxxx') derived
@@ -434,7 +501,9 @@ def identify_person(name, limit=20):
     EMPLOYEE or a CUSTOMER before pulling any detail, since the same name
     could be either and the right follow-up tool differs:
       - kind='employee': name matched Billed By / Item Given By / Created By.
-        Follow up with get_employee_performance() for their full detail.
+        Follow up with get_employee_performance() for their full detail, and
+        get_employee_targets() too if the question wants minute detail,
+        targets, or earned/incentive amounts.
       - kind='customer_candidates': name matched one or more Patient names
         (partial/case-insensitive), each returned with their real mobile
         number, spend, and line count, highest-spend first, capped at
@@ -639,6 +708,9 @@ TOOLS = [
      'parameters': _schema({'n': {'type': 'integer'}})},
     {'name': 'get_employee_performance', 'fn': get_employee_performance,
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
+    {'name': 'get_employee_targets', 'fn': get_employee_targets,
+     'description': get_employee_targets.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}})},
     {'name': 'get_top_customers', 'fn': get_top_customers,
      'description': get_top_customers.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}, 'by': {'type': 'string', 'enum': ['spend', 'visits']}})},

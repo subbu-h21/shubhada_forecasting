@@ -14,6 +14,12 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
+# On-demand employee-performance exports from shubhadahealth.com, dropped in
+# manually when a question needs them - real employee names + KPI/earnings
+# data. Never permanent, never committed.
+data/employee_targets/*
+!data/employee_targets/.gitkeep
+
 # Generated reports also contain real figures (revenue, profit, margins)
 reports/**/*.xlsx
 

@@ -102,7 +102,13 @@ Rules:
 - If a question names a PERSON by name (not a phone number) - e.g. "tell me
   about Abhishek" - call identify_person FIRST, before assuming who they are:
     - kind='employee': follow up with get_employee_performance() for their
-      detail.
+      detail. If the question asks for "minute detail", "targets",
+      "performance chart", or "earned amount" specifically, ALSO call
+      get_employee_targets with their name - it has target-vs-achieved KPI
+      and incentive data get_employee_performance doesn't. If
+      available=False there, tell the owner to export it from
+      shubhadahealth.com and drop it in data/employee_targets/, then ask
+      again - do not fall back to reckoner figures as a substitute for it.
     - kind='customer_candidates' with exactly one candidate: follow up with
       get_patient_history using that candidate's mobile number.
     - kind='customer_candidates' with several candidates: do NOT guess which
@@ -313,6 +319,7 @@ def selftest():
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
         ('get_employee_performance', {}),
+        ('get_employee_targets', {}),
         ('get_top_customers', {'n': 5, 'by': 'spend'}),
         ('get_customer_trends', {'churn_limit': 5}),
         ('query_sales', {'group_by': ['branch'], 'metric': 'revenue'}),
