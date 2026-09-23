@@ -1,18 +1,24 @@
 r"""
 Conversational-BI tool layer for the Pharmacy Ready Reckoner
 ============================================================
-The assistant (a Gemini model on Vertex) never sees the raw Sale/Purchase
-tables or any patient identity. It can only call the functions below, and each
-one returns a SMALL, already-aggregated result computed locally in Python. So:
+The assistant (a model via OpenRouter, or Gemini on Vertex) can only call the
+functions below - it never touches the raw Sale/Purchase tables directly. So:
 
-  * real product / supplier names and real rupee figures DO go out (they're
-    business info, sent to a no-training / in-region model),
-  * patient names and mobile numbers NEVER go out - no tool returns them, and
-    a guard (_guard_no_pii) refuses any payload that slips one through.
+  * real product / supplier / employee names and real rupee figures DO go out
+    (business info, sent to the configured model provider),
+  * patient identity (name, mobile number) is withheld by default - a guard
+    (_guard_no_pii) refuses any tool payload that carries a PII_COLUMNS key -
+  * EXCEPT two tools the owner explicitly asked for, listed in
+    PII_ALLOWED_TOOLS: get_patient_history (a named patient's full purchase
+    history, looked up by phone number) and get_product_patient_history (one
+    product's transactions with buyer identity). Calling either sends that
+    real name + mobile number + purchase history to the external AI provider
+    - that's the deliberate, understood tradeoff of those two tools, not a
+    leak. Every other tool still pseudonymizes (customers, via
+    get_top_customers/get_customer_trends) or omits (patients) identity.
 
-That is the whole privacy boundary. Adding heavier measures later (proxy names,
-category labels, magnitude buckets) means editing only this file - the model
-loop in ask.py never changes.
+Adding heavier measures later (proxy names, category labels, magnitude
+buckets) means editing only this file - the model loop in ask.py never changes.
 
 Everything here is read-only over data\processed and reuses run_reckoner's
 analysis functions, so the numbers always match the report.
@@ -131,6 +137,14 @@ def _records(df, cols=None):
     if cols is not None:
         df = df[[c for c in cols if c in df.columns]]
     df = df.drop(columns=[c for c in df.columns if c in PII_COLUMNS], errors='ignore')
+    return json.loads(df.replace({np.nan: None}).to_json(orient='records'))
+
+
+def _records_with_pii(df, cols=None):
+    """Same as _records but does NOT drop PII_COLUMNS - only for the two
+    tools in PII_ALLOWED_TOOLS that intentionally return patient identity."""
+    if cols is not None:
+        df = df[[c for c in cols if c in df.columns]]
     return json.loads(df.replace({np.nan: None}).to_json(orient='records'))
 
 
@@ -407,6 +421,73 @@ def get_customer_trends(churn_limit=20):
     })
 
 
+# ---------------------------------------------------------------------------
+# Patient-identifying tools - the two deliberate exceptions to the PII guard.
+# The owner explicitly asked for real name/mobile/per-transaction lookup by
+# phone number and by product; PII_ALLOWED_TOOLS (near run_tool, below) is
+# what actually exempts these two from _guard_no_pii - see this module's
+# docstring for the full tradeoff.
+# ---------------------------------------------------------------------------
+def get_patient_history(mobile, limit=100):
+    """Full, row-level sale history for ONE patient, found by (all or part
+    of) their mobile number - every product they've bought, with their real
+    name and mobile number included, most recent first. Use this whenever
+    the question gives a phone number to search by. Returns available=False
+    if this export has no mobile number column yet, or found=False if no
+    sales match that number."""
+    s, _ = _load()
+    col = _mobile_col()
+    if not col:
+        return {'available': False, 'reason': 'no mobile number column in the data yet'}
+    digits = re.sub(r'\D', '', str(mobile))
+    if not digits:
+        return {'error': 'no digits found in the given phone number'}
+    mobile_digits = s[col].astype(str).str.replace(r'\D', '', regex=True)
+    match = s[(mobile_digits != '') & mobile_digits.str.contains(digits, na=False)].copy()
+    if match.empty:
+        return {'available': True, 'mobile_searched': mobile, 'found': False, 'sales': []}
+    match['Branch'] = match['Inv.No'].apply(rk.extract_branch)
+    match['Qty'] = rk.to_strips(match['Qty'], match['Product'], _factor_map())  # overwrite in place - a second 'Qty' column breaks to_json(orient='records')
+    match = match.sort_values('Date', ascending=False)
+    match = match.rename(columns={col: 'Mobile'})
+    sales = _records_with_pii(match, ['Date', 'Patient', 'Mobile', 'Branch', 'Inv.No', 'Product', 'Qty', 'MRP', 'Item Total'])
+    patient_names = sorted({r['Patient'] for r in sales if r.get('Patient')})
+    return {
+        'available': True, 'mobile_searched': mobile, 'found': True,
+        'patient_names': patient_names,
+        'total_lines': len(sales), 'total_products': int(match['Product'].nunique()),
+        'total_spend': _round(match['Item Total'].sum()),
+        'sales': sales[:int(limit)],
+    }
+
+
+def get_product_patient_history(product, limit=100):
+    """Row-level sale history for ONE product - every individual transaction
+    (not aggregated), with the real buyer's name and mobile number included,
+    most recent first. Use this whenever a question about a product's sales
+    should show WHO bought it, not just totals. Call search_products first
+    to get the exact product name."""
+    s, _ = _load()
+    col = _mobile_col()
+    match = s[s['Product'] == product].copy()
+    if match.empty:
+        return {'product': product, 'found': False, 'hint': 'call search_products for the exact name'}
+    match['Branch'] = match['Inv.No'].apply(rk.extract_branch)
+    match['Qty'] = rk.to_strips(match['Qty'], match['Product'], _factor_map())
+    match = match.sort_values('Date', ascending=False)
+    cols = ['Date', 'Patient']
+    if col:
+        match = match.rename(columns={col: 'Mobile'})
+        cols.append('Mobile')
+    cols += ['Branch', 'Inv.No', 'Qty', 'MRP', 'Item Total']
+    sales = _records_with_pii(match, cols)
+    return {
+        'product': product, 'found': True,
+        'total_lines': len(sales),
+        'sales': sales[:int(limit)],
+    }
+
+
 QUERY_DIMS = {'product': 'Product', 'branch': 'Branch', 'month': 'Source_Month'}
 QUERY_METRICS = ('revenue', 'pretax_revenue', 'qty_strips', 'invoices', 'avg_price')
 
@@ -505,25 +586,40 @@ TOOLS = [
          'metric': {'type': 'string', 'enum': list(QUERY_METRICS)},
          'product': {'type': 'string'}, 'branch': {'type': 'string'},
          'month': {'type': 'string'}, 'top_n': {'type': 'integer'}})},
+    {'name': 'get_patient_history', 'fn': get_patient_history,
+     'description': get_patient_history.__doc__,
+     'parameters': _schema({'mobile': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['mobile'])},
+    {'name': 'get_product_patient_history', 'fn': get_product_patient_history,
+     'description': get_product_patient_history.__doc__,
+     'parameters': _schema({'product': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['product'])},
 ]
 
 TOOL_FNS = {t['name']: t['fn'] for t in TOOLS}
 
+# The only two tools allowed to return patient identity (name/mobile) - see
+# this module's docstring. Every other tool still goes through _guard_no_pii.
+PII_ALLOWED_TOOLS = {'get_patient_history', 'get_product_patient_history'}
+
 
 def run_tool(name, args):
-    """Dispatch a model tool call to the local function, guarding output."""
+    """Dispatch a model tool call to the local function, guarding output -
+    except for PII_ALLOWED_TOOLS, which intentionally return real patient
+    identity and are exempted from that guard on purpose."""
     if name not in TOOL_FNS:
         return {'error': f'unknown tool {name}'}
     try:
-        return _guard_no_pii(TOOL_FNS[name](**(args or {})))
+        result = TOOL_FNS[name](**(args or {}))
+        return result if name in PII_ALLOWED_TOOLS else _guard_no_pii(result)
     except Exception as e:  # surface tool errors to the model, don't crash the loop
         return {'error': f'{type(e).__name__}: {e}'}
 
 
-# The user's own question can carry PII (e.g. a phone number). Scrub it before
-# it ever reaches the model.
-_PHONE_RE = re.compile(r'\b\d{10}\b')
-
-
 def scrub_question(text):
-    return _PHONE_RE.sub('[number removed]', text or '')
+    """No-op passthrough. Used to strip a 10-digit phone number out of the
+    user's own question before it reached the model - but the owner
+    explicitly asked for phone-number-based patient lookup (see
+    get_patient_history), which needs that exact number to reach the model
+    unaltered, so scrubbing it here would silently break that feature. Kept
+    as a function (not deleted) so ask.py's call site doesn't need to change
+    if scrubbing something else here is ever needed again."""
+    return text or ''

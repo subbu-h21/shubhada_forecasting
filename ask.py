@@ -2,17 +2,20 @@ r"""
 Ask the Reckoner - a conversational BI over your pharmacy data
 ==============================================================
 Type a question in plain English; a model answers by calling the local report
-tools in ask_tools.py - it never sees the raw tables or any patient identity.
-Product, supplier, and employee names/figures go out in full (business info -
-employee performance is an internal staff-review view, same as the Excel
-report); customer identity is pseudonymous - see get_top_customers/
-get_customer_trends in ask_tools.py, which only ever hand out a one-way
-'Cust_xxxxxx' code.
+tools in ask_tools.py - it never touches the raw tables directly. Product,
+supplier, and employee names/figures go out in full (business info); customer
+identity is pseudonymous by default (get_top_customers/get_customer_trends
+only ever hand out a one-way 'Cust_xxxxxx' code) - EXCEPT get_patient_history
+and get_product_patient_history, two tools the owner explicitly asked for,
+which send a real patient's name, mobile number, and purchase history to the
+external AI provider on purpose. See ask_tools.py's docstring for the full
+privacy boundary.
 
     python ask.py "is my wholesale channel profitable?"
     python ask.py --dry-run "..."   # show exactly what would be sent out,
                                      # and a sample tool result - NO model call
-    python ask.py --selftest        # run every tool, prove none leak patient data
+    python ask.py --selftest        # run every tool, confirm the PII boundary
+                                     # holds except the two deliberate exceptions
     python ask.py --tools           # list the tools the model can call
 
 Two backends, chosen by env ASK_BACKEND (default "openrouter"):
@@ -94,6 +97,12 @@ Rules:
   alone. Be brief and specific.
 - Answer in English first, then a one- or two-line Kannada (ಕನ್ನಡ) summary.
 - If a question needs a product's exact name, use search_products first.
+- If the question gives a phone/mobile number, call get_patient_history with
+  it and list what that patient bought (with dates and amounts).
+- If a question asks about a product's sale HISTORY/transactions (not just
+  totals) - e.g. "who bought X", "sales history of X" - call
+  get_product_patient_history and show the buyers (name, mobile, date, qty,
+  amount) alongside any aggregate figures from get_product.
 """
 
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
@@ -254,12 +263,14 @@ def dry_run(question):
     print('DRY RUN - nothing is sent to any model provider. This shows what a')
     print('live call WOULD expose, so you can see the privacy boundary yourself.')
     print('=' * 68)
-    print('\n1) Your question, after PII scrub (phone numbers stripped):')
+    print('\n1) Your question, exactly as it would be sent (no scrubbing applied -')
+    print('   see scrub_question\'s docstring for why):')
     print('   ', T.scrub_question(question))
     print('\n2) Tools the model may call (names + what they return):')
     for t in T.TOOLS:
-        one_line = ' '.join(t['description'].split())[:96]
-        print(f'   - {t["name"]}: {one_line}')
+        one_line = ' '.join(t['description'].split())[:90]
+        flag = '  [SENDS REAL PATIENT IDENTITY]' if t['name'] in T.PII_ALLOWED_TOOLS else ''
+        print(f'   - {t["name"]}: {one_line}{flag}')
     print('\n3) Example of what actually leaves the machine (get_overview output):')
     sample = T.get_overview()
     print(textwrap.indent(json.dumps(sample, indent=2, ensure_ascii=False, default=str), '   '))
@@ -269,9 +280,11 @@ def dry_run(question):
     cust_sample = T.get_top_customers(n=3, by='spend')
     print(textwrap.indent(json.dumps(cust_sample, indent=2, ensure_ascii=False, default=str), '   '))
     print('\n6) Patient-data check on that output:', _pii_verdict(cust_sample))
-    print('\nNo patient name or real mobile number appears above - only products,')
-    print('suppliers, pseudonymous customer codes, and aggregate figures. That is')
-    print('the whole privacy boundary.')
+    print('\nEvery tool above stays inside that boundary EXCEPT the two marked')
+    print('[SENDS REAL PATIENT IDENTITY] in section 2 (get_patient_history,')
+    print('get_product_patient_history) - by explicit owner request, those send a')
+    print('real name, mobile number, and purchase history to the model. Not run')
+    print('here to avoid printing a real patient\'s data in a generic demo.')
 
 
 def _pii_verdict(payload):
@@ -308,6 +321,13 @@ def selftest():
         print(f'\n  get_product("{first[0]}") -> margin {p.get("gross_margin_pct")}%, '
               f'sold {p.get("total_sold_strips")} strips  [{_pii_verdict(p)}]')
     print('\nAll tools passed the patient-data check.' if ok else '\nSOME TOOLS LEAKED - fix before going live.')
+
+    print('\nDeliberately EXEMPTED from the check above (real patient identity by')
+    print('explicit owner request - see ask_tools.py docstring):')
+    for name in sorted(T.PII_ALLOWED_TOOLS):
+        print(f'  - {name}')
+    smoke = T.run_tool('get_patient_history', {'mobile': '0000000000'})
+    print(f'  structural smoke test: get_patient_history("0000000000") -> found={smoke.get("found")}')
 
 
 def main(argv):
