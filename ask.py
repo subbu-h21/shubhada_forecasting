@@ -1,0 +1,312 @@
+r"""
+Ask the Reckoner - a conversational BI over your pharmacy data
+==============================================================
+Type a question in plain English; a model answers by calling the local report
+tools in ask_tools.py - it never sees the raw tables or any patient identity.
+Product and supplier names/figures go out in full (business info); customer
+identity is pseudonymous - see get_top_customers/get_customer_trends in
+ask_tools.py, which only ever hand out a one-way 'Cust_xxxxxx' code.
+
+    python ask.py "is my wholesale channel profitable?"
+    python ask.py --dry-run "..."   # show exactly what would be sent out,
+                                     # and a sample tool result - NO model call
+    python ask.py --selftest        # run every tool, prove none leak patient data
+    python ask.py --tools           # list the tools the model can call
+
+Two backends, chosen by env ASK_BACKEND (default "openrouter"):
+
+  openrouter (default) - https://openrouter.ai, any hosted model, via the
+  OpenAI SDK pointed at OpenRouter's OpenAI-compatible endpoint:
+    - env: OPENROUTER_API_KEY=<your key>        (get one at openrouter.ai/keys)
+           OPENROUTER_MODEL=google/gemini-2.5-flash   (any OpenRouter model id)
+    Then:  pip install openai
+
+  vertex - Gemini directly on Google Vertex AI:
+    - a Google Cloud project with the Vertex AI API enabled + billing on
+    - credentials on this PC: run `gcloud auth application-default login`
+      (or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key file)
+    - env: ASK_BACKEND=vertex   VERTEX_PROJECT=<your-project-id>
+           VERTEX_LOCATION=asia-south1   GEMINI_MODEL=gemini-2.5-pro
+    Then:  pip install google-genai
+
+Env vars can also go in a `.env` file next to this script (KEY=value, one per
+line, '#' comments allowed) instead of being set system-wide - handy on
+Windows where a just-set system env var needs a fresh terminal/app restart to
+be seen. `.env` is gitignored; a real environment variable always wins over it.
+"""
+import json
+import os
+import sys
+import textwrap
+from pathlib import Path
+
+import ask_tools as T
+
+ROOT = Path(__file__).parent
+
+
+def _load_dotenv():
+    """Populate os.environ from a local .env file, without overriding any
+    variable that's already set for real (system/session env wins)."""
+    env_path = ROOT / '.env'
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
+# Answers include a Kannada summary and Rupee figures (see SYSTEM_PROMPT) -
+# on Windows, stdout/stderr often default to the legacy system codepage
+# (e.g. cp1252) rather than UTF-8 when not attached to a real console (piped,
+# redirected, or some terminal setups), which crashes on the first non-ASCII
+# character printed. Force UTF-8 so the answer always prints instead.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        pass
+
+SYSTEM_PROMPT = """\
+You are the analyst for a three-branch pharmacy in Karnataka, India. You help
+the owner understand their business and decide what to do.
+
+Rules:
+- ALWAYS get numbers by calling a tool. NEVER invent, estimate or recall a
+  figure yourself - if a tool didn't give it to you, say you don't have it.
+- Money is in Indian rupees (₹); quantities are in strips (a strip is one pack).
+- The pharmacy sells through two RETAIL branches (Shivaji Chowk, Hospet Road)
+  and a B2B / WHOLESALE channel. Wholesale runs on thin margins by nature - a
+  low B2B margin is normal, not a mistake.
+- Lead with the answer, then one or two concrete, money-aware actions
+  ("this is costing ~₹X, do Y"). Prioritise by rupee impact, not by percentage
+  alone. Be brief and specific.
+- Answer in English first, then a one- or two-line Kannada (ಕನ್ನಡ) summary.
+- If a question needs a product's exact name, use search_products first.
+"""
+
+MAX_STEPS = 6  # tool-call rounds before we force a final answer
+
+
+# ---------------------------------------------------------------------------
+# Vertex / Gemini integration (the only part that talks to Google).
+# Isolated on purpose: swapping providers or going local = edit this function.
+# ---------------------------------------------------------------------------
+def _gemini_answer(question, verbose=False):
+    from google import genai
+    from google.genai import types
+
+    project = os.environ.get('VERTEX_PROJECT')
+    location = os.environ.get('VERTEX_LOCATION', 'asia-south1')
+    model = os.environ.get('GEMINI_MODEL', 'gemini-2.5-pro')
+    if not project:
+        raise RuntimeError('Set VERTEX_PROJECT (your Google Cloud project id).')
+
+    client = genai.Client(vertexai=True, project=project, location=location)
+    tools = [types.Tool(function_declarations=[
+        types.FunctionDeclaration(name=t['name'], description=t['description'],
+                                  parameters=t['parameters'])
+        for t in T.TOOLS])]
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT, tools=tools, temperature=0.2)
+
+    contents = [types.Content(role='user',
+                              parts=[types.Part.from_text(T.scrub_question(question))])]
+    for _ in range(MAX_STEPS):
+        resp = client.models.generate_content(model=model, contents=contents, config=config)
+        parts = resp.candidates[0].content.parts
+        calls = [p.function_call for p in parts if getattr(p, 'function_call', None)]
+        if not calls:
+            return resp.text
+        contents.append(resp.candidates[0].content)  # record the model's turn
+        for fc in calls:
+            args = dict(fc.args) if fc.args else {}
+            if verbose:
+                print(f'  → tool: {fc.name}({json.dumps(args, default=str)})')
+            result = T.run_tool(fc.name, args)
+            contents.append(types.Content(role='user', parts=[
+                types.Part.from_function_response(name=fc.name, response={'result': result})]))
+    # ran out of steps - ask for a final answer with no more tools
+    resp = client.models.generate_content(
+        model=model, contents=contents,
+        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2))
+    return resp.text
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter integration - OpenRouter exposes an OpenAI-compatible API, so the
+# official `openai` SDK is pointed at OpenRouter's base_url instead of
+# OpenAI's. Default backend.
+# ---------------------------------------------------------------------------
+def _openrouter_answer(question, verbose=False):
+    from openai import APIStatusError, OpenAI
+
+    api_key = os.environ.get('OPENROUTER_API_KEY')
+    model = os.environ.get('OPENROUTER_MODEL', 'google/gemini-2.5-flash')
+    if not api_key:
+        raise RuntimeError('Set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys).')
+
+    client = OpenAI(
+        base_url='https://openrouter.ai/api/v1', api_key=api_key,
+        default_headers={'HTTP-Referer': 'https://github.com/subbu-h21/shubhada_forecasting',
+                         'X-Title': 'Pharmacy Reckoner - Ask'})
+    tools = [{'type': 'function', 'function': {
+        'name': t['name'], 'description': t['description'], 'parameters': t['parameters']}}
+        for t in T.TOOLS]
+    messages = [
+        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'user', 'content': T.scrub_question(question)},
+    ]
+
+    def complete(with_tools):
+        kwargs = {'model': model, 'messages': messages}
+        if with_tools:
+            kwargs['tools'] = tools
+        try:
+            return client.chat.completions.create(**kwargs)
+        except APIStatusError as e:
+            detail = e.body if getattr(e, 'body', None) is not None else str(e)
+            raise RuntimeError(f'OpenRouter API error {e.status_code}: {detail}') from None
+
+    for _ in range(MAX_STEPS):
+        resp = complete(with_tools=True)
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            return msg.content
+        # Record the model's turn (incl. its tool_calls) in the wire format,
+        # not a raw SDK object dump - keeps only the fields the API expects
+        # back on the next call.
+        assistant_msg = {'role': 'assistant', 'content': msg.content,
+                         'tool_calls': [{'id': tc.id, 'type': 'function',
+                                        'function': {'name': tc.function.name,
+                                                    'arguments': tc.function.arguments}}
+                                       for tc in msg.tool_calls]}
+        messages.append(assistant_msg)
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or '{}')
+            except json.JSONDecodeError:
+                args = {}
+            if verbose:
+                print(f'  → tool: {name}({json.dumps(args, default=str)})')
+            result = T.run_tool(name, args)
+            messages.append({'role': 'tool', 'tool_call_id': tc.id,
+                             'content': json.dumps(result, default=str)})
+    # ran out of steps - ask for a final answer with no more tools
+    resp = complete(with_tools=False)
+    return resp.choices[0].message.content
+
+
+def ask(question, verbose=False):
+    backend = os.environ.get('ASK_BACKEND', 'openrouter')
+    if backend == 'openrouter':
+        return _openrouter_answer(question, verbose=verbose)
+    if backend == 'vertex':
+        return _gemini_answer(question, verbose=verbose)
+    raise RuntimeError(f"Unknown ASK_BACKEND '{backend}' - use 'openrouter' or 'vertex'.")
+
+
+# ---------------------------------------------------------------------------
+# Offline modes - work with no Vertex account, so you can check privacy first
+# ---------------------------------------------------------------------------
+def dry_run(question):
+    print('=' * 68)
+    print('DRY RUN - nothing is sent to any model provider. This shows what a')
+    print('live call WOULD expose, so you can see the privacy boundary yourself.')
+    print('=' * 68)
+    print('\n1) Your question, after PII scrub (phone numbers stripped):')
+    print('   ', T.scrub_question(question))
+    print('\n2) Tools the model may call (names + what they return):')
+    for t in T.TOOLS:
+        one_line = ' '.join(t['description'].split())[:96]
+        print(f'   - {t["name"]}: {one_line}')
+    print('\n3) Example of what actually leaves the machine (get_overview output):')
+    sample = T.get_overview()
+    print(textwrap.indent(json.dumps(sample, indent=2, ensure_ascii=False, default=str), '   '))
+    print('\n4) Patient-data check on that output:', _pii_verdict(sample))
+    print('\n5) Customer identity example (get_top_customers output) - each')
+    print('   customer is only ever a one-way pseudonymous code, never their real mobile number:')
+    cust_sample = T.get_top_customers(n=3, by='spend')
+    print(textwrap.indent(json.dumps(cust_sample, indent=2, ensure_ascii=False, default=str), '   '))
+    print('\n6) Patient-data check on that output:', _pii_verdict(cust_sample))
+    print('\nNo patient name or real mobile number appears above - only products,')
+    print('suppliers, pseudonymous customer codes, and aggregate figures. That is')
+    print('the whole privacy boundary.')
+
+
+def _pii_verdict(payload):
+    try:
+        T._guard_no_pii(payload)
+        return 'PASS - no patient fields present'
+    except ValueError as e:
+        return f'FAIL - {e}'
+
+
+def selftest():
+    print('Running every tool and checking none returns patient data...\n')
+    checks = [
+        ('get_overview', {}), ('get_channel_profit', {}),
+        ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
+        ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
+        ('get_purchase_issues', {'n': 5}),
+        ('get_top_customers', {'n': 5, 'by': 'spend'}),
+        ('get_customer_trends', {'churn_limit': 5}),
+        ('query_sales', {'group_by': ['branch'], 'metric': 'revenue'}),
+    ]
+    ok = True
+    for name, args in checks:
+        out = T.run_tool(name, args)
+        verdict = _pii_verdict(out)
+        size = len(json.dumps(out, default=str))
+        ok = ok and verdict.startswith('PASS')
+        print(f'  {name:20} {verdict:34} ({size:,} bytes)')
+    # spot-check a real product end to end
+    first = T.search_products('tab', 1)['matches']
+    if first:
+        p = T.run_tool('get_product', {'name': first[0]})
+        print(f'\n  get_product("{first[0]}") -> margin {p.get("gross_margin_pct")}%, '
+              f'sold {p.get("total_sold_strips")} strips  [{_pii_verdict(p)}]')
+    print('\nAll tools passed the patient-data check.' if ok else '\nSOME TOOLS LEAKED - fix before going live.')
+
+
+def main(argv):
+    args = argv[1:]
+    if not args or args[0] in ('-h', '--help'):
+        print(__doc__)
+        return
+    if args[0] == '--tools':
+        for t in T.TOOLS:
+            print(f'{t["name"]}\n    {" ".join(t["description"].split())}\n')
+        return
+    if args[0] == '--selftest':
+        selftest()
+        return
+    verbose = '--verbose' in args or '-v' in args
+    args = [a for a in args if a not in ('--verbose', '-v')]
+    if args[0] == '--dry-run':
+        dry_run(' '.join(args[1:]))
+        return
+    question = ' '.join(args)
+    backend = os.environ.get('ASK_BACKEND', 'openrouter')
+    try:
+        print(ask(question, verbose=verbose))
+    except ImportError:
+        pkg = 'openai' if backend == 'openrouter' else 'google-genai'
+        print(f'The {pkg} package is not installed yet (needed for ASK_BACKEND={backend}).\n'
+              f'Run:  pip install {pkg}\n'
+              'Meanwhile try:  python ask.py --dry-run "%s"' % question)
+    except Exception as e:
+        hint = 'Check OPENROUTER_API_KEY.' if backend == 'openrouter' else 'Check VERTEX_PROJECT / credentials.'
+        print(f'Could not reach the model ({type(e).__name__}: {e}).\n'
+              f'{hint} Or use --dry-run to test locally.')
+
+
+if __name__ == '__main__':
+    main(sys.argv)

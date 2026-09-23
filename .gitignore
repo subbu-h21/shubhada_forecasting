@@ -2,6 +2,9 @@
 # Mobile server login (username/password) - auto-generated on first run, never commit
 server_config.json
 
+# ask.py's OpenRouter/Vertex API key and other local-only env vars
+.env
+
 # --- Real business data ---
 # Sales/purchase registers contain patient names, supplier terms, and
 # financials. This is private business + customer data and must never be
