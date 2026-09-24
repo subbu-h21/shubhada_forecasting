@@ -956,9 +956,18 @@ def build_over_under(sales, purch):
 
     s = sales.groupby('Product').agg(Sold_Qty=('Qty', 'sum'), Sold_Value=('Item Total', 'sum')).reset_index()
     pu = purch.groupby('Product').agg(Purch_Qty=('Physical_Qty', 'sum'), Purch_Value=('Item Total', 'sum')).reset_index()
-    rate = purch.sort_values('Source_Month').groupby('Product').apply(
-        lambda d: (d['Item Total'].sum() / d['Physical_Qty'].sum()) if d['Physical_Qty'].sum() > 0 else np.nan,
-        include_groups=False)
+    if purch.empty:
+        # groupby(...).apply(...) on an EMPTY frame can't infer the lambda
+        # returns one scalar per group (it never actually runs it), so
+        # pandas falls back to returning the empty frame's own shape instead
+        # of a Series - .map() below then fails with "Data must be
+        # 1-dimensional". A month with sales but no purchase upload yet (a
+        # normal in-between state, not an error) hits this every time.
+        rate = pd.Series(dtype=float)
+    else:
+        rate = purch.sort_values('Source_Month').groupby('Product').apply(
+            lambda d: (d['Item Total'].sum() / d['Physical_Qty'].sum()) if d['Physical_Qty'].sum() > 0 else np.nan,
+            include_groups=False)
 
     m = s.merge(pu, on='Product', how='outer').fillna(0)
     m['Net_Qty'] = m['Purch_Qty'] - m['Sold_Qty']
