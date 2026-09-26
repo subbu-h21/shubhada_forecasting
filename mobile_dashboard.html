@@ -414,12 +414,14 @@ let currentBranch = null;
 
 // --- Session / auto-logout -----------------------------------------------
 // The server expires a session SESSION_TIMEOUT_MS after the last request
-// that touches it - a closed tab just stops sending requests, so "5 min
-// after closing the tab" falls out of the same rule as "5 min idle" without
+// that touches it - a closed tab just stops sending requests, so "1hr
+// after closing the tab" falls out of the same rule as "1hr idle" without
 // needing separate handling. sessionStorage (not localStorage) also means a
 // closed tab loses the token client-side too, on top of the server timeout.
+// Kept in sync with server.py's SESSION_TIMEOUT_SECONDS by hand - the login
+// response does carry timeout_seconds, but nothing here reads it yet.
 const SESSION_TOKEN_KEY = 'reckoner_session_token';
-const INACTIVITY_MS = 5 * 60 * 1000;
+const INACTIVITY_MS = 60 * 60 * 1000;
 const PING_THROTTLE_MS = 30 * 1000;
 let inactivityTimer = null;
 let lastPingAt = 0;

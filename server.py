@@ -76,9 +76,9 @@ def _handle_unexpected_error(e):
 # phone left logged in stays logged in for anyone who picks it up. This
 # replaces it with a server-issued token that expires SESSION_TIMEOUT_SECONDS
 # after the last authenticated request touches it (a sliding window, not a
-# fixed one) - both "5 min of inactivity" and "5 min after the tab closes"
+# fixed one) - both "1hr of inactivity" and "1hr after the tab closes"
 # fall out of that one rule, since a closed tab just stops sending requests.
-SESSION_TIMEOUT_SECONDS = 5 * 60
+SESSION_TIMEOUT_SECONDS = 60 * 60
 
 _sessions_lock = threading.Lock()
 _sessions = {}  # token -> {'username': str, 'last_active': float}
