@@ -351,11 +351,16 @@ def get_purchase_issues(n=10):
 
 def get_employee_performance():
     """Staff performance, by whichever of these columns this export has:
-    'Billed By' (revenue/bills/avg-bill-value per employee), 'Item Given By'
-    (lines/qty/value dispensed per employee), 'Created By' (purchase entries,
-    PTR-above-MRP error count, and embedded-margin quality per employee who
-    keyed them in). Real employee names - this is an internal staff-review
-    tool the owner reads, not customer-facing, unlike get_top_customers/
+    'Billed By' (revenue/bills/avg-bill-value per employee - who rang up the
+    sale), 'Item Given By' (lines/qty/value dispensed per employee - who
+    physically fetched the item from the shelf/rack and handed it to the
+    billing counter; this is a fulfillment/enabling role, not itself a sales
+    metric, but a bill can't be completed without it - a high Given-By
+    volume supports and correlates with sales throughput, it does not
+    compete with Billed By), 'Created By' (purchase entries, PTR-above-MRP
+    error count, and embedded-margin quality per employee who keyed them
+    in). Real employee names - this is an internal staff-review tool the
+    owner reads, not customer-facing, unlike get_top_customers/
     get_customer_trends which pseudonymize identity. Sections not present in
     this export yet are simply omitted."""
     s, p = _load()
