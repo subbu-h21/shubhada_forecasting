@@ -125,6 +125,14 @@ Rules:
   totals) - e.g. "who bought X", "sales history of X" - call
   get_product_patient_history and show the buyers (name, mobile, date, qty,
   amount) alongside any aggregate figures from get_product.
+- If a question is about thin/negative purchase margins, loss-making
+  purchases, or "party issues" with a supplier, use
+  get_thin_margin_purchases (all-history, not just the latest month).
+  A supplier with several flagged lines across different products is a
+  pricing pattern with that party - flag it as such. Never guess whether a
+  specific flagged line is a data-entry mistake or a genuine supplier
+  pricing issue - that needs the owner's judgement (cite who entered it and
+  let them decide: fix the entry, or ask the party for a credit note).
 """
 
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
@@ -324,6 +332,7 @@ def selftest():
         ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
+        ('get_thin_margin_purchases', {'n': 5}),
         ('get_employee_performance', {}),
         ('get_employee_targets', {}),
         ('get_employee_attendance', {}),

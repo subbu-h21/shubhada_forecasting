@@ -349,6 +349,41 @@ def get_purchase_issues(n=10):
     })
 
 
+def get_thin_margin_purchases(supplier=None, n=15):
+    """Purchase lines with thin-to-negative embedded margin, ALL history (not
+    just the latest month): where MRP/Rate is at or below ~1.10 (embedded
+    margin ~9% or less, or already negative because Rate is above MRP - a
+    guaranteed loss even sold at full MRP). Returns the worst lines by rupee
+    impact plus a by-supplier rollup - a supplier with many flagged lines
+    across different products is a genuine pricing pattern with that party
+    (worth asking for a credit note or renegotiating), not a one-off entry
+    typo. Each line includes who entered it (Entered By/Created By) so the
+    owner can judge whether a specific line is a data-entry mistake to fix
+    internally or a party issue to take up with the supplier - do NOT guess
+    which one it is yourself. Optional `supplier` filters to one party
+    (case-insensitive substring)."""
+    _, p = _load()
+    flagged, by_supplier = rk.build_thin_margin_purchases(p)
+    if supplier:
+        s_lower = supplier.strip().lower()
+        flagged = flagged[flagged['Supplier'].str.lower().str.contains(s_lower, na=False)]
+        by_supplier = by_supplier[by_supplier['Supplier'].str.lower().str.contains(s_lower, na=False)]
+    entered_col = 'Entered By' if 'Entered By' in flagged.columns else next(
+        (c for c in ('Created By', 'Entry By') if c in flagged.columns), None)
+    line_cols = ['Date', 'Supplier', 'Product', 'Qty', 'MRP', 'Sale Rate',
+                 'MRP_Rate_Ratio', 'Embedded_Margin_Pct', 'Value_Impact']
+    if entered_col:
+        line_cols.append(entered_col)
+    return _guard_no_pii({
+        'ratio_threshold': rk.THIN_MARGIN_RATIO,
+        'total_flagged_lines': len(flagged),
+        'total_value_impact': _round(flagged['Value_Impact'].sum()),
+        'worst_lines': _records(flagged.head(n), line_cols),
+        'by_supplier': _records(by_supplier.head(n), ['Supplier', 'Flagged_Lines', 'Distinct_Products',
+                                                       'Worst_Ratio', 'Worst_Margin_Pct', 'Total_Value_Impact']),
+    })
+
+
 def get_employee_performance():
     """Staff performance, by whichever of these columns this export has:
     'Billed By' (revenue/bills/avg-bill-value per employee - who rang up the
@@ -805,6 +840,9 @@ TOOLS = [
     {'name': 'get_purchase_issues', 'fn': get_purchase_issues,
      'description': get_purchase_issues.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}})},
+    {'name': 'get_thin_margin_purchases', 'fn': get_thin_margin_purchases,
+     'description': get_thin_margin_purchases.__doc__,
+     'parameters': _schema({'supplier': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_employee_performance', 'fn': get_employee_performance,
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,

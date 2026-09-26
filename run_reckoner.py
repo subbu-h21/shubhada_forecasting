@@ -1232,6 +1232,57 @@ def build_purchase_errors(purch, latest_month):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 3b: Thin & negative-margin purchase lines, all-history
+#
+# build_purchase_errors' ptr_high only catches Sale Rate strictly ABOVE MRP,
+# scoped to the latest month. Two gaps that leaves: (1) a line where Rate is
+# just BELOW MRP (e.g. 90-99% of it) is still a real problem - almost no
+# margin left before GST/staff/overhead even if sold at full MRP - but never
+# gets flagged; (2) restricting to the latest month misses the same pattern
+# recurring across recent months. This looks across ALL history instead and
+# widens the net to any embedded margin at or below THIN_MARGIN_RATIO,
+# grouped by supplier so a repeat offender (same party, multiple lines)
+# stands out from a one-off entry typo.
+#
+# Whether a flagged line is a DATA-ENTRY mistake (fix the entry) or a genuine
+# PARTY pricing issue (get a credit note) is a judgement call this can't make
+# safely from the numbers alone - Created By is attached to each line instead
+# so the owner can decide; a supplier with many flagged lines across
+# different products/invoices reads as a party pattern, not a typo.
+# ---------------------------------------------------------------------------
+THIN_MARGIN_RATIO = 1.10  # MRP/Rate at or below this - ~9% embedded margin or less, or already negative
+
+
+def build_thin_margin_purchases(purch, ratio_threshold=THIN_MARGIN_RATIO):
+    p = purch[(purch['MRP'] > 0) & (purch['Sale Rate'] > 0)].copy()
+    p['MRP_Rate_Ratio'] = (p['MRP'] / p['Sale Rate']).round(4)
+    p['Embedded_Margin_Pct'] = ((1 - p['Sale Rate'] / p['MRP']) * 100).round(2)
+    # What this specific pricing issue is worth, scaled by volume - what we'd
+    # have made per unit at full MRP vs what was actually paid, times units
+    # bought (negative = real rupee loss, not just a thin percentage).
+    p['Value_Impact'] = ((p['MRP'] - p['Sale Rate']) * p['Qty']).round(2)
+    flagged = p[p['MRP_Rate_Ratio'] <= ratio_threshold].copy()
+
+    created_col = find_col(purch, CREATED_BY_CANDIDATES)
+    cols = ['Date', 'Inv.No', 'Supplier', 'Product', 'Qty', 'MRP', 'Sale Rate',
+            'MRP_Rate_Ratio', 'Embedded_Margin_Pct', 'Value_Impact']
+    if created_col:
+        flagged[created_col] = flagged[created_col].astype(str).str.strip().str.title()
+        cols.append(created_col)
+    flagged = flagged[cols].sort_values('Value_Impact').reset_index(drop=True)
+
+    supplier_summary = flagged.groupby('Supplier').agg(
+        Flagged_Lines=('Product', 'count'),
+        Distinct_Products=('Product', 'nunique'),
+        Worst_Ratio=('MRP_Rate_Ratio', 'min'),
+        Worst_Margin_Pct=('Embedded_Margin_Pct', 'min'),
+        Total_Value_Impact=('Value_Impact', 'sum'),
+    ).reset_index().sort_values('Total_Value_Impact').reset_index(drop=True)
+
+    return flagged, supplier_summary
+
+
+# ---------------------------------------------------------------------------
 # Analysis 4: Scheme consistency (10+1, 10+2 style free-qty offers)
 # ---------------------------------------------------------------------------
 def build_scheme_consistency(purch, latest_month):
@@ -1520,6 +1571,7 @@ def build_report(sales, purch, out_path):
     channel_profit = build_channel_profit(sales, purch)
     latest_month = all_months[-1]
     ptr_high, mrp_missing, gifts, variance = build_purchase_errors(purch, latest_month)
+    thin_margin, thin_margin_suppliers = build_thin_margin_purchases(purch)
     scheme_missed, scheme_baseline = build_scheme_consistency(purch, latest_month)
     disc_missed, disc_baseline = build_discount_consistency(purch, latest_month)
     dist_summary = build_distributor_summary(dist_lines)
@@ -1554,6 +1606,9 @@ def build_report(sales, purch, out_path):
          '  |  '.join(f"{r['Branch']}: {r['Margin_Pct']}%" for _, r in channel_profit.iterrows())),
         ('Revenue with cost unknown (excluded from profit above)', round(profit_unknown['Revenue'].sum(), 2)),
         (f'PTR-higher-than-MRP entries in {latest_month}', len(ptr_high)),
+        ('Thin/negative-margin purchase lines (all-time)', len(thin_margin)),
+        ('Worst repeat-offender supplier for thin/negative margin',
+         f"{thin_margin_suppliers.iloc[0]['Supplier']} ({thin_margin_suppliers.iloc[0]['Flagged_Lines']} lines)" if len(thin_margin_suppliers) else 'n/a'),
         (f'MRP missing entries in {latest_month}', len(mrp_missing)),
         ('Products with MRP varying 3x+ (all-time)', len(variance)),
         (f'Scheme (10+1 style) shortfalls in {latest_month}', len(scheme_missed)),
@@ -1587,6 +1642,7 @@ def build_report(sales, purch, out_path):
         'Sales by Channel - gross profit and margin split by channel (retail branches vs B2B/Wholesale), so the thin B2B margin does not hide inside the blended number.',
         'Profit & Margin - gross profit and margin % per product, pre-tax, all history. Products with no purchase record are listed separately (cost unknown).',
         'PTR Higher Than MRP - purchase rate above MRP this month - fix these entries.',
+        f'Thin & Negative Margin - all-history purchase lines at {THIN_MARGIN_RATIO} MRP/Rate ratio or below (thin or already-negative embedded margin), worst rupee impact first, plus a by-supplier rollup to spot repeat-offender parties vs one-off entry mistakes.',
         'MRP Issues (missing/variance) - MRP=0 or same product priced very differently across bills.',
         'Scheme Shortfall - product+supplier pairs that normally get a free-qty scheme (10+1 etc.) but got less/none this month.',
         'Discount Shortfall - product+supplier pairs getting a noticeably lower discount % than their usual history.',
@@ -1960,6 +2016,29 @@ def build_report(sales, purch, out_path):
         df3 = pd.DataFrame(columns=['Month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'PTR', 'Qty', 'Item Total', 'Excess'])
     write_df(ws, df3, money_cols=['MRP', 'PTR', 'Item Total', 'Excess'], qty_cols=['Qty'])
     autosize(ws, [12, 12, 14, 26, 32, 10, 10, 8, 12, 12])
+    ws.freeze_panes = 'A2'
+
+    # ---- Thin & Negative Margin ----
+    ws = wb.create_sheet('Thin & Negative Margin')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = (f'Purchase lines where MRP/Rate <= {THIN_MARGIN_RATIO} (embedded margin ~9% or less, or already '
+                'negative) - all history, worst rupee impact first. A supplier with many flagged lines across '
+                'different products is a pricing pattern, not a one-off entry typo - check whether it needs a '
+                'credit note from them or a correction on our side (see Entered By).')
+    ws['A1'].font = Font(name=FONT, italic=True, size=9, color='555555')
+    df3b = thin_margin.rename(columns={'MRP_Rate_Ratio': 'MRP/Rate Ratio', 'Embedded_Margin_Pct': 'Embedded Margin %',
+                                        'Value_Impact': 'Value Impact', 'Entered By': 'Entered By'})
+    last_tm = write_df(ws, df3b, start_row=2, money_cols=['MRP', 'Sale Rate', 'Value Impact'],
+                        qty_cols=['Qty'])
+    autosize(ws, [12, 14, 26, 32, 8, 10, 10, 12, 14, 12, 22])
+
+    r_tm = last_tm + 3
+    ws.cell(row=r_tm, column=1, value='By supplier - repeat offenders first (most negative total rupee impact)').font = Font(name=FONT, bold=True, size=11)
+    df3c = thin_margin_suppliers.rename(columns={'Worst_Ratio': 'Worst Ratio', 'Worst_Margin_Pct': 'Worst Margin %',
+                                                  'Total_Value_Impact': 'Total Value Impact',
+                                                  'Flagged_Lines': 'Flagged Lines', 'Distinct_Products': 'Distinct Products'})
+    write_df(ws, df3c, start_row=r_tm + 1, money_cols=['Worst Margin %', 'Total Value Impact'],
+             qty_cols=['Flagged Lines', 'Distinct Products'])
     ws.freeze_panes = 'A2'
 
     # ---- MRP Issues ----
