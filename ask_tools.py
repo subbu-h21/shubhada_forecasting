@@ -203,8 +203,9 @@ def get_overview():
 
 
 def get_channel_profit():
-    """Gross profit & margin split by sales channel: the two retail branches
-    (Shivaji Chowk, Hospet Road) vs B2B / Wholesale."""
+    """Gross profit & margin split by sales channel: the retail branches
+    (Shivaji Chowk, Hospet Road, and the small occasional Herur Branch counter)
+    vs B2B / Wholesale."""
     s, p = _load()
     return _guard_no_pii(_records(
         rk.build_channel_profit(s, p),
@@ -440,18 +441,30 @@ def get_notes(n=20):
 
 def get_employee_performance():
     """Staff performance, by whichever of these columns this export has:
-    'Billed By' (revenue/bills/avg-bill-value per employee - who rang up the
-    sale), 'Item Given By' (lines/qty/value dispensed per employee - who
-    physically fetched the item from the shelf/rack and handed it to the
-    billing counter; this is a fulfillment/enabling role, not itself a sales
-    metric, but a bill can't be completed without it - a high Given-By
-    volume supports and correlates with sales throughput, it does not
-    compete with Billed By), 'Created By' (purchase entries, PTR-above-MRP
-    error count, and embedded-margin quality per employee who keyed them
-    in). Real employee names - this is an internal staff-review tool the
-    owner reads, not customer-facing, unlike get_top_customers/
-    get_customer_trends which pseudonymize identity. Sections not present in
-    this export yet are simply omitted."""
+    'Billed By' (revenue/bills/avg-bill-value per employee - the till login
+    that rang up the sale, auto-filled by the POS); 'Item Given By' (the
+    rack-search-and-fetch role - who found the item in the rack and brought
+    it to the counter, picked by hand on each line. A MAJOR skilled job in
+    its own right, measured per employee as: Lines_Per_Hour (throughput per
+    hour actually present, timestamped months only), Distinct_Products
+    (rack knowledge - how many different products they can find),
+    Rare_Item_Pct (share of lines that are slow-moving long-tail items,
+    harder to locate), Lines_Per_Bill, Days_Active, Hours_Present,
+    Branches. NOT a sales metric - a Given-By-heavy, Billed-By-light
+    employee is doing fulfilment work, not underselling; and someone whose
+    main job isn't fetching will show a low Lines_Per_Hour despite long
+    Hours_Present - don't judge them on it); 'Created By' (purchase
+    entries, PTR-above-MRP error count, and embedded-margin quality per
+    employee who keyed them in). Also returns fetcher_shortage_hours (branch
+    + hour cells where >=15% of items were fetched by the biller THEMSELVES
+    - Given By = Billed By - meaning no fetcher was free and billing slowed;
+    a staffing gap at that branch/hour) and fetch_pairs (top biller <-
+    fetcher pairs with the share of that biller's items the fetcher
+    supplied - a near-fixed pair is an absence risk for the biller). Real
+    employee names - this is an internal staff-review tool the owner reads,
+    not customer-facing, unlike get_top_customers/get_customer_trends which
+    pseudonymize identity. Sections not present in this export yet are
+    simply omitted."""
     s, p = _load()
     lines, _ = rk.compute_distributor_lines(p)
     perf = rk.build_employee_performance(s, p, lines)
@@ -459,7 +472,15 @@ def get_employee_performance():
     if perf['billed_by'] is not None:
         out['billed_by'] = _records(perf['billed_by'], ['Employee', 'Bills', 'Revenue', 'Patients', 'Avg_Bill_Value'])
     if perf['given_by'] is not None:
-        out['given_by'] = _records(perf['given_by'], ['Employee', 'Lines', 'Qty', 'Value'])
+        out['given_by'] = _records(perf['given_by'], ['Employee', 'Lines', 'Bills', 'Days_Active', 'Hours_Present',
+                                                      'Lines_Per_Hour', 'Distinct_Products', 'Rare_Item_Pct',
+                                                      'Lines_Per_Bill', 'Value', 'Branches'])
+    if perf['self_serve_hourly'] is not None:
+        ss = perf['self_serve_hourly']
+        worst = ss[ss['Self_Serve_Pct'] >= 15].sort_values('Self_Serve_Pct', ascending=False)
+        out['fetcher_shortage_hours'] = _records(worst.head(12), ['Branch', 'Hour', 'Self_Serve_Pct', 'Lines'])
+    if perf['fetch_pairs'] is not None:
+        out['fetch_pairs'] = _records(perf['fetch_pairs'].head(10), ['Biller', 'Fetcher', 'Lines', 'Share_Of_Biller_Pct'])
     if perf['created_by'] is not None:
         cols = ['Employee', 'Entries', 'Lines', 'Value', 'PTR_Errors']
         if 'Margin_Pct' in perf['created_by'].columns:

@@ -367,6 +367,24 @@
     </div>
     <div id="people-content"></div>
   </div>
+
+  <!-- HOURS & STAFF -->
+  <div class="view" id="view-hours">
+    <div id="hours-note" style="display:none;margin-bottom:10px;font-size:12px;color:var(--ink-soft)"></div>
+    <div class="section-title" style="margin-top:0">Bills per hour, by branch</div>
+    <div class="chart-card" id="hours-bills-chart"></div>
+    <div id="hours-pressure-section">
+      <div class="section-title">Staffing pressure — bills per staff member on duty</div>
+      <div class="chart-card" id="hours-pressure-chart"></div>
+    </div>
+    <div id="hours-selfserve-section">
+      <div class="section-title">Fetcher shortage — % of items the biller fetched themselves</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin:-4px 0 8px">Given by = Billed by on the line. Where this climbs, nobody was free to fetch and the till slowed down.</div>
+      <div class="chart-card" id="hours-selfserve-chart"></div>
+    </div>
+    <div class="section-title">Employee working hours (typical start/end, all history)</div>
+    <div class="card-list" id="list-hours-employees"></div>
+  </div>
 </main>
 
 <nav class="bottom">
@@ -401,6 +419,10 @@
   <button class="nav-btn" data-view="people">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
     People
+  </button>
+  <button class="nav-btn" data-view="hours">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+    Hours
   </button>
 </nav>
 </div>
@@ -659,6 +681,7 @@ function render() {
   initLookup();
   loadHolidayCalendar();
   buildPeople();
+  buildHours();
 }
 
 const TREND_CARD_CONFIG = [
@@ -801,9 +824,20 @@ function renderEmployees(container) {
       ])).join('') + `</div>`;
   }
   if (DATA.employee_given_by) {
-    html += `<div class="section-title">Item given by</div><div class="card-list">` +
+    html += `<div class="section-title">Item given by — rack search &amp; fetch (fulfilment skill, not a sales metric)</div><div class="card-list">` +
       DATA.employee_given_by.map(e => employeeCard('var(--ok)', e.Employee, [
-        ['Line Items', fmt(e.Lines)], ['Qty', fmt(e.Qty)], ['Value', money(e.Value)],
+        ['Lines/hr present', e.Lines_Per_Hour == null ? '—' : Number(e.Lines_Per_Hour).toFixed(1)],
+        ['Distinct products', fmt(e.Distinct_Products)],
+        ['Rare items', pct(e.Rare_Item_Pct)],
+        ['Line items', fmt(e.Lines)],
+        ['Days', fmt(e.Days_Active)],
+        ['Branches', escHtml(e.Branches || '—')],
+      ])).join('') + `</div>`;
+  }
+  if (DATA.fetch_pairs && DATA.fetch_pairs.length) {
+    html += `<div class="section-title">Who fetches for whom — top pairs (share of that biller's items)</div><div class="card-list">` +
+      DATA.fetch_pairs.slice(0, 12).map(p => employeeCard('var(--accent)', `${p.biller} ← ${p.fetcher}`, [
+        ['Lines', fmt(p.lines)], ["Of biller's items", pct(p.share_of_biller_pct)],
       ])).join('') + `</div>`;
   }
   if (DATA.employee_created_by) {
@@ -851,6 +885,111 @@ function renderDistributors(container) {
         ['Embedded Profit', money(r.embedded_profit)], ['Margin %', pct(r.margin_pct)],
       ]);
     }).join('') + `</div>`;
+}
+
+const HOURS_CHART_COLORS = ['var(--accent)', 'var(--ok)', 'var(--warn)', 'var(--danger)', 'var(--ink-soft)'];
+
+// Generic hour-of-day (0-23) multi-line chart, one line per branch, sharing
+// the same hand-rolled SVG style as the other charts in this file.
+function renderHoursLineChart(containerId, branches, rows, valueKey, tooltipFn, decimals) {
+  const container = document.getElementById(containerId);
+  const usable = rows.filter(r => r[valueKey] !== null && r[valueKey] !== undefined);
+  if (!usable.length) { container.innerHTML = '<div class="chart-empty">No hourly data available.</div>'; return; }
+
+  const W = 600, H = 170, padL = 32, padR = 8, padT = 10, padB = 20;
+  const maxY = Math.max(1, ...usable.map(r => r[valueKey]));
+  const xStep = (W - padL - padR) / 23;
+  const yScale = v => padT + (H - padT - padB) * (1 - v / maxY);
+
+  const gridFracs = [0, 0.5, 1];
+  const gridLines = gridFracs.map(f => {
+    const y = padT + (H - padT - padB) * f;
+    const label = decimals ? (maxY * (1 - f)).toFixed(decimals) : Math.round(maxY * (1 - f));
+    return `<line class="chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/><text class="chart-axis-label" text-anchor="end" x="${padL - 4}" y="${y + 3}">${label}</text>`;
+  }).join('');
+
+  const hourTicks = [0, 6, 9, 12, 15, 18, 21, 23];
+  const hourLabels = hourTicks.map(h =>
+    `<text class="chart-axis-label" text-anchor="middle" x="${(padL + h * xStep).toFixed(1)}" y="${H - 4}">${h}h</text>`).join('');
+
+  let paths = '', legend = '';
+  const touchPoints = [];
+  branches.forEach((b, bi) => {
+    const color = HOURS_CHART_COLORS[bi % HOURS_CHART_COLORS.length];
+    const byHour = new Map(rows.filter(r => r.branch === b).map(r => [r.hour, r[valueKey]]));
+    const pts = [];
+    for (let h = 0; h < 24; h++) {
+      const v = byHour.get(h);
+      if (v === undefined || v === null) continue;
+      const x = padL + h * xStep, y = yScale(v);
+      pts.push([x, y]);
+      touchPoints.push({ x, y, label: `${b}, ${h}:00 — ${tooltipFn(v)}` });
+    }
+    if (!pts.length) return;
+    const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+    paths += `<path class="chart-line" d="${d}" style="stroke:${color}"/>`;
+    legend += `<span><span class="sw" style="background:${color}"></span>${escHtml(b)}</span>`;
+  });
+
+  container.innerHTML = `
+    <div class="chart-legend">${legend}</div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Hourly chart">
+      ${gridLines}
+      ${paths}
+      ${hourLabels}
+    </svg>`;
+  makeChartTouchable(container, container.querySelector('svg'), touchPoints);
+}
+
+function renderHoursEmployees(container) {
+  if (!DATA.employee_windows || !DATA.employee_windows.length) {
+    container.innerHTML = `<div class="empty">Not available yet — none of your exports include a "Billed By" column.</div>`;
+    return;
+  }
+  container.innerHTML = DATA.employee_windows.map(e => employeeCard('var(--accent)', e.employee, [
+    ['Typical Hours', `${e.start_time}–${e.end_time}`],
+    ['Days Active', fmt(e.days_active)],
+    ['Median Bills/Day', fmt(e.median_bills_per_day)],
+    ['Total Bills', fmt(e.total_bills)],
+  ])).join('');
+}
+
+function buildHours() {
+  const noteEl = document.getElementById('hours-note');
+  const excluded = DATA.hours_excluded_months || [];
+  if (excluded.length) {
+    noteEl.style.display = 'block';
+    noteEl.textContent = `Time-of-day not tracked for ${excluded.join(', ')} (older export format) — showing ${(DATA.hours_included_months || []).join(', ')} only.`;
+  } else {
+    noteEl.style.display = 'none';
+  }
+
+  if (!DATA.hourly_branch || !DATA.hourly_branch.length) {
+    document.getElementById('hours-bills-chart').innerHTML =
+      '<div class="chart-empty">Not available yet — none of your exports carry a bill time-of-day.</div>';
+    document.getElementById('hours-pressure-section').style.display = 'none';
+    document.getElementById('hours-selfserve-section').style.display = 'none';
+    document.getElementById('list-hours-employees').innerHTML = '';
+    return;
+  }
+
+  const branches = DATA.branch_summary.map(b => b.Branch).filter(b => DATA.hourly_branch.some(r => r.branch === b));
+  renderHoursLineChart('hours-bills-chart', branches, DATA.hourly_branch, 'avg_bills', v => `${fmt(v)} bills`, 0);
+
+  const hasPressure = DATA.hourly_branch.some(r => r.avg_bills_per_biller !== null && r.avg_bills_per_biller !== undefined);
+  document.getElementById('hours-pressure-section').style.display = hasPressure ? 'block' : 'none';
+  if (hasPressure) {
+    renderHoursLineChart('hours-pressure-chart', branches, DATA.hourly_branch, 'avg_bills_per_biller', v => `${v.toFixed(1)} bills/staff`, 1);
+  }
+
+  const ss = DATA.self_serve_hourly || [];
+  document.getElementById('hours-selfserve-section').style.display = ss.length ? 'block' : 'none';
+  if (ss.length) {
+    const ssBranches = DATA.branch_summary.map(b => b.Branch).filter(b => ss.some(r => r.branch === b));
+    renderHoursLineChart('hours-selfserve-chart', ssBranches, ss, 'self_serve_pct', v => `${Number(v).toFixed(0)}% self-fetched`, 0);
+  }
+
+  renderHoursEmployees(document.getElementById('list-hours-employees'));
 }
 
 function buildTrendCards() {

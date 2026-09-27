@@ -173,6 +173,10 @@ BRANCH_MAP = {
     '2627WS': 'Shivaji Chowk',
     '2627WH': 'Hospet Road',
     '2627WB': WHOLESALE_LABEL,
+    # Small occasional retail counter run through Nelemav Seva Sahakari Sangh
+    # (a cooperative society). Bills in individual units at retail prices like
+    # WS/WH - NOT strip-billed, so it must not be added to B2B_STRIP_CODES.
+    '2627WN': 'Herur Branch',
 }
 BRANCH_PREFIX_RE = re.compile(r'^(\d+[A-Za-z]+)')
 
@@ -846,12 +850,110 @@ def build_daywise_forecast(sales, footfall_forecast):
 # Created By (purchase). None of these columns exist in any export yet;
 # this activates automatically the first time a file includes one of them.
 # ---------------------------------------------------------------------------
+# Fetching performance - the 'Item Given By' role.
+#
+# Given By is who searched the rack and brought the item to the counter - a
+# skilled job in its own right (14,000+ SKUs to know), distinct from Billed By
+# (the till login, auto-filled by the POS). A raw line count doesn't capture
+# the skill, so this measures it three ways per fetcher: throughput (lines per
+# hour actually present), rack knowledge (distinct products fetched) and
+# difficulty (share of lines that are rare, long-tail items). Plus two
+# counter-level views: how often the biller fetched the item THEMSELVES, by
+# hour (Given By == Billed By - Given By is picked by hand and Billed By comes
+# from the login, so this is a genuine "no fetcher was free" signal; where it
+# spikes the counter is short of fetchers), and which biller<-fetcher pairs
+# carry the most lines (a near-fixed pair is an absence risk for that biller).
+#
+# Hours-based metrics need the bill time-of-day, so they come only from the
+# timestamped months (same rule as build_hours_staff); everything else uses
+# every row that has a Given By value. NOT a sales metric - a Given-By-heavy,
+# Billed-By-light employee is doing fulfilment work, not underselling.
+RARE_ITEM_VOLUME_CUTOFF = 0.80  # products beyond this share of all lines are 'rare'
+SELF_SERVE_MIN_LINES = 30       # branch-hour cells with fewer lines are too noisy to show
+
+
+def build_fetching_performance(sales, given_col=None, billed_col=None):
+    """Returns (fetchers, self_serve_hourly, pairs); all None if there's no
+    Given By column, the latter two None if there's no Billed By column."""
+    given_col = given_col or find_col(sales, GIVEN_BY_CANDIDATES)
+    if not given_col:
+        return None, None, None
+    billed_col = billed_col or find_col(sales, BILLED_BY_CANDIDATES)
+
+    # Rare = the long tail of products by line volume across ALL sales, so the
+    # definition is stable regardless of who fetched what.
+    prod_lines = sales.groupby('Product').size().sort_values(ascending=False)
+    cum_share = prod_lines.cumsum() / prod_lines.sum()
+    rare_products = set(cum_share[cum_share > RARE_ITEM_VOLUME_CUTOFF].index)
+
+    s = sales[sales[given_col].notna()].copy()
+    # Same person keyed in with inconsistent casing/whitespace - normalize
+    # before grouping so their rows don't fragment (as for Created By).
+    s['Fetcher'] = s[given_col].astype(str).str.strip().str.title()
+    s['Branch'] = s['Inv.No'].apply(extract_branch)
+    s['Is_Rare'] = s['Product'].isin(rare_products)
+    dt = pd.to_datetime(s['Date'], format='mixed')
+    s['_dt'] = dt
+    s['_has_time'] = (dt.dt.hour != 0) | (dt.dt.minute != 0)
+    s['Day'] = dt.dt.date
+
+    fetchers = s.groupby('Fetcher').agg(
+        Lines=('Product', 'size'), Bills=('Inv.No', 'nunique'), Days_Active=('Day', 'nunique'),
+        Distinct_Products=('Product', 'nunique'), Rare_Item_Pct=('Is_Rare', 'mean'),
+        Qty=('Qty', 'sum'), Value=('Item Total', 'sum'),
+        Branches=('Branch', lambda b: ', '.join(sorted(set(b)))),
+    ).reset_index().rename(columns={'Fetcher': 'Employee'})
+    fetchers['Rare_Item_Pct'] = (fetchers['Rare_Item_Pct'] * 100).round(1)
+    fetchers['Lines_Per_Bill'] = (fetchers['Lines'] / fetchers['Bills']).round(2)
+
+    # Hours present = first to last fetched line each day (floored at 15 min
+    # so a one-line day can't divide by zero), timestamped rows only.
+    timed = s[s['_has_time']]
+    if len(timed):
+        spans = timed.groupby(['Fetcher', 'Day'])['_dt'].agg(['min', 'max'])
+        spans['hours'] = ((spans['max'] - spans['min']).dt.total_seconds() / 3600).clip(lower=0.25)
+        hours = spans.groupby('Fetcher')['hours'].sum()
+        timed_lines = timed.groupby('Fetcher').size()
+        fetchers['Hours_Present'] = fetchers['Employee'].map(hours).round(1)
+        fetchers['Lines_Per_Hour'] = (fetchers['Employee'].map(timed_lines) / fetchers['Employee'].map(hours)).round(1)
+    else:
+        fetchers['Hours_Present'] = np.nan
+        fetchers['Lines_Per_Hour'] = np.nan
+    fetchers = fetchers[['Employee', 'Lines', 'Bills', 'Days_Active', 'Hours_Present', 'Lines_Per_Hour',
+                         'Distinct_Products', 'Rare_Item_Pct', 'Lines_Per_Bill', 'Qty', 'Value', 'Branches']]
+    fetchers = fetchers.sort_values('Lines', ascending=False).reset_index(drop=True)
+
+    self_serve_hourly, pairs = None, None
+    if billed_col:
+        s['Biller'] = s[billed_col].astype(str).str.strip().str.title()
+        s['Self_Serve'] = s[billed_col].notna() & (s['Fetcher'].str.lower() == s['Biller'].str.lower())
+        if len(timed):
+            # Wholesale bills are keyed in by one person with no separate
+            # fetcher at a counter, so Given By == Billed By is the normal
+            # case there (60-90%), not a shortage - it would only stretch the
+            # axis and hide the retail signal this view exists for.
+            t = s[s['_has_time'] & (s['Branch'] != WHOLESALE_LABEL)].copy()
+            t['Hour'] = t['_dt'].dt.hour
+            ss = t.groupby(['Branch', 'Hour']).agg(Lines=('Product', 'size'), Self_Serve_Pct=('Self_Serve', 'mean')).reset_index()
+            ss = ss[ss['Lines'] >= SELF_SERVE_MIN_LINES].copy()
+            ss['Self_Serve_Pct'] = (ss['Self_Serve_Pct'] * 100).round(1)
+            self_serve_hourly = ss.sort_values(['Branch', 'Hour']).reset_index(drop=True)
+        billed = s[s[billed_col].notna()]
+        biller_totals = billed.groupby('Biller').size()
+        pairs = billed[~billed['Self_Serve']].groupby(['Biller', 'Fetcher']).size().rename('Lines').reset_index()
+        pairs['Share_Of_Biller_Pct'] = (pairs['Lines'] / pairs['Biller'].map(biller_totals) * 100).round(1)
+        pairs = pairs.sort_values('Lines', ascending=False).reset_index(drop=True)
+
+    return fetchers, self_serve_hourly, pairs
+
+
 def build_employee_performance(sales, purch, dist_lines=None):
     billed_col = find_col(sales, BILLED_BY_CANDIDATES)
     given_col = find_col(sales, GIVEN_BY_CANDIDATES)
     created_col = find_col(purch, CREATED_BY_CANDIDATES)
 
-    result = {'billed_by': None, 'given_by': None, 'created_by': None}
+    result = {'billed_by': None, 'given_by': None, 'created_by': None,
+              'self_serve_hourly': None, 'fetch_pairs': None}
 
     if billed_col:
         g = sales[sales[billed_col].notna()].groupby(billed_col).agg(
@@ -861,10 +963,8 @@ def build_employee_performance(sales, purch, dist_lines=None):
         result['billed_by'] = g.sort_values('Revenue', ascending=False).reset_index(drop=True)
 
     if given_col:
-        g2 = sales[sales[given_col].notna()].groupby(given_col).agg(
-            Lines=('Product', 'count'), Qty=('Qty', 'sum'), Value=('Item Total', 'sum')
-        ).reset_index().rename(columns={given_col: 'Employee'})
-        result['given_by'] = g2.sort_values('Value', ascending=False).reset_index(drop=True)
+        result['given_by'], result['self_serve_hourly'], result['fetch_pairs'] = \
+            build_fetching_performance(sales, given_col, billed_col)
 
     if created_col:
         p = purch.copy()
@@ -938,6 +1038,93 @@ def build_customer_loyalty(sales):
 
     trend = pd.DataFrame(rows)
     return trend, mobile_col
+
+
+# ---------------------------------------------------------------------------
+# Analysis 1g: Hours & Staff - hourly bill pressure per branch (bills per
+# staff member on duty that hour) and each employee's actual working window,
+# both derived from the bill's own timestamp (not just its date).
+#
+# Only usable on months whose export actually carries a time-of-day - the
+# older "Sale XLS ..." export format carries a bare date (midnight for every
+# row), which would otherwise misreport every one of that month's bills as
+# happening at 00:00. Those months are detected (has_time is False for every
+# row) and excluded rather than silently corrupting the hourly pattern; which
+# months qualify is returned so callers can say so plainly.
+# ---------------------------------------------------------------------------
+def _hour_to_clock(h):
+    """Decimal hour (e.g. 9.4) -> 'HH:MM' 24-hour clock string, or None."""
+    if h is None or (isinstance(h, float) and math.isnan(h)):
+        return None
+    total_minutes = int(round(h * 60)) % (24 * 60)
+    hh, mm = divmod(total_minutes, 60)
+    return f'{hh:02d}:{mm:02d}'
+
+
+def build_hours_staff(sales):
+    """Returns (hourly_branch, employee_windows, included_months,
+    excluded_months, billed_col). hourly_branch is None if no month in this
+    history carries a usable time-of-day at all; employee_windows is None if
+    there's no Billed By column to key a working window off of."""
+    s = sales.copy()
+    s['Branch'] = s['Inv.No'].apply(extract_branch)
+    dt = pd.to_datetime(s['Date'], format='mixed')
+    has_time = (dt.dt.hour != 0) | (dt.dt.minute != 0)
+    s['_dt'] = dt
+
+    all_months = sorted(s['Source_Month'].unique())
+    included_months = sorted(s.loc[has_time, 'Source_Month'].unique())
+    excluded_months = [m for m in all_months if m not in included_months]
+
+    billed_col = find_col(sales, BILLED_BY_CANDIDATES)
+    t = s[has_time].copy()
+    if t.empty:
+        return None, None, included_months, excluded_months, billed_col
+
+    t['Hour'] = t['_dt'].dt.hour
+    t['Day'] = t['_dt'].dt.date
+    bills = t.drop_duplicates('Inv.No')
+
+    # Hourly rush per branch, averaged across every day that branch actually
+    # had a bill in that hour - so an hour a branch is simply closed doesn't
+    # drag its own average toward zero.
+    day_hour_cols = {'Bills': ('Inv.No', 'size')}
+    if billed_col:
+        day_hour_cols['Billers'] = (billed_col, 'nunique')
+    per_day_hour = bills.groupby(['Branch', 'Day', 'Hour']).agg(**day_hour_cols).reset_index()
+    if billed_col:
+        per_day_hour['Bills_Per_Biller'] = (per_day_hour['Bills'] / per_day_hour['Billers'].clip(lower=1)).round(2)
+
+    agg = {'Avg_Bills': ('Bills', 'mean'), 'Days_Observed': ('Bills', 'size')}
+    if billed_col:
+        agg['Avg_Billers'] = ('Billers', 'mean')
+        agg['Avg_Bills_Per_Biller'] = ('Bills_Per_Biller', 'mean')
+    hourly_branch = per_day_hour.groupby(['Branch', 'Hour']).agg(**agg).reset_index()
+    for c in hourly_branch.columns:
+        if c.startswith('Avg_'):
+            hourly_branch[c] = hourly_branch[c].round(1)
+    hourly_branch = hourly_branch.sort_values(['Branch', 'Hour']).reset_index(drop=True)
+
+    employee_windows = None
+    if billed_col:
+        e = bills[bills[billed_col].notna()].copy()
+        e[billed_col] = e[billed_col].astype(str).str.strip()
+        per_day = e.groupby([billed_col, 'Day']).agg(
+            First=('_dt', 'min'), Last=('_dt', 'max'), Bills=('Inv.No', 'size')).reset_index()
+        per_day['Start_H'] = per_day['First'].dt.hour + per_day['First'].dt.minute / 60
+        per_day['End_H'] = per_day['Last'].dt.hour + per_day['Last'].dt.minute / 60
+        per_day['Span_H'] = per_day['End_H'] - per_day['Start_H']
+        employee_windows = per_day.groupby(billed_col).agg(
+            Days_Active=('Day', 'nunique'),
+            Start_H=('Start_H', 'median'), End_H=('End_H', 'median'), Span_H=('Span_H', 'median'),
+            Median_Bills_Per_Day=('Bills', 'median'), Total_Bills=('Bills', 'sum'),
+        ).reset_index().rename(columns={billed_col: 'Employee'})
+        employee_windows['Start_Time'] = employee_windows['Start_H'].apply(_hour_to_clock)
+        employee_windows['End_Time'] = employee_windows['End_H'].apply(_hour_to_clock)
+        employee_windows['Span_H'] = employee_windows['Span_H'].round(1)
+        employee_windows = employee_windows.sort_values('Total_Bills', ascending=False).reset_index(drop=True)
+
+    return hourly_branch, employee_windows, included_months, excluded_months, billed_col
 
 
 # ---------------------------------------------------------------------------
@@ -1564,6 +1751,7 @@ def build_report(sales, purch, out_path):
     dist_lines, dist_excluded = compute_distributor_lines(purch)
     employee_perf = build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = build_customer_loyalty(sales)
+    hourly_branch, employee_windows, hours_included_months, hours_excluded_months, hours_billed_col = build_hours_staff(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
     over_under = build_over_under(sales, purch)
@@ -1633,8 +1821,9 @@ def build_report(sales, purch, out_path):
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
         'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
-        'Employee Performance - Billed By / Item Given By / Created By breakdown. Activates once your export includes one of these columns.',
+        'Employee Performance - Billed By / Item Given By / Created By breakdown. Given By is scored as the rack-search-and-fetch skill (lines per hour present, distinct products, rare-item %), plus a fetcher-shortage view (biller fetched it themselves, by branch and hour) and who-fetches-for-whom pairs. Activates once your export includes one of these columns.',
         'Customer Loyalty - new/returning/dropped-off customers by mobile number, month by month. Activates once your export includes a mobile number column.',
+        'Hours & Staff - bill pressure by hour of day per branch, and each employee\'s typical working window (first/last bill, bills/day). Needs a bill time-of-day - months exported in the older date-only format are excluded.',
         'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
         'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
         'Under-Purchased - sold well more than bought, biggest shortfall value first.',
@@ -1860,9 +2049,30 @@ def build_report(sales, purch, out_path):
             r_emp = write_df(ws, df_b, start_row=r_emp + 1, qty_cols=['Bills', 'Unique Patients'],
                               money_cols=['Revenue', 'Avg Bill Value']) + 3
         if employee_perf['given_by'] is not None:
-            ws.cell(row=r_emp, column=1, value='Item Given By (sales) - lines dispensed, quantity, and value per employee').font = Font(name=FONT, bold=True, size=11)
-            df_g = employee_perf['given_by'].rename(columns={'Lines': 'Line Items', 'Qty': 'Total Qty', 'Value': 'Total Value'})
-            r_emp = write_df(ws, df_g, start_row=r_emp + 1, qty_cols=['Line Items', 'Total Qty'], money_cols=['Total Value']) + 3
+            ws.cell(row=r_emp, column=1,
+                    value='Item Given By (sales) - the rack-search-and-fetch role: throughput (lines per hour present), '
+                          'rack knowledge (distinct products), difficulty (rare-item %). Fulfilment work, not a sales '
+                          'metric - hours-based columns use timestamped months only').font = Font(name=FONT, bold=True, size=11)
+            df_g = employee_perf['given_by'].rename(columns={
+                'Lines': 'Line Items', 'Bills': 'Bills Served', 'Days_Active': 'Days Active',
+                'Hours_Present': 'Hours Present', 'Lines_Per_Hour': 'Lines/Hour Present',
+                'Distinct_Products': 'Distinct Products', 'Rare_Item_Pct': 'Rare Item %',
+                'Lines_Per_Bill': 'Lines/Bill', 'Qty': 'Total Qty', 'Value': 'Total Value'})
+            r_emp = write_df(ws, df_g, start_row=r_emp + 1,
+                             qty_cols=['Line Items', 'Bills Served', 'Days Active', 'Distinct Products', 'Total Qty'],
+                             money_cols=['Hours Present', 'Lines/Hour Present', 'Rare Item %', 'Lines/Bill', 'Total Value']) + 3
+            if employee_perf['self_serve_hourly'] is not None and len(employee_perf['self_serve_hourly']):
+                ws.cell(row=r_emp, column=1,
+                        value='Fetcher shortage - % of items the biller fetched THEMSELVES (Given By = Billed By), by branch '
+                              'and hour. Where this spikes, nobody was free to fetch and billing slowed down').font = Font(name=FONT, bold=True, size=11)
+                ss = employee_perf['self_serve_hourly'].pivot(index='Hour', columns='Branch', values='Self_Serve_Pct').reset_index()
+                r_emp = write_df(ws, ss, start_row=r_emp + 1, money_cols=[c for c in ss.columns if c != 'Hour']) + 3
+            if employee_perf['fetch_pairs'] is not None and len(employee_perf['fetch_pairs']):
+                ws.cell(row=r_emp, column=1,
+                        value='Who fetches for whom - biller <- fetcher pairs by lines, and what share of that biller\'s '
+                              'items the fetcher supplied (a near-fixed pair is an absence risk for the biller)').font = Font(name=FONT, bold=True, size=11)
+                fp = employee_perf['fetch_pairs'].head(30).rename(columns={'Share_Of_Biller_Pct': "Share of Biller's Items %"})
+                r_emp = write_df(ws, fp, start_row=r_emp + 1, qty_cols=['Lines'], money_cols=["Share of Biller's Items %"]) + 3
         if employee_perf['created_by'] is not None:
             ws.cell(row=r_emp, column=1,
                     value='Created By (purchase entries) - cross-checked against PTR-above-MRP errors, and against '
@@ -1875,7 +2085,7 @@ def build_report(sales, purch, out_path):
             money_cols = ['Total Purchase Value'] + (['Embedded Profit', 'Margin %'] if has_profit_cols else [])
             write_df(ws, df_c, start_row=r_emp + 1, qty_cols=['Invoices Entered', 'Line Items', 'PTR > MRP Errors'],
                      money_cols=money_cols)
-    autosize(ws, [26, 14, 16, 16, 16, 16, 10])
+    autosize(ws, [26, 12, 12, 12, 14, 16, 16, 12, 10, 12, 14, 34])
     ws.freeze_panes = 'A2'
 
     # ---- Customer Loyalty ----
@@ -1898,6 +2108,87 @@ def build_report(sales, purch, out_path):
                                                  'Dropped Off (vs prev month)', 'Total Active This Month'])
     autosize(ws, [14, 16, 18, 22, 20])
     ws.freeze_panes = 'A4'
+
+    # ---- Hours & Staff ----
+    ws = wb.create_sheet('Hours & Staff')
+    ws.sheet_view.showGridLines = False
+    r_hs = 1
+    if hours_excluded_months:
+        ws.cell(row=r_hs, column=1,
+                value=f'Time-of-day not available for: {", ".join(hours_excluded_months)} (older export format, date '
+                      'only) - re-export these in the newer format to include them here.').font = \
+            Font(name=FONT, italic=True, size=9, color='555555')
+        r_hs += 1
+    if hourly_branch is None:
+        ws.cell(row=r_hs, column=1, value='Not available yet').font = Font(name=FONT, bold=True, size=13)
+        ws.cell(row=r_hs + 1, column=1, value='None of your exports carry a bill time-of-day yet.').font = \
+            Font(name=FONT, size=10, color='555555')
+    else:
+        branch_order_hs = hourly_branch.groupby('Branch')['Avg_Bills'].sum().sort_values(ascending=False).index.tolist()
+
+        ws.cell(row=r_hs, column=1,
+                value=f'Avg bills per hour by branch, from {", ".join(hours_included_months)}').font = \
+            Font(name=FONT, bold=True, size=11)
+        r_hs += 1
+        pv = hourly_branch.pivot(index='Hour', columns='Branch', values='Avg_Bills').reindex(range(24)).fillna(0)
+        pv = pv.reindex(columns=branch_order_hs).reset_index()
+        start_hs = r_hs
+        write_df(ws, pv, start_row=start_hs, qty_cols=branch_order_hs)
+        last_hs = start_hs + len(pv)
+
+        chart = LineChart()
+        chart.title = 'Avg bills per hour, by branch'
+        chart.style = 2
+        chart.y_axis.title = 'Avg bills'
+        chart.x_axis.title = 'Hour of day'
+        chart.height = 9
+        chart.width = 20
+        cats = Reference(ws, min_col=1, min_row=start_hs + 1, max_row=last_hs)
+        for i in range(2, 2 + len(branch_order_hs)):
+            chart.add_data(Reference(ws, min_col=i, min_row=start_hs, max_row=last_hs), titles_from_data=True)
+        chart.set_categories(cats)
+        ws.add_chart(chart, f'{get_column_letter(len(branch_order_hs) + 3)}{start_hs}')
+
+        r_hs = last_hs + 3
+        if hours_billed_col:
+            ws.cell(row=r_hs, column=1,
+                    value='Staffing pressure - avg bills per staff member on duty that hour, by branch (higher = more '
+                          'stretched)').font = Font(name=FONT, bold=True, size=11)
+            r_hs += 1
+            pv2 = hourly_branch.pivot(index='Hour', columns='Branch', values='Avg_Bills_Per_Biller').reindex(range(24)).fillna(0)
+            pv2 = pv2.reindex(columns=branch_order_hs).reset_index()
+            start2 = r_hs
+            write_df(ws, pv2, start_row=start2, qty_cols=branch_order_hs)
+            last2 = start2 + len(pv2)
+
+            chart2 = LineChart()
+            chart2.title = 'Avg bills per staff member on duty, by branch'
+            chart2.style = 10
+            chart2.y_axis.title = 'Bills per staff member'
+            chart2.x_axis.title = 'Hour of day'
+            chart2.height = 9
+            chart2.width = 20
+            cats2 = Reference(ws, min_col=1, min_row=start2 + 1, max_row=last2)
+            for i in range(2, 2 + len(branch_order_hs)):
+                chart2.add_data(Reference(ws, min_col=i, min_row=start2, max_row=last2), titles_from_data=True)
+            chart2.set_categories(cats2)
+            ws.add_chart(chart2, f'{get_column_letter(len(branch_order_hs) + 3)}{start2}')
+            r_hs = last2 + 3
+
+        if employee_windows is not None and len(employee_windows) > 0:
+            ws.cell(row=r_hs, column=1,
+                    value='Employee working windows - typical first/last bill time and daily bill volume, all-history'
+                    ).font = Font(name=FONT, bold=True, size=11)
+            r_hs += 1
+            ew = employee_windows.rename(columns={
+                'Days_Active': 'Days Active', 'Start_Time': 'Typical Start', 'End_Time': 'Typical End',
+                'Span_H': 'Typical Span (hrs)', 'Median_Bills_Per_Day': 'Median Bills/Day', 'Total_Bills': 'Total Bills'})
+            ew = ew[['Employee', 'Days Active', 'Typical Start', 'Typical End', 'Typical Span (hrs)',
+                     'Median Bills/Day', 'Total Bills']]
+            write_df(ws, ew, start_row=r_hs, qty_cols=['Days Active', 'Median Bills/Day', 'Total Bills'],
+                     money_cols=['Typical Span (hrs)'])
+    autosize(ws, [26, 14, 14, 14, 16, 14, 12])
+    ws.freeze_panes = 'A2'
 
     # ---- Over-Purchased / Under-Purchased (separated, each sorted by value) ----
     # Qty columns are in strips (Qty / Factor), not individual tablets/ml.

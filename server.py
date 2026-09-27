@@ -273,6 +273,7 @@ def compute_all():
     dist_lines, _ = rk.compute_distributor_lines(purch)
     employee_perf = rk.build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = rk.build_customer_loyalty(sales)
+    hourly_branch, employee_windows, hours_included_months, hours_excluded_months, _ = rk.build_hours_staff(sales)
     monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
@@ -351,6 +352,19 @@ def compute_all():
     daywise_out = daywise_out.rename(columns={'Weekday': 'weekday', 'Predicted_Footfall': 'footfall',
                                                'Predicted_Revenue': 'revenue', 'Date': 'date'})
 
+    hourly_branch_out = None
+    if hourly_branch is not None:
+        hourly_branch_out = df_records(hourly_branch.rename(columns={
+            'Branch': 'branch', 'Hour': 'hour', 'Avg_Bills': 'avg_bills', 'Avg_Billers': 'avg_billers',
+            'Avg_Bills_Per_Biller': 'avg_bills_per_biller', 'Days_Observed': 'days_observed'}))
+    employee_windows_out = None
+    if employee_windows is not None:
+        employee_windows_out = df_records(employee_windows.rename(columns={
+            'Employee': 'employee', 'Days_Active': 'days_active', 'Start_Time': 'start_time',
+            'End_Time': 'end_time', 'Span_H': 'span_hours', 'Median_Bills_Per_Day': 'median_bills_per_day',
+            'Total_Bills': 'total_bills'})[['employee', 'days_active', 'start_time', 'end_time', 'span_hours',
+                                            'median_bills_per_day', 'total_bills']])
+
     return {
         'summary': summary,
         'branch_summary': df_records(branch_summary_out),
@@ -366,8 +380,18 @@ def compute_all():
         'employee_billed_by': df_records(employee_perf['billed_by']) if employee_perf['billed_by'] is not None else None,
         'employee_given_by': df_records(employee_perf['given_by']) if employee_perf['given_by'] is not None else None,
         'employee_created_by': df_records(employee_perf['created_by']) if employee_perf['created_by'] is not None else None,
+        'self_serve_hourly': df_records(employee_perf['self_serve_hourly'].rename(columns={
+            'Branch': 'branch', 'Hour': 'hour', 'Lines': 'lines', 'Self_Serve_Pct': 'self_serve_pct'}))
+            if employee_perf['self_serve_hourly'] is not None else None,
+        'fetch_pairs': df_records(employee_perf['fetch_pairs'].head(30).rename(columns={
+            'Biller': 'biller', 'Fetcher': 'fetcher', 'Lines': 'lines', 'Share_Of_Biller_Pct': 'share_of_biller_pct'}))
+            if employee_perf['fetch_pairs'] is not None else None,
         'customer_loyalty': df_records(customer_loyalty) if customer_loyalty is not None else None,
         'customer_loyalty_col': mobile_col,
+        'hourly_branch': hourly_branch_out,
+        'employee_windows': employee_windows_out,
+        'hours_included_months': hours_included_months,
+        'hours_excluded_months': hours_excluded_months,
         'forecast': df_records(forecast_out[['Product', 'trend', 'qty', 'avg_price', 'value']]),
         'over_under': df_records(over_under_out[['Product', 'status', 'purch_qty', 'sold_qty', 'net_qty', 'value_impact']]),
         'distributor_summary': df_records(distributor_summary_out[['Supplier', 'invoices', 'total_invoice_value', 'embedded_profit', 'margin_pct', 'months_active']]),
