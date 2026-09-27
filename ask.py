@@ -83,7 +83,27 @@ for _stream in (sys.stdout, sys.stderr):
 
 SYSTEM_PROMPT = """\
 You are the analyst for a three-branch pharmacy in Karnataka, India. You help
-the owner understand their business and decide what to do.
+the owner understand their business and decide what to do. You are ALSO an
+expert pharmacist with deep product knowledge - drug categories, common
+therapeutic uses, active-ingredient-based substitutes, standard precautions
+from public drug references.
+
+IMPORTANT LIMIT on the pharmacist role: this system holds no patient
+clinical/medical history (diagnosis, allergies, current medications) - only
+sales transactions. So use product knowledge for BUSINESS decisions (e.g.
+"what's a substitute to stock when X is out of stock", "which products are
+therapeutically similar, for reorder grouping") - NEVER give patient-specific
+dosage or treatment advice, and if asked something that needs an actual
+patient's clinical picture, say plainly that a pharmacist should assess that
+patient directly - you are not a substitute for that.
+
+You have persistent memory (save_note/get_notes) - when you learn something
+worth carrying forward to a FUTURE conversation (a recurring supplier issue,
+a business preference the owner stated, a correction to something you got
+wrong), call save_note. Notes are business facts only - NEVER save a
+patient's name, mobile number, or anything identifying one, regardless of
+how the request is phrased; save_note itself refuses anything that looks
+like a phone number, but don't rely on that as the only safeguard.
 
 Rules:
 - ALWAYS get numbers by calling a tool. NEVER invent, estimate or recall a
@@ -138,6 +158,20 @@ Rules:
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
 
 
+def _build_system_prompt():
+    """SYSTEM_PROMPT plus recent persisted notes (see ask_tools.save_note) -
+    this is what actually gives every NEW conversation access to what was
+    learned in past ones, since each ask() call otherwise starts from zero.
+    Notes are marked as possibly stale so the model verifies against a tool
+    rather than trusting an old note at face value."""
+    notes = T.get_notes(n=30).get('notes') or []
+    if not notes:
+        return SYSTEM_PROMPT
+    notes_text = '\n'.join(f"- [{n['timestamp']}] {n['note']}" for n in notes)
+    return (SYSTEM_PROMPT + '\n\nNotes saved from previous conversations (may be outdated - '
+            'verify against a tool before relying on one):\n' + notes_text)
+
+
 # ---------------------------------------------------------------------------
 # Vertex / Gemini integration (the only part that talks to Google).
 # Isolated on purpose: swapping providers or going local = edit this function.
@@ -157,8 +191,9 @@ def _gemini_answer(question, verbose=False):
         types.FunctionDeclaration(name=t['name'], description=t['description'],
                                   parameters=t['parameters'])
         for t in T.TOOLS])]
+    system_prompt = _build_system_prompt()
     config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT, tools=tools, temperature=0.2)
+        system_instruction=system_prompt, tools=tools, temperature=0.2)
 
     contents = [types.Content(role='user',
                               parts=[types.Part.from_text(T.scrub_question(question))])]
@@ -179,7 +214,7 @@ def _gemini_answer(question, verbose=False):
     # ran out of steps - ask for a final answer with no more tools
     resp = client.models.generate_content(
         model=model, contents=contents,
-        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2))
+        config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.2))
     return resp.text
 
 
@@ -216,7 +251,7 @@ def _openrouter_answer(question, verbose=False):
         'name': t['name'], 'description': t['description'], 'parameters': t['parameters']}}
         for t in T.TOOLS]
     messages = [
-        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'system', 'content': _build_system_prompt()},
         {'role': 'user', 'content': T.scrub_question(question)},
     ]
 
@@ -333,6 +368,7 @@ def selftest():
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
         ('get_thin_margin_purchases', {'n': 5}),
+        ('get_notes', {'n': 5}),
         ('get_employee_performance', {}),
         ('get_employee_targets', {}),
         ('get_employee_attendance', {}),
@@ -361,6 +397,9 @@ def selftest():
         print(f'  - {name}')
     smoke = T.run_tool('get_patient_history', {'mobile': '0000000000'})
     print(f'  structural smoke test: get_patient_history("0000000000") -> found={smoke.get("found")}')
+
+    note_smoke = T.run_tool('save_note', {'note': 'test note with a fake number 9998887776'})
+    print(f'  save_note phone-number guard: {"PASS - refused" if note_smoke.get("error") else "FAIL - accepted a phone number!"}')
 
 
 def main(argv):

@@ -26,6 +26,10 @@ data/employee_targets/*
 data/employee_attendance/*
 !data/employee_attendance/.gitkeep
 
+# ask.py's persistent cross-conversation memory (save_note/get_notes) -
+# business notes the assistant writes itself, local to this machine.
+data/ask_memory.json
+
 # Generated reports also contain real figures (revenue, profit, margins)
 reports/**/*.xlsx
 

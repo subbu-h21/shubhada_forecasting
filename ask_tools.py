@@ -384,6 +384,60 @@ def get_thin_margin_purchases(supplier=None, n=15):
     })
 
 
+# ---------------------------------------------------------------------------
+# Persistent memory across conversations - a small notes file, auto-loaded
+# into SYSTEM_PROMPT at the start of every future ask() call (see ask.py's
+# _build_system_prompt). Business facts only: a recurring supplier issue, a
+# preference the owner stated, a correction to something said wrong before.
+# NEVER a patient's identity - _looks_like_pii below is a blunt guard (10-
+# digit sequence = a mobile number) that refuses to save regardless of how
+# the request is framed, the same principle as the guard on every other tool
+# here, just applied to free-text input instead of structured output.
+# ---------------------------------------------------------------------------
+MEMORY_PATH = Path(__file__).parent / 'data' / 'ask_memory.json'
+_MEMORY_PHONE_RE = re.compile(r'\b\d{10}\b')
+
+
+def _load_memory_notes(limit=None):
+    if not MEMORY_PATH.exists():
+        return []
+    try:
+        notes = json.loads(MEMORY_PATH.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return notes[-limit:] if limit else notes
+
+
+def save_note(note):
+    """Persist a short note for FUTURE conversations - call this whenever you
+    learn something worth carrying forward, not just for answering the
+    current question: a recurring supplier/pricing issue, a business
+    preference the owner stated, a correction to something you got wrong.
+    Notes must be business facts only - NEVER a patient's name, mobile
+    number, or anything identifying one; such a note is refused outright.
+    Keep each note short (one or two sentences) and factual."""
+    note = (note or '').strip()
+    if not note:
+        return {'error': 'note is required'}
+    if _MEMORY_PHONE_RE.search(note):
+        return {'error': 'refused - this note contains what looks like a phone number; '
+                         'notes must be business facts only, never patient identity'}
+    notes = _load_memory_notes()
+    notes.append({'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'), 'note': note})
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_PATH.write_text(json.dumps(notes, indent=2, ensure_ascii=False), encoding='utf-8')
+    return {'saved': True, 'total_notes': len(notes)}
+
+
+def get_notes(n=20):
+    """List the most recent persisted notes from past conversations (most
+    recent first) - use this if asked what you remember, or to check a note
+    before relying on it (notes can go stale - verify against current tool
+    data, don't just trust an old note)."""
+    notes = _load_memory_notes()
+    return {'total_notes': len(notes), 'notes': list(reversed(notes))[:int(n)]}
+
+
 def get_employee_performance():
     """Staff performance, by whichever of these columns this export has:
     'Billed By' (revenue/bills/avg-bill-value per employee - who rang up the
@@ -843,6 +897,10 @@ TOOLS = [
     {'name': 'get_thin_margin_purchases', 'fn': get_thin_margin_purchases,
      'description': get_thin_margin_purchases.__doc__,
      'parameters': _schema({'supplier': {'type': 'string'}, 'n': {'type': 'integer'}})},
+    {'name': 'save_note', 'fn': save_note,
+     'description': save_note.__doc__, 'parameters': _schema({'note': {'type': 'string'}}, ['note'])},
+    {'name': 'get_notes', 'fn': get_notes,
+     'description': get_notes.__doc__, 'parameters': _schema({'n': {'type': 'integer'}})},
     {'name': 'get_employee_performance', 'fn': get_employee_performance,
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
