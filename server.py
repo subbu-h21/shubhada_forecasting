@@ -270,6 +270,7 @@ def compute_all():
 
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
+    optimum_stock = rk.build_optimum_stock(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = rk.build_footfall(sales)
     dist_lines, _ = rk.compute_distributor_lines(purch)
     employee_perf = rk.build_employee_performance(sales, purch, dist_lines)
@@ -370,6 +371,9 @@ def compute_all():
         'summary': summary,
         'branch_summary': df_records(branch_summary_out),
         'branch_forecast': df_records(branch_forecast_out[['Branch', 'Product', 'trend', 'qty', 'value']]),
+        'optimum_stock': df_records(optimum_stock.assign(Avg_Per_Day=optimum_stock['Avg_Per_Day'].round(2)).rename(columns={
+            'Optimum_Stock_Strips': 'optimum_strips', 'Months_Seen': 'months_seen', 'Avg_Per_Day': 'avg_per_day'})[
+            ['Branch', 'Product', 'optimum_strips', 'avg_per_day', 'months_seen']]),
         'footfall_daily': df_records(footfall_daily_out.rename(columns={'Day': 'day', 'Footfall': 'footfall'})),
         'footfall_forecast': df_records(footfall_forecast_out),
         'footfall_target_month': footfall_target_month,

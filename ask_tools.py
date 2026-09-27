@@ -328,6 +328,37 @@ def get_forecast(product=None, n=15):
     })
 
 
+def get_optimum_stock(branch=None, product=None, n=20):
+    """Optimum stock ceiling per branch and product - the owner's rule: never
+    hold more of a product at a branch than that branch typically sells in a
+    month. Figure = the branch's own average daily sale of that product
+    (day-covered-adjusted) x 30, in strips. Demand-only: it does not look at
+    purchases or current stock (the reckoner has no stock-on-hand data), so
+    it is a CEILING to plan against, not an "order this much" quantity.
+    Months_Seen says how many months that branch actually sold the product -
+    treat a 1-month figure as rough. Optional filters: branch (contains-match,
+    e.g. 'Shivaji', 'Hospet', 'Herur'), product (contains-match; call
+    search_products first for an exact name). Returns the top n by optimum
+    stock, or every branch row for the product when one is given."""
+    s, _ = _load()
+    if 'optimum_stock' not in _cache:
+        _cache['optimum_stock'] = rk.build_optimum_stock(s)
+    df = _cache['optimum_stock']
+    if branch:
+        df = df[df['Branch'].str.contains(branch.strip(), case=False, na=False)]
+    if product:
+        df = df[df['Product'].str.contains(product.strip(), case=False, na=False)]
+    if df.empty:
+        return _guard_no_pii({'rows': [], 'note': 'no branch/product matches those filters'})
+    out = df.copy()
+    out['Avg_Per_Day'] = out['Avg_Per_Day'].round(2)
+    rows = out if product else out.sort_values('Optimum_Stock_Strips', ascending=False).head(int(n))
+    return _guard_no_pii({
+        'rule': 'max stock at a branch = its own average one-month sale (avg daily x 30), in strips',
+        'rows': _records(rows, ['Branch', 'Product', 'Optimum_Stock_Strips', 'Avg_Per_Day', 'Months_Seen']),
+    })
+
+
 def get_purchase_issues(n=10):
     """Latest-month purchase-entry problems and supplier-terms slippage:
     PTR-above-MRP entries, scheme (free-goods) shortfalls, and discount
@@ -913,6 +944,9 @@ TOOLS = [
     {'name': 'get_forecast', 'fn': get_forecast,
      'description': get_forecast.__doc__,
      'parameters': _schema({'product': {'type': 'string'}, 'n': {'type': 'integer'}})},
+    {'name': 'get_optimum_stock', 'fn': get_optimum_stock,
+     'description': get_optimum_stock.__doc__,
+     'parameters': _schema({'branch': {'type': 'string'}, 'product': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_purchase_issues', 'fn': get_purchase_issues,
      'description': get_purchase_issues.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}})},

@@ -333,6 +333,15 @@
     </div>
     <div class="result-count" id="rc-branch"></div>
     <div class="card-list" id="list-branch"></div>
+
+    <div class="section-title">Optimum stock, this branch — max to hold = avg 1-month sale</div>
+    <div style="font-size:12px;color:var(--ink-soft);margin:-4px 0 8px">A planning ceiling in strips, not an order quantity. "mo" = months this branch has sold it; 1 month is a rough guide.</div>
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-optstock" placeholder="Search product…">
+    </div>
+    <div class="result-count" id="rc-optstock"></div>
+    <div class="card-list" id="list-optstock"></div>
   </div>
 
   <!-- LOOKUP -->
@@ -1245,6 +1254,7 @@ function buildBranchTabs() {
       tabs.querySelectorAll('.subtab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('search-branch').value = '';
+      document.getElementById('search-optstock').value = '';
       buildBranch();
     });
   });
@@ -1411,6 +1421,17 @@ function buildBranch() {
           <div class="metric"><div class="k">Predicted Value</div><div class="v">${money(r.value)}</div></div>
         </div></div>`;
     }, 'No matching products.');
+
+  const opt = (DATA.optimum_stock || []).filter(r => r.Branch === currentBranch);
+  setupSearch('search-optstock', 'list-optstock', 'rc-optstock', opt,
+    (r, q) => r.Product.toLowerCase().includes(q),
+    r => `<div class="card" style="--card-stripe:var(--accent);cursor:pointer" data-lookup="${escAttr(r.Product)}">
+        <div class="row1"><div class="name">${escHtml(r.Product)}</div>
+          <span class="pill" style="color:var(--ink-soft);background:var(--line)">${fmt(r.months_seen)} mo</span></div>
+        <div class="metrics">
+          <div class="metric"><div class="k">Max stock (strips)</div><div class="v">${r.optimum_strips == null ? '—' : Number(r.optimum_strips).toFixed(1)}</div></div>
+          <div class="metric"><div class="k">Avg units/day</div><div class="v">${r.avg_per_day == null ? '—' : Number(r.avg_per_day).toFixed(2)}</div></div>
+        </div></div>`, 'No matching products.');
 }
 
 function escAttr(s) { return String(s).replace(/"/g, '&quot;'); }

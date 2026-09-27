@@ -155,6 +155,11 @@ Rules:
   specific flagged line is a data-entry mistake or a genuine supplier
   pricing issue - that needs the owner's judgement (cite who entered it and
   let them decide: fix the entry, or ask the party for a credit note).
+- If a question asks how much of a product a BRANCH should hold / keep in
+  stock / the maximum or ideal or optimum stock for a branch, use
+  get_optimum_stock. State the rule it uses (max = that branch's own average
+  one-month sale) and that it is a ceiling, not an order quantity - the
+  reckoner does not know current stock on hand.
 """
 
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
@@ -369,6 +374,8 @@ def selftest():
         ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
+        ('get_optimum_stock', {'n': 5}),
+        ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
         ('get_thin_margin_purchases', {'n': 5}),
         ('get_notes', {'n': 5}),
         ('get_employee_performance', {}),

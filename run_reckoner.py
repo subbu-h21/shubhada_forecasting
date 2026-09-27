@@ -706,6 +706,39 @@ def build_branch_report(sales):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1b2: Optimum stock ceiling per branch+product
+#
+# Owner's rule: never hold more of a product at one branch than that branch
+# typically sells in a month - anything above that is cash and shelf space
+# tied up in stock that just sits. "Typically sells" = the branch's own
+# average daily rate for that product (day-covered-adjusted, same method as
+# the demand forecast, so a partial month doesn't understate it) x a flat
+# 30-day month. Deliberately NOT the demand forecast's trend-adjusted
+# next-month prediction - this is a stable planning ceiling, not a growth
+# guess, and it doesn't touch purchase data at all (it's a demand-only rule,
+# independent of what's actually been bought).
+# ---------------------------------------------------------------------------
+def build_optimum_stock(sales):
+    s = sales.copy()
+    s['Branch'] = s['Inv.No'].apply(extract_branch)
+    dt = pd.to_datetime(s['Date'], format='mixed')
+    s['Day'] = dt.dt.date
+
+    monthly = s.groupby(['Branch', 'Product', 'Calendar_Month']).agg(Qty=('Qty', 'sum')).reset_index()
+    days_covered = s.groupby(['Branch', 'Calendar_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
+    monthly = monthly.merge(days_covered, on=['Branch', 'Calendar_Month'])
+    monthly['Per_Day'] = monthly['Qty'] / monthly['Days_Covered'].clip(lower=1)
+
+    g = monthly.groupby(['Branch', 'Product']).agg(
+        Avg_Per_Day=('Per_Day', 'mean'), Months_Seen=('Calendar_Month', 'nunique')).reset_index()
+    g['Optimum_Stock_Qty'] = (g['Avg_Per_Day'] * 30).round(1)
+
+    factor_map = build_product_factor_map(sales)
+    g['Optimum_Stock_Strips'] = to_strips(g['Optimum_Stock_Qty'], g['Product'], factor_map)
+    return g.sort_values(['Branch', 'Optimum_Stock_Strips'], ascending=[True, False]).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Analysis 1c: Daily footfall (unique bills per day) per branch, and a
 # footfall forecast for next month using the same actual-days-covered,
 # capped-growth method as the product demand forecast.
@@ -1811,6 +1844,7 @@ def autosize(ws, widths):
 def build_report(sales, purch, out_path):
     forecast, target_month, all_months = build_demand_forecast(sales)
     branch_summary, branch_forecast = build_branch_report(sales)
+    optimum_stock = build_optimum_stock(sales)
     footfall_daily, footfall_monthly, footfall_forecast, footfall_target_month = build_footfall(sales)
     dist_lines, dist_excluded = compute_distributor_lines(purch)
     employee_perf = build_employee_performance(sales, purch, dist_lines)
@@ -1882,6 +1916,7 @@ def build_report(sales, purch, out_path):
     tab_notes = [
         'Demand Forecast - every product, predicted quantity & value for next month, trend flag.',
         'Branch-wise - revenue and growth per branch (from the invoice number prefix), plus a per-branch product forecast. Sales only - purchase invoices carry no branch code.',
+        'Optimum Stock - the most of each product a branch should hold = that branch\'s own average one-month sale (avg daily rate x 30, day-covered-adjusted), in strips. A planning ceiling, not an order quantity - the reckoner has no stock-on-hand data.',
         'Footfall - daily unique-bill count per branch (footfall), charted, with a next-month footfall forecast per branch.',
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
         'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
@@ -1949,6 +1984,24 @@ def build_report(sales, purch, out_path):
     write_df(ws, bf, start_row=r4 + 1, money_cols=['Avg Selling Price', 'Predicted Value'])
     autosize(ws, [16, 38, 16, 16, 16, 16])
     ws.freeze_panes = 'A3'
+
+    # ---- Optimum Stock ----
+    ws = wb.create_sheet('Optimum Stock')
+    ws.sheet_view.showGridLines = False
+    ws['A1'] = ('Optimum stock ceiling per branch and product = that branch\'s own average one-month sale '
+                '(avg daily rate x 30, day-covered-adjusted). Rule: never hold more than this at that branch - '
+                'the excess is cash and shelf space tied up in stock that sits. Qty in strips.')
+    ws['A1'].font = Font(name=FONT, bold=True, size=11)
+    ws['A2'] = ('Months Seen = how many months this branch actually sold the product - a 1-month figure is a rough '
+                'guide, not a settled average. Demand-only: purchases and current stock are not part of this rule.')
+    ws['A2'].font = SUBTITLE_FONT
+    df_os = optimum_stock.rename(columns={'Optimum_Stock_Strips': 'Optimum Stock (strips)', 'Months_Seen': 'Months Seen',
+                                          'Avg_Per_Day': 'Avg Units/Day'})
+    df_os['Avg Units/Day'] = df_os['Avg Units/Day'].round(2)
+    df_os = df_os[['Branch', 'Product', 'Optimum Stock (strips)', 'Avg Units/Day', 'Months Seen']]
+    write_df(ws, df_os, start_row=4, money_cols=['Optimum Stock (strips)', 'Avg Units/Day'], qty_cols=['Months Seen'])
+    autosize(ws, [18, 38, 20, 14, 12])
+    ws.freeze_panes = 'A5'
 
     # ---- Footfall ----
     ws = wb.create_sheet('Footfall')
