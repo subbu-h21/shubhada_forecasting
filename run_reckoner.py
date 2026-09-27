@@ -302,6 +302,59 @@ def fix_date_column(df, dominant_year, dominant_month):
     return parsed
 
 
+# Source_Month tags an entire uploaded FILE with its one dominant month, for
+# ingestion bookkeeping only (which file is "chosen" per month+kind, narrower-
+# vs-wider replacement, _remove_file_rows/_append_rows - see their docstrings).
+# A file's dominant month covers most of its own rows, but a stray invoice
+# dated into a neighboring month (entered or exported late) keeps
+# Source_Month wrong for that one row forever. add_calendar_month() gives
+# every row a SECOND, per-row month derived from its own Date - every
+# analysis below reports by Calendar_Month, so a month's total always means
+# every bill actually dated in that month, regardless of which uploaded file
+# it happened to arrive in. Source_Month itself is never touched by this.
+def add_calendar_month(df):
+    df = df.copy()
+    if 'Date' in df.columns and not df.empty:
+        df['Calendar_Month'] = pd.to_datetime(df['Date'], format='mixed').dt.to_period('M').astype(str)
+    elif 'Calendar_Month' not in df.columns:
+        df['Calendar_Month'] = pd.Series(dtype=str)
+    return df
+
+
+# A file whose stray-month rows are this rare is normal (a handful of late
+# corrections) and not worth interrupting anyone about; above this it usually
+# means a batch of invoices from the prior month got swept into this export.
+CROSS_MONTH_WARN_MIN_ROWS = 10
+CROSS_MONTH_WARN_SHARE = 0.02
+
+
+def _warn_cross_month_rows(filename, df, dominant_period):
+    """Print a warning (never blocks or edits anything) when a meaningful
+    share of a file's rows are dated outside its own dominant month. Every
+    row still ingests and is still correctly attributed by its own
+    Calendar_Month in every report - Source_Month (this file's bucket) is
+    unaffected - but silence here would let the mismatch go unnoticed until
+    someone asks for an exact month total and the numbers don't add up."""
+    in_month = (df['Date'].dt.year == dominant_period.year) & (df['Date'].dt.month == dominant_period.month)
+    stray = df[~in_month]
+    if len(stray) < CROSS_MONTH_WARN_MIN_ROWS or len(stray) / len(df) < CROSS_MONTH_WARN_SHARE:
+        return
+    by_month = stray.groupby(stray['Date'].dt.to_period('M').astype(str)).agg(
+        rows=('Date', 'size'), value=('Item Total', 'sum'))
+    bar = '!' * 66
+    print()
+    print(bar)
+    print(f'DATA WARNING - {filename} has bills dated outside its own month ({dominant_period})')
+    print(bar)
+    print(f'  {len(stray):,} of {len(df):,} rows ({len(stray) / len(df) * 100:.1f}%) are dated in a different month.')
+    print(f'  Every report still counts each row under its OWN real date, so month totals are')
+    print(f'  correct - but this is worth a look (a late-entered invoice? a mistyped date?):')
+    for m, row in by_month.sort_index().iterrows():
+        print(f'    - {m}: {int(row["rows"]):,} row(s), Rs {row["value"]:,.0f}')
+    print(bar)
+    print()
+
+
 def detect_type_and_load(path):
     df = pd.read_excel(path)
     cols = set(df.columns)
@@ -322,6 +375,7 @@ def detect_type_and_load(path):
     df['Date'] = fixed_dates
     df['Source_Month'] = str(dominant_period)
     df['Source_File'] = path.name
+    _warn_cross_month_rows(path.name, df, dominant_period)
 
     in_month = df[(df['Date'].dt.year == dominant_period.year) & (df['Date'].dt.month == dominant_period.month)]
     unique_days = int(in_month['Date'].dt.date.nunique())
@@ -533,6 +587,7 @@ def ingest():
         sales = pd.read_csv(SALES_MASTER) if SALES_MASTER.exists() else pd.DataFrame()
         purch = pd.read_csv(PURCH_MASTER) if PURCH_MASTER.exists() else pd.DataFrame()
         purch = ensure_purch_defaults(purch)
+        sales, purch = add_calendar_month(sales), add_calendar_month(purch)
         return sales, purch
 
 
@@ -547,13 +602,13 @@ def next_month_str(ym_str):
 # Analysis 1: Demand forecast for the month AFTER the latest data
 # ---------------------------------------------------------------------------
 def build_demand_forecast(sales):
-    months = sorted(sales['Source_Month'].unique())
+    months = sorted(sales['Calendar_Month'].unique())
     latest = months[-1]
     target_month = next_month_str(latest)
     ty, tm = map(int, target_month.split('-'))
     target_days = days_in_month(ty, tm)
 
-    monthly = sales.groupby(['Product', 'Source_Month']).agg(
+    monthly = sales.groupby(['Product', 'Calendar_Month']).agg(
         Qty=('Qty', 'sum'), Value=('Item Total', 'sum')).reset_index()
 
     # Use the number of days actually COVERED by data for each month, not the
@@ -562,12 +617,12 @@ def build_demand_forecast(sales):
     # understates its true daily rate and throws off the growth trend.
     dates = sales.copy()
     dates['Date'] = pd.to_datetime(dates['Date'], format='mixed')
-    days_covered = dates.groupby('Source_Month')['Date'].apply(lambda d: d.dt.date.nunique())
+    days_covered = dates.groupby('Calendar_Month')['Date'].apply(lambda d: d.dt.date.nunique())
 
     per_day = {}
     for m in months:
         d = max(1, days_covered.get(m, 1))
-        sub = monthly[monthly['Source_Month'] == m].set_index('Product')
+        sub = monthly[monthly['Calendar_Month'] == m].set_index('Product')
         per_day[m] = (sub['Qty'] / d)
 
     products = monthly['Product'].unique()
@@ -600,7 +655,7 @@ def build_demand_forecast(sales):
 
     df = pd.DataFrame(rows, columns=['Product', 'Trend', 'Predicted_Qty'])
 
-    price = sales.sort_values('Source_Month').groupby('Product').apply(
+    price = sales.sort_values('Calendar_Month').groupby('Product').apply(
         lambda d: (d['Item Total'].sum() / d['Qty'].sum()) if d['Qty'].sum() > 0 else 0,
         include_groups=False)
     df['Avg_Price'] = df['Product'].map(price).fillna(0)
@@ -620,11 +675,11 @@ def build_demand_forecast(sales):
 def build_branch_report(sales):
     sales = sales.copy()
     sales['Branch'] = sales['Inv.No'].apply(extract_branch)
-    months = sorted(sales['Source_Month'].unique())
+    months = sorted(sales['Calendar_Month'].unique())
 
-    monthly = sales.groupby(['Branch', 'Source_Month']).agg(
+    monthly = sales.groupby(['Branch', 'Calendar_Month']).agg(
         Revenue=('Item Total', 'sum'), Invoices=('Inv.No', 'nunique'), Patients=('Patient', 'nunique')).reset_index()
-    pivot = monthly.pivot(index='Branch', columns='Source_Month', values='Revenue').fillna(0)
+    pivot = monthly.pivot(index='Branch', columns='Calendar_Month', values='Revenue').fillna(0)
     pivot.columns = [f'Revenue_{m}' for m in pivot.columns]
 
     totals = sales.groupby('Branch').agg(
@@ -661,7 +716,7 @@ def build_footfall(sales):
     dt = pd.to_datetime(sales['Date'], format='mixed')
     sales['Day'] = dt.dt.date
 
-    months = sorted(sales['Source_Month'].unique())
+    months = sorted(sales['Calendar_Month'].unique())
     latest = months[-1]
     target_month = next_month_str(latest)
     ty, tm = map(int, target_month.split('-'))
@@ -670,14 +725,14 @@ def build_footfall(sales):
     daily = sales.groupby(['Day', 'Branch']).agg(Footfall=('Inv.No', 'nunique')).reset_index()
     daily = daily.sort_values('Day').reset_index(drop=True)
 
-    monthly = sales.groupby(['Branch', 'Source_Month']).agg(Footfall=('Inv.No', 'nunique')).reset_index()
-    days_covered = sales.groupby(['Branch', 'Source_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
-    monthly = monthly.merge(days_covered, on=['Branch', 'Source_Month'])
+    monthly = sales.groupby(['Branch', 'Calendar_Month']).agg(Footfall=('Inv.No', 'nunique')).reset_index()
+    days_covered = sales.groupby(['Branch', 'Calendar_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
+    monthly = monthly.merge(days_covered, on=['Branch', 'Calendar_Month'])
     monthly['Avg_Daily'] = (monthly['Footfall'] / monthly['Days_Covered']).round(2)
 
     rows = []
     for branch in sorted(sales['Branch'].unique()):
-        sub = monthly[monthly['Branch'] == branch].set_index('Source_Month')
+        sub = monthly[monthly['Branch'] == branch].set_index('Calendar_Month')
         series = [float(sub['Avg_Daily'].get(m, 0.0)) for m in months]
         if len(series) == 1 or series[-2] == 0:
             pred_per_day, growth = series[-1], 0.0
@@ -727,7 +782,7 @@ def build_daywise_forecast(sales, footfall_forecast):
     sales['Day_Type'] = [c[0] for c in classified]
     sales['Day_Label'] = [c[1] for c in classified]
 
-    months = sorted(sales['Source_Month'].unique())
+    months = sorted(sales['Calendar_Month'].unique())
     latest = months[-1]
     target_month = next_month_str(latest)
     ty, tm = map(int, target_month.split('-'))
@@ -789,14 +844,14 @@ def build_daywise_forecast(sales, footfall_forecast):
                     sum(rs) / len(rs) if rs else global_avg)
 
     # Monthly revenue forecast per branch, same day-covered-adjusted trend method as footfall
-    monthly_rev = sales.groupby(['Branch', 'Source_Month']).agg(Revenue=('Item Total', 'sum')).reset_index()
-    days_covered = sales.groupby(['Branch', 'Source_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
-    monthly_rev = monthly_rev.merge(days_covered, on=['Branch', 'Source_Month'])
+    monthly_rev = sales.groupby(['Branch', 'Calendar_Month']).agg(Revenue=('Item Total', 'sum')).reset_index()
+    days_covered = sales.groupby(['Branch', 'Calendar_Month'])['Day'].nunique().rename('Days_Covered').reset_index()
+    monthly_rev = monthly_rev.merge(days_covered, on=['Branch', 'Calendar_Month'])
     monthly_rev['Avg_Daily_Rev'] = monthly_rev['Revenue'] / monthly_rev['Days_Covered']
 
     rev_forecast = {}
     for branch in branches:
-        sub = monthly_rev[monthly_rev['Branch'] == branch].set_index('Source_Month')
+        sub = monthly_rev[monthly_rev['Branch'] == branch].set_index('Calendar_Month')
         series = [float(sub['Avg_Daily_Rev'].get(m, 0.0)) for m in months]
         if len(series) == 1 or series[-2] == 0:
             pred_per_day = series[-1]
@@ -1019,8 +1074,8 @@ def build_customer_loyalty(sales):
 
     s = sales[sales[mobile_col].notna()].copy()
     s[mobile_col] = s[mobile_col].astype(str).str.strip()
-    months = sorted(s['Source_Month'].unique())
-    monthly_customers = {m: set(s[s['Source_Month'] == m][mobile_col]) for m in months}
+    months = sorted(s['Calendar_Month'].unique())
+    monthly_customers = {m: set(s[s['Calendar_Month'] == m][mobile_col]) for m in months}
 
     rows = []
     seen_so_far = set()
@@ -1072,8 +1127,8 @@ def build_hours_staff(sales):
     has_time = (dt.dt.hour != 0) | (dt.dt.minute != 0)
     s['_dt'] = dt
 
-    all_months = sorted(s['Source_Month'].unique())
-    included_months = sorted(s.loc[has_time, 'Source_Month'].unique())
+    all_months = sorted(s['Calendar_Month'].unique())
+    included_months = sorted(s.loc[has_time, 'Calendar_Month'].unique())
     excluded_months = [m for m in all_months if m not in included_months]
 
     billed_col = find_col(sales, BILLED_BY_CANDIDATES)
@@ -1215,11 +1270,19 @@ def _trend_next(series):
 
 
 def build_monthly_trend(sales, purch, footfall_forecast):
-    months = sorted(set(sales['Source_Month'].unique()) | set(purch['Source_Month'].unique()))
+    # Anchored to sales' own calendar months, not unioned with purchase's - a
+    # handful of purchase invoices with a stray/mistyped date (e.g. a couple
+    # of rows dated years off) would otherwise manufacture a near-empty
+    # phantom "month" in this trend table. Sales has no such stray dates in
+    # practice (retail billing dates are reliable), so its own month range IS
+    # the pharmacy's real operating history; any purchase row outside it is
+    # still counted correctly wherever its own Calendar_Month is queried
+    # directly, just not as an extra row here.
+    months = sorted(sales['Calendar_Month'].unique())
     rows = []
     for m in months:
-        s_m = sales[sales['Source_Month'] == m]
-        p_m = purch[purch['Source_Month'] == m]
+        s_m = sales[sales['Calendar_Month'] == m]
+        p_m = purch[purch['Calendar_Month'] == m]
         counts = {'Over_Purchased': 0, 'Under_Purchased': 0, 'Balanced': 0, 'Dead_Stock': 0}
         if not s_m.empty or not p_m.empty:
             ou = build_over_under(s_m, p_m)
@@ -1402,7 +1465,7 @@ def build_channel_profit(sales, purch):
 # Analysis 3: Purchase entry errors (PTR>MRP, MRP missing, MRP variance) on latest month
 # ---------------------------------------------------------------------------
 def build_purchase_errors(purch, latest_month):
-    latest = purch[purch['Source_Month'] == latest_month].copy()
+    latest = purch[purch['Calendar_Month'] == latest_month].copy()
 
     ptr_high = latest[(latest['Sale Rate'] > latest['MRP']) & (latest['MRP'] > 0)].copy()
     ptr_high['Excess'] = (ptr_high['Sale Rate'] - ptr_high['MRP']).round(2)
@@ -1473,8 +1536,8 @@ def build_thin_margin_purchases(purch, ratio_threshold=THIN_MARGIN_RATIO):
 # Analysis 4: Scheme consistency (10+1, 10+2 style free-qty offers)
 # ---------------------------------------------------------------------------
 def build_scheme_consistency(purch, latest_month):
-    hist = purch[purch['Source_Month'] != latest_month]
-    latest = purch[purch['Source_Month'] == latest_month].copy()
+    hist = purch[purch['Calendar_Month'] != latest_month]
+    latest = purch[purch['Calendar_Month'] == latest_month].copy()
     # A return/credit-note line (Qty <= 0) isn't a purchase that could have
     # earned a scheme - without this, Qty<=0 makes FreeRatio NaN, which
     # fillna(0) below then reads as "0% free, well short of the typical
@@ -1503,8 +1566,8 @@ def build_scheme_consistency(purch, latest_month):
 # Analysis 5: Discount consistency
 # ---------------------------------------------------------------------------
 def build_discount_consistency(purch, latest_month):
-    hist = purch[purch['Source_Month'] != latest_month]
-    latest = purch[purch['Source_Month'] == latest_month].copy()
+    hist = purch[purch['Calendar_Month'] != latest_month]
+    latest = purch[purch['Calendar_Month'] == latest_month].copy()
 
     baseline = hist[hist['Disc Percentage'] > 0].groupby(['Product', 'Supplier']).agg(
         Typical_Disc=('Disc Percentage', 'median'),
@@ -1575,27 +1638,28 @@ def build_distributor_summary(lines):
         Invoices=('Inv.No', 'nunique'), Lines=('Product', 'count'),
         Total_Invoice_Value=('Item Total', 'sum'),
         Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'), Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'),
-        Embedded_Profit=('Embedded_Profit', 'sum'), Months_Active=('Source_Month', 'nunique')).reset_index()
+        Embedded_Profit=('Embedded_Profit', 'sum'), Months_Active=('Calendar_Month', 'nunique')).reset_index()
     g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     return g.sort_values('Embedded_Profit', ascending=False).reset_index(drop=True)
 
 
 def build_distributor_month(lines):
-    g = lines.groupby(['Supplier', 'Source_Month']).agg(
+    g = lines.groupby(['Supplier', 'Calendar_Month']).agg(
         Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
         Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
     g['Margin_Pct'] = _margin_pct(g['Embedded_Profit'], g['Max_Sell_Pretax'])
     supplier_order = lines.groupby('Supplier')['Embedded_Profit'].sum().sort_values(ascending=False).index.tolist()
     g['Supplier'] = pd.Categorical(g['Supplier'], categories=supplier_order, ordered=True)
-    return g.sort_values(['Supplier', 'Source_Month']).reset_index(drop=True), supplier_order
+    return g.sort_values(['Supplier', 'Calendar_Month']).reset_index(drop=True), supplier_order
 
 
 def build_distributor_per_invoice(lines):
-    # Source_Month is part of the key, not a 'first' pick: a supplier can reuse
-    # the same invoice number in a different month (e.g. an annual numbering
-    # reset), and keying on (Inv.No, Supplier) alone would silently merge those
-    # into one row - summed profit, dated to whichever month happened to sort first.
-    g = lines.groupby(['Inv.No', 'Supplier', 'Source_Month']).agg(
+    # Calendar_Month is part of the key, not a 'first' pick: a supplier can
+    # reuse the same invoice number in a different month (e.g. an annual
+    # numbering reset), and keying on (Inv.No, Supplier) alone would silently
+    # merge those into one row - summed profit, dated to whichever month
+    # happened to sort first.
+    g = lines.groupby(['Inv.No', 'Supplier', 'Calendar_Month']).agg(
         Date=('Date', 'first'), Lines=('Product', 'count'),
         Invoice_Value=('Item Total', 'sum'), Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
         Net_Cost_Pretax=('Net_Cost_Pretax', 'sum'), Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
@@ -2301,8 +2365,8 @@ def build_report(sales, purch, out_path):
     ws = wb.create_sheet('PTR Higher Than MRP')
     ws.sheet_view.showGridLines = False
     if len(ptr_high) > 0:
-        df3 = ptr_high[['Source_Month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'Sale Rate', 'Qty', 'Item Total', 'Excess']]
-        df3 = df3.rename(columns={'Sale Rate': 'PTR', 'Source_Month': 'Month'})
+        df3 = ptr_high[['Calendar_Month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'Sale Rate', 'Qty', 'Item Total', 'Excess']]
+        df3 = df3.rename(columns={'Sale Rate': 'PTR', 'Calendar_Month': 'Month'})
     else:
         df3 = pd.DataFrame(columns=['Month', 'Date', 'Inv.No', 'Supplier', 'Product', 'MRP', 'PTR', 'Qty', 'Item Total', 'Excess'])
     write_df(ws, df3, money_cols=['MRP', 'PTR', 'Item Total', 'Excess'], qty_cols=['Qty'])
@@ -2416,7 +2480,7 @@ def build_report(sales, purch, out_path):
     ws.sheet_view.showGridLines = False
     ws['A1'] = 'Supplier x Month detail'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
-    df_dm = dist_month.rename(columns={'Source_Month': 'Month', 'Invoice_Value': 'Invoice Value',
+    df_dm = dist_month.rename(columns={'Calendar_Month': 'Month', 'Invoice_Value': 'Invoice Value',
                                         'Max_Sell_Pretax': 'Max Sell (pre-tax)', 'Net_Cost_Pretax': 'Net Cost (pre-tax)',
                                         'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
     df_dm = df_dm[['Supplier', 'Month', 'Invoice Value', 'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %']]
@@ -2427,7 +2491,7 @@ def build_report(sales, purch, out_path):
     r_piv = last_dm + 3
     ws.cell(row=r_piv, column=1, value='Pivot: Embedded Profit by Supplier x Month (suppliers ordered by all-history total)').font = \
         Font(name=FONT, bold=True, size=11)
-    dist_pivot = dist_month.pivot(index='Supplier', columns='Source_Month', values='Embedded_Profit').fillna(0)
+    dist_pivot = dist_month.pivot(index='Supplier', columns='Calendar_Month', values='Embedded_Profit').fillna(0)
     dist_pivot = dist_pivot.reindex(dist_supplier_order)
     dist_pivot['Total'] = dist_pivot.sum(axis=1)
     dist_pivot = dist_pivot.reset_index()
@@ -2442,7 +2506,7 @@ def build_report(sales, purch, out_path):
     ws['A1'] = 'Potential profit per individual purchase invoice, biggest first'
     ws['A1'].font = Font(name=FONT, bold=True, size=11)
     df_pi = dist_per_invoice.rename(columns={
-        'Source_Month': 'Month', 'Invoice_Value': 'Invoice Value', 'Max_Sell_Pretax': 'Max Sell (pre-tax)',
+        'Calendar_Month': 'Month', 'Invoice_Value': 'Invoice Value', 'Max_Sell_Pretax': 'Max Sell (pre-tax)',
         'Net_Cost_Pretax': 'Net Cost (pre-tax)', 'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %'})
     df_pi = df_pi[['Date', 'Inv.No', 'Supplier', 'Month', 'Lines', 'Invoice Value',
                     'Max Sell (pre-tax)', 'Net Cost (pre-tax)', 'Embedded Profit', 'Margin %']]
@@ -2477,12 +2541,12 @@ def main():
     if sales.empty or purch.empty:
         print('Need at least one Sale file and one Purchase file in data\\raw to run.')
         return
-    out_dir = REPORTS_DIR / sorted(sales['Source_Month'].unique())[-1]
+    out_dir = REPORTS_DIR / sorted(sales['Calendar_Month'].unique())[-1]
     out_path = out_dir / 'Monthly Reckoner Report.xlsx'
     path, latest_month, target_month = build_report(sales, purch, out_path)
     print()
     print(f'Report saved: {path}')
-    print(f'History months: {sorted(sales["Source_Month"].unique())}')
+    print(f'History months: {sorted(sales["Calendar_Month"].unique())}')
     print(f'Latest month analyzed for issues: {latest_month}')
     print(f'Forecasting: {target_month}')
 

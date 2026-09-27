@@ -71,6 +71,7 @@ def _load():
         # SALES_MASTER is normalized once, at ingest time (see
         # run_reckoner.normalize_sale_units docstring) - never call
         # normalize_sale_units() again here, it would double-convert B2B rows.
+        sales, purch = rk.add_calendar_month(sales), rk.add_calendar_month(purch)
         _cache.clear()  # drop every derived rollup below too - they're stale now
         _cache['sales'] = sales
         _cache['purch'] = purch
@@ -109,7 +110,7 @@ def _distributors():
 
 def _latest_month():
     s, _ = _load()
-    return sorted(s['Source_Month'].unique())[-1]
+    return sorted(s['Calendar_Month'].unique())[-1]
 
 
 def _mobile_col():
@@ -249,13 +250,13 @@ def get_product(name):
     pretax_rev = float((sp['Item Total'] / (1 + sp['Tax Rate'].fillna(0) / 100)).sum()) if not sp.empty else 0.0
     gross = (pretax_rev - sold_units * cost_per_unit) if cost_per_unit is not None else None
 
-    s_m = sp.groupby('Source_Month').agg(sold_units=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not sp.empty else pd.DataFrame()
-    p_m = pp.groupby('Source_Month').agg(purch_strips=('Qty', 'sum'), purch_value=('Item Total', 'sum')) if not pp.empty else pd.DataFrame()
+    s_m = sp.groupby('Calendar_Month').agg(sold_units=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not sp.empty else pd.DataFrame()
+    p_m = pp.groupby('Calendar_Month').agg(purch_strips=('Qty', 'sum'), purch_value=('Item Total', 'sum')) if not pp.empty else pd.DataFrame()
     monthly = pd.concat([s_m, p_m], axis=1).fillna(0)
     if not monthly.empty and 'sold_units' in monthly:
         monthly['sold_strips'] = (monthly['sold_units'] / factor).round(1)
         monthly = monthly.drop(columns=['sold_units'], errors='ignore')
-    monthly = monthly.round(2).reset_index().rename(columns={'index': 'month', 'Source_Month': 'month'})
+    monthly = monthly.round(2).reset_index().rename(columns={'index': 'month', 'Calendar_Month': 'month'})
 
     return _guard_no_pii({
         'product': name, 'found': True, 'pack_size_factor': factor,
@@ -660,7 +661,7 @@ def get_top_customers(n=10, by='spend'):
     d['customer'] = d[col].map(_mobile_code)
     g = d.groupby('customer').agg(
         spend=('Item Total', 'sum'), visits=('Inv.No', 'nunique'),
-        months_active=('Source_Month', 'nunique')).reset_index()
+        months_active=('Calendar_Month', 'nunique')).reset_index()
     g['spend'] = g['spend'].round(2)
     g = g.sort_values(by, ascending=False).head(int(n))
     return _guard_no_pii({'available': True, 'by': by,
@@ -679,10 +680,10 @@ def get_customer_trends(churn_limit=20):
         return _guard_no_pii({'available': False, 'reason': 'no mobile number column in the data yet'})
     d = s[s[mobile_col].notna()].copy()
     d[mobile_col] = d[mobile_col].astype(str).str.strip()
-    months = sorted(d['Source_Month'].unique())
+    months = sorted(d['Calendar_Month'].unique())
     latest = months[-1]
-    before = d[d['Source_Month'] != latest]
-    active_latest = set(d[d['Source_Month'] == latest][mobile_col])
+    before = d[d['Calendar_Month'] != latest]
+    active_latest = set(d[d['Calendar_Month'] == latest][mobile_col])
     churned = before[~before[mobile_col].isin(active_latest)]
     churned_spend = churned.groupby(mobile_col)['Item Total'].sum().sort_values(ascending=False)
     churned_top = [{'customer': _mobile_code(m), 'past_spend': _round(v)}
@@ -832,7 +833,7 @@ def get_product_patient_history(product, limit=100):
     }
 
 
-QUERY_DIMS = {'product': 'Product', 'branch': 'Branch', 'month': 'Source_Month'}
+QUERY_DIMS = {'product': 'Product', 'branch': 'Branch', 'month': 'Calendar_Month'}
 QUERY_METRICS = ('revenue', 'pretax_revenue', 'qty_strips', 'invoices', 'avg_price')
 
 
@@ -852,7 +853,7 @@ def query_sales(group_by=None, metric='revenue', product=None, branch=None, mont
     if branch:
         df = df[df['Branch'].str.contains(branch, case=False, na=False)]
     if month:
-        df = df[df['Source_Month'] == month]
+        df = df[df['Calendar_Month'] == month]
     if df.empty:
         return _guard_no_pii({'rows': [], 'note': 'no sales match those filters'})
 
@@ -878,7 +879,7 @@ def query_sales(group_by=None, metric='revenue', product=None, branch=None, mont
     rows = []
     for keys, g in df.groupby(dims):
         keys = keys if isinstance(keys, tuple) else (keys,)
-        row = {d.lower().replace('source_', ''): k for d, k in zip(dims, keys)}
+        row = {d.lower().replace('calendar_', ''): k for d, k in zip(dims, keys)}
         row[metric] = _round(measure(g))
         rows.append(row)
     rows.sort(key=lambda r: (r[metric] is not None, r[metric]), reverse=True)

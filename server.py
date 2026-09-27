@@ -266,6 +266,7 @@ def compute_all():
     purch = rk.ensure_purch_defaults(purch)  # older master CSVs may predate an optional column
     if sales.empty or purch.empty:
         return None
+    sales, purch = rk.add_calendar_month(sales), rk.add_calendar_month(purch)
 
     forecast, target_month, all_months = rk.build_demand_forecast(sales)
     branch_summary, branch_forecast = rk.build_branch_report(sales)
@@ -315,7 +316,7 @@ def compute_all():
     profit_out = profit.rename(columns={'Qty_Sold_Strips': 'qty_sold', 'Gross_Profit': 'gross_profit',
                                          'Margin_Pct': 'margin_pct', 'Pretax_Revenue': 'revenue'})
     ptr_out = ptr_high.rename(columns={'Sale Rate': 'ptr', 'Item Total': 'item_total',
-                                        'Excess': 'excess', 'Source_Month': 'month'})
+                                        'Excess': 'excess', 'Calendar_Month': 'month'})
     scheme_out = scheme_missed.rename(columns={'Free Qty': 'free_qty', 'Qty': 'qty',
                                                 'FreeRatio': 'free_ratio', 'Typical_Ratio': 'typical_ratio',
                                                 'Shortfall_Qty': 'shortfall'})
@@ -483,6 +484,7 @@ def api_product():
     sales = pd.read_csv(rk.SALES_MASTER) if rk.SALES_MASTER.exists() else pd.DataFrame()
     purch = pd.read_csv(rk.PURCH_MASTER) if rk.PURCH_MASTER.exists() else pd.DataFrame()
     purch = rk.ensure_purch_defaults(purch)  # older master CSVs may predate an optional column
+    sales, purch = rk.add_calendar_month(sales), rk.add_calendar_month(purch)
 
     s = sales[sales['Product'] == name].copy()
     p = purch[purch['Product'] == name].copy()
@@ -539,14 +541,14 @@ def api_product():
     # Monthly trend for the chart - qty in strips both sides: sales Qty/Factor,
     # purchase Qty already in packs (same fix as Over-Under Purchased, just
     # expressed as strips instead of individual units here).
-    s_monthly = s.groupby('Source_Month').agg(sold_qty=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not s.empty else pd.DataFrame()
+    s_monthly = s.groupby('Calendar_Month').agg(sold_qty=('Qty', 'sum'), sold_value=('Item Total', 'sum')) if not s.empty else pd.DataFrame()
     if not s_monthly.empty:
         s_monthly['sold_qty'] = (s_monthly['sold_qty'] / factor).round(1)
     if not p.empty:
-        p_monthly = p.groupby('Source_Month').agg(purch_qty=('Qty', 'sum'), purch_value=('Item Total', 'sum'))
+        p_monthly = p.groupby('Calendar_Month').agg(purch_qty=('Qty', 'sum'), purch_value=('Item Total', 'sum'))
     else:
         p_monthly = pd.DataFrame()
-    monthly = pd.concat([s_monthly, p_monthly], axis=1).fillna(0).reset_index().rename(columns={'index': 'month', 'Source_Month': 'month'})
+    monthly = pd.concat([s_monthly, p_monthly], axis=1).fillna(0).reset_index().rename(columns={'index': 'month', 'Calendar_Month': 'month'})
     monthly = monthly.sort_values('month')
     for col in ['sold_qty', 'sold_value', 'purch_qty', 'purch_value']:
         if col not in monthly.columns:
