@@ -443,6 +443,8 @@ let currentSub = 'ptr';
 let currentStockSub = 'over';
 let currentPeopleSub = 'employees';
 let currentRefillStatus = 'Overdue';
+let currentEmpView = 'all';
+let currentEmpMonth = null;
 let currentBranch = null;
 
 // --- Session / auto-logout -----------------------------------------------
@@ -829,7 +831,37 @@ function renderEmployees(container) {
       "Item Given By", or "Created By" column. This activates automatically once one shows up in an upload.</div>`;
     return;
   }
-  let html = '';
+  const months = [...new Set((DATA.employee_monthly || []).map(r => r.month))].sort();
+  let html = `<div class="subtabs" id="emp-view-tabs" style="margin-top:14px">
+      <button class="subtab${currentEmpView === 'all' ? ' active' : ''}" data-empview="all">All history</button>
+      <button class="subtab${currentEmpView === 'month' ? ' active' : ''}" data-empview="month">By month</button>
+    </div>`;
+  if (currentEmpView === 'month') {
+    if (!months.length) {
+      html += '<div class="empty">No monthly employee data yet.</div>';
+    } else {
+      if (!currentEmpMonth || !months.includes(currentEmpMonth)) currentEmpMonth = months[months.length - 1];
+      html += `<div class="subtabs" id="emp-month-tabs">` +
+        months.map(m => `<button class="subtab${m === currentEmpMonth ? ' active' : ''}" data-empmonth="${m}">${m}</button>`).join('') +
+        `</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin:-4px 0 8px">Timing comes from each person's own bill/fetch stamps. Target = the best of their routine days; an off-target day is 15+ min beyond it. Months exported without a time-of-day show no timing.</div>
+        <div class="search-bar">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="search-empmonth" placeholder="Search employee…">
+        </div>
+        <div class="result-count" id="rc-empmonth"></div>
+        <div class="card-list" id="list-empmonth"></div>`;
+    }
+    container.innerHTML = html;
+    bindEmployeeViewTabs(container);
+    if (months.length) {
+      const rows = DATA.employee_monthly.filter(r => r.month === currentEmpMonth)
+        .sort((a, b) => ((b.revenue || 0) - (a.revenue || 0)) || ((b.lines || 0) - (a.lines || 0)));
+      setupSearch('search-empmonth', 'list-empmonth', 'rc-empmonth', rows,
+        (r, q) => r.employee.toLowerCase().includes(q), employeeMonthCard, 'No matching employees.');
+    }
+    return;
+  }
   if (DATA.employee_billed_by) {
     html += `<div class="section-title" style="margin-top:14px">Billed by</div><div class="card-list">` +
       DATA.employee_billed_by.map(e => employeeCard('var(--accent)', e.Employee, [
@@ -868,6 +900,49 @@ function renderEmployees(container) {
       }).join('') + `</div>`;
   }
   container.innerHTML = html;
+  bindEmployeeViewTabs(container);
+}
+
+function bindEmployeeViewTabs(container) {
+  container.querySelectorAll('#emp-view-tabs .subtab').forEach(btn => {
+    btn.addEventListener('click', () => { currentEmpView = btn.dataset.empview; renderEmployees(container); });
+  });
+  container.querySelectorAll('#emp-month-tabs .subtab').forEach(btn => {
+    btn.addEventListener('click', () => { currentEmpMonth = btn.dataset.empmonth; renderEmployees(container); });
+  });
+}
+
+const EMP_OFF_COLOR = [['var(--ok)', 'var(--ok-soft)'], ['var(--warn)', 'var(--warn-soft)'], ['var(--danger)', 'var(--danger-soft)']];
+
+function employeeMonthCard(r) {
+  const groups = [];
+  if (r.bills != null) groups.push(['Sales', [
+    ['Bills', fmt(r.bills)], ['Revenue', money(r.revenue)], ['Patients', fmt(r.patients)], ['Avg bill', money(r.avg_bill_value)]]]);
+  if (r.lines != null) groups.push(['Fetching', [
+    ['Line items', fmt(r.lines)], ['Products', fmt(r.distinct_products)], ['Rare items', pct(r.rare_item_pct)],
+    ['Lines/bill', r.lines_per_bill == null ? '—' : Number(r.lines_per_bill).toFixed(2)]]]);
+  if (r.invoices_entered != null) {
+    const m = [['Invoices', fmt(r.invoices_entered)], ['PTR>MRP errors', fmt(r.ptr_errors)]];
+    if (r.margin_pct != null) m.push(['Margin %', pct(r.margin_pct)]);
+    groups.push(['Purchase entry', m]);
+  }
+  let off = null;
+  if (r.days_timed) {
+    off = (r.days_late || 0) + (r.days_long_lunch || 0) + (r.days_left_early || 0);
+    const t = [['Arrival', `${r.arrive} · target ${r.target_arrive}`], ['Late days', `${fmt(r.days_late)} / ${fmt(r.days_timed)}`]];
+    if (r.lunch_len_min != null) t.push(['Lunch', `${r.lunch_out}–${r.lunch_in} · ${fmt(r.lunch_len_min)} min`], ['Long-lunch days', fmt(r.days_long_lunch)]);
+    else t.push(['Lunch', 'not reliable (few stamps)']);
+    t.push(['Exit', `${r.exit} · target ${r.target_exit}`], ['Left-early days', fmt(r.days_left_early)]);
+    groups.push(['Timing', t]);
+  }
+  const [color, bg] = off == null ? ['var(--ink-soft)', 'var(--line)'] : EMP_OFF_COLOR[off === 0 ? 0 : (off <= 3 ? 1 : 2)];
+  const pill = off == null ? '' : `<span class="pill" style="color:${color};background:${bg}">${off} off-target day${off === 1 ? '' : 's'}</span>`;
+  return `<div class="card" style="--card-stripe:${color}">
+    <div class="row1"><div class="name">${escHtml(r.employee)}<div class="meta">${fmt(r.days_active)} days active</div></div>${pill}</div>
+    ${groups.map(([title, metrics]) => `
+      <div class="metric" style="margin-top:8px"><div class="k">${title}</div></div>
+      <div class="metrics" style="margin-top:2px">${metrics.map(([k, v]) => `<div class="metric"><div class="k">${escHtml(k)}</div><div class="v">${v}</div></div>`).join('')}</div>`).join('')}
+  </div>`;
 }
 
 function renderCustomers(container) {

@@ -521,6 +521,58 @@ def get_employee_performance():
     return _guard_no_pii(out)
 
 
+def get_employee_monthly(name=None, month=None, n=12):
+    """Employee performance by MONTH - one row per employee per calendar
+    month ('YYYY-MM') with every role's parameters (blank where a role
+    doesn't apply): Billed By (Bills, Revenue, Patients, Avg_Bill_Value),
+    Item Given By (Lines, Distinct_Products, Rare_Item_Pct, Lines_Per_Bill),
+    Created By (Invoices_Entered, PTR_Errors, Margin_Pct), Days_Active, and
+    shift timing from that person's OWN bill/fetch stamps: Arrive (median
+    first activity), Lunch_Out / Lunch_In / Lunch_Len_Min, Exit (median last
+    activity), each with the person's own Target_* and counts of off-target
+    days (Days_Late, Days_Long_Lunch, Days_Left_Early - more than
+    tolerance_min beyond target). Target = the best of THEIR routine days
+    (earliest-15% arrival, latest-15% exit, shortest-15% lunch), not a
+    fixed shift time and not their single best day - so it is fair across
+    different shift patterns. Everyone works two shifts with a lunch gap;
+    lunch is detected from the activity gap and is blank on low-activity
+    days (Lunch_Days says how many days it was reliable). Timing is blank
+    for months exported without a time-of-day. This is NOT a punch-clock
+    record - say so if asked. `name` filters (contains-match) and returns
+    that person's months in order; `month` filters to one month; with
+    neither, returns the latest month's top n by revenue then lines."""
+    s, p = _load()
+    if 'employee_monthly' not in _cache:
+        lines, _ = rk.compute_distributor_lines(p)
+        _cache['employee_monthly'] = rk.build_employee_monthly(s, p, lines)
+    monthly, _targets = _cache['employee_monthly']
+    if monthly is None:
+        return _guard_no_pii({'available': False,
+                              'reason': 'no Billed By / Item Given By / Created By column in the data yet'})
+    df = monthly
+    if name:
+        df = df[df['Employee'].str.contains(name.strip(), case=False, na=False)]
+    if month:
+        df = df[df['Calendar_Month'] == month.strip()]
+    if not name and not month:
+        df = df[df['Calendar_Month'] == sorted(monthly['Calendar_Month'].unique())[-1]]
+    if df.empty:
+        return _guard_no_pii({'available': True, 'rows': [], 'note': 'no employee/month matches those filters'})
+    if name:
+        df = df.sort_values(['Employee', 'Calendar_Month'])
+    else:
+        df = df.sort_values(['Revenue', 'Lines'], ascending=False, na_position='last').head(int(n))
+    cols = ['Employee', 'Calendar_Month', 'Days_Active', 'Bills', 'Revenue', 'Patients', 'Avg_Bill_Value',
+            'Lines', 'Distinct_Products', 'Rare_Item_Pct', 'Lines_Per_Bill',
+            'Invoices_Entered', 'PTR_Errors', 'Margin_Pct',
+            'Days_Timed', 'Arrive', 'Target_Arrive', 'Late_Arrive_Avg_Min', 'Days_Late',
+            'Lunch_Out', 'Lunch_In', 'Lunch_Len_Min', 'Target_Lunch_Len_Min', 'Lunch_Days', 'Days_Long_Lunch',
+            'Exit', 'Target_Exit', 'Early_Exit_Avg_Min', 'Days_Left_Early']
+    return _guard_no_pii({'available': True, 'tolerance_min': rk.SHIFT_TOLERANCE_MIN,
+                          'target_rule': 'best of that employee\'s own routine days (15% boundary), all history',
+                          'rows': _records(df, cols)})
+
+
 # ---------------------------------------------------------------------------
 # On-demand employee KPI/target report from the SEPARATE shubhadahealth.com
 # system - not part of the reckoner's own data, and never fetched live: that
@@ -995,6 +1047,9 @@ TOOLS = [
      'description': get_notes.__doc__, 'parameters': _schema({'n': {'type': 'integer'}})},
     {'name': 'get_employee_performance', 'fn': get_employee_performance,
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
+    {'name': 'get_employee_monthly', 'fn': get_employee_monthly,
+     'description': get_employee_monthly.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,
      'parameters': _schema({'name': {'type': 'string'}})},

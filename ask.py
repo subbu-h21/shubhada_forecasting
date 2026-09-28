@@ -160,6 +160,12 @@ Rules:
   get_optimum_stock. State the rule it uses (max = that branch's own average
   one-month sale) and that it is a ceiling, not an order quantity - the
   reckoner does not know current stock on hand.
+- If a question asks about an employee's performance in a specific MONTH, a
+  month-by-month trend, or arrival / lunch / exit timing (late arrivals,
+  long lunches, leaving early), use get_employee_monthly. Timing comes from
+  their own bill/fetch stamps; the target is the best of THEIR OWN routine
+  days, not a fixed shift time; an off-target day is 15+ min beyond it -
+  say so, and never present it as a punch-clock record.
 - If a question asks which customers are due/overdue for a refill, or about
   repeat-purchase/reorder patterns for a product, use get_refill_due.
   Customers there are pseudonymous codes, same privacy rule as
@@ -388,6 +394,8 @@ def selftest():
         ('get_thin_margin_purchases', {'n': 5}),
         ('get_notes', {'n': 5}),
         ('get_employee_performance', {}),
+        ('get_employee_monthly', {}),
+        ('get_employee_monthly', {'name': 'Keerthana'}),
         ('get_employee_targets', {}),
         ('get_employee_attendance', {}),
         ('get_top_customers', {'n': 5, 'by': 'spend'}),

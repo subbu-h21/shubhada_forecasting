@@ -1309,6 +1309,203 @@ def build_hours_staff(sales):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1h: Employee performance by MONTH - the all-history Employee
+# Performance tables re-cut per employee per calendar month (sales,
+# fetching, purchase entry, days active), plus shift timing derived from the
+# bill stamps themselves: morning arrival, lunch out, lunch length, lunch
+# back, evening exit - each against that employee's OWN target.
+#
+# Timing uses the reckoner's own POS timestamps, combining Billed By AND
+# Given by activity per person (Narendra barely bills but fetches all day -
+# Billed By alone would give him nothing). NOT the external attendance
+# export: that system's out_time is a scheduled shift-end (one fixed value
+# per shift), not a real clock-out. Everyone works two shifts a day with a
+# lunch gap between (owner, 2026-09-28), so the largest gap between a
+# person's consecutive stamps that STARTS between 11:00 and 17:00 is their
+# lunch - trusted only on days with enough stamps that a quiet spell can't
+# pass for a break; a low-activity role gets arrival/exit only.
+#
+# Target = the best of their ROUTINE days, not their single best day ever
+# ("Option C", owner-confirmed 2026-09-28): the earliest-15% boundary of
+# their arrivals, the latest-15% of their exits, the shortest-15% of their
+# lunches. The single best day is usually a one-off double shift covering
+# for someone (Keerthana's 21:02 exit vs her normal 18:05) and would read
+# every normal day as hours early. Targets are per person across all their
+# complete days, so every month is judged against one stable bar. The last
+# day of the data is dropped when it's visibly cut mid-day - an export taken
+# at 1pm makes the whole staff look like they left at lunch.
+# ---------------------------------------------------------------------------
+SHIFT_LUNCH_WINDOW = (11, 17)    # a lunch gap must START in this hour range
+SHIFT_LUNCH_MIN_GAP = 30         # minutes - shorter is a quiet spell, not a break
+SHIFT_LUNCH_MIN_STAMPS = 40      # activity stamps/day needed before a gap is trusted as lunch
+SHIFT_TARGET_QUANTILE = 0.15     # "best of routine days": the best-15% boundary, not the extreme
+SHIFT_TOLERANCE_MIN = 15         # minutes beyond target before a day counts as off-target
+SHIFT_TRUNCATED_DAY_HOUR = 20    # drop the last day of data if store-wide activity stops before this hour
+SHIFT_MIN_STAMPS_DAY = 10        # fewer stamps than this and the day isn't timed at all - that person's work that day wasn't on the floor
+
+
+def _norm_name(series):
+    return series.where(series.isna(), series.astype(str).str.strip().str.title())
+
+
+def _minutes_to_clock(m):
+    return _hour_to_clock(m / 60) if pd.notna(m) else None
+
+
+def _employee_activity(sales):
+    """One row per (Employee, dt) for every line where the person was the
+    biller OR the fetcher, both identities normalized the same way, repeats
+    within the same minute collapsed. None if neither column exists."""
+    billed_col = find_col(sales, BILLED_BY_CANDIDATES)
+    given_col = find_col(sales, GIVEN_BY_CANDIDATES)
+    if not billed_col and not given_col:
+        return None
+    dt = pd.to_datetime(sales['Date'], format='mixed')
+    parts = [pd.DataFrame({'Employee': _norm_name(sales[col]), 'dt': dt, 'Calendar_Month': sales['Calendar_Month']})
+             for col in (billed_col, given_col) if col]
+    act = pd.concat(parts, ignore_index=True).dropna(subset=['Employee'])
+    act['Day'] = act['dt'].dt.normalize()
+    act['has_time'] = (act['dt'].dt.hour != 0) | (act['dt'].dt.minute != 0)
+    return act.drop_duplicates(['Employee', 'dt'])
+
+
+def _employee_shift_timing(act):
+    """Per employee-day arrival / lunch out / lunch in / exit (minutes since
+    midnight) from timestamped activity, and per-employee targets.
+    Returns (daily, targets), or (None, None) with no timestamped rows."""
+    t = act[act['has_time']].copy()
+    if t.empty:
+        return None, None
+    last_day = t['Day'].max()
+    if t.loc[t['Day'] == last_day, 'dt'].max().hour < SHIFT_TRUNCATED_DAY_HOUR:
+        t = t[t['Day'] != last_day]
+    t = t.sort_values(['Employee', 'Day', 'dt'])
+    t['minute'] = t['dt'].dt.hour * 60 + t['dt'].dt.minute
+    grp = t.groupby(['Employee', 'Day'])
+    daily = grp.agg(Arrive_Min=('minute', 'min'), Exit_Min=('minute', 'max'), Stamps=('dt', 'size')).reset_index()
+    daily = daily[daily['Stamps'] >= SHIFT_MIN_STAMPS_DAY].copy()
+
+    t['next_minute'] = grp['minute'].shift(-1)
+    t['gap'] = t['next_minute'] - t['minute']
+    lo, hi = SHIFT_LUNCH_WINDOW
+    cand = t[(t['dt'].dt.hour >= lo) & (t['dt'].dt.hour < hi) & (t['gap'] >= SHIFT_LUNCH_MIN_GAP)]
+    if not cand.empty:
+        idx = cand.groupby(['Employee', 'Day'])['gap'].idxmax()
+        lunch = t.loc[idx, ['Employee', 'Day', 'minute', 'next_minute']].rename(
+            columns={'minute': 'Lunch_Out_Min', 'next_minute': 'Lunch_In_Min'})
+        daily = daily.merge(lunch, on=['Employee', 'Day'], how='left')
+    else:
+        daily['Lunch_Out_Min'] = np.nan
+        daily['Lunch_In_Min'] = np.nan
+    daily.loc[daily['Stamps'] < SHIFT_LUNCH_MIN_STAMPS, ['Lunch_Out_Min', 'Lunch_In_Min']] = np.nan
+    daily['Lunch_Len_Min'] = daily['Lunch_In_Min'] - daily['Lunch_Out_Min']
+
+    q = SHIFT_TARGET_QUANTILE
+    targets = daily.groupby('Employee').agg(
+        Days_Used=('Day', 'nunique'),
+        Target_Arrive_Min=('Arrive_Min', lambda s: s.quantile(q)),
+        Target_Exit_Min=('Exit_Min', lambda s: s.quantile(1 - q)),
+        Target_Lunch_Len_Min=('Lunch_Len_Min', lambda s: s.quantile(q)),
+    ).reset_index()
+    daily = daily.merge(targets, on='Employee', how='left')
+    daily['Late_Arrive_Min'] = (daily['Arrive_Min'] - daily['Target_Arrive_Min']).clip(lower=0)
+    daily['Early_Exit_Min'] = (daily['Target_Exit_Min'] - daily['Exit_Min']).clip(lower=0)
+    daily['Long_Lunch_Min'] = (daily['Lunch_Len_Min'] - daily['Target_Lunch_Len_Min']).clip(lower=0)
+    daily['Calendar_Month'] = daily['Day'].dt.to_period('M').astype(str)
+    return daily, targets
+
+
+def build_employee_monthly(sales, purch, dist_lines=None):
+    """Returns (monthly, timing_targets); monthly has one row per employee per
+    calendar month with every role's parameters (blank where that role
+    doesn't apply) and the shift-timing summary. None, None if no employee
+    column exists in the sales export."""
+    act = _employee_activity(sales)
+    if act is None:
+        return None, None
+    billed_col = find_col(sales, BILLED_BY_CANDIDATES)
+    given_col = find_col(sales, GIVEN_BY_CANDIDATES)
+    created_col = find_col(purch, CREATED_BY_CANDIDATES) if purch is not None and not purch.empty else None
+    key = ['Employee', 'Calendar_Month']
+
+    frames = []
+    if billed_col:
+        s = sales[sales[billed_col].notna()].copy()
+        s['Employee'] = _norm_name(s[billed_col])
+        b = s.groupby(key).agg(Bills=('Inv.No', 'nunique'), Revenue=('Item Total', 'sum'),
+                               Patients=('Patient', 'nunique')).reset_index()
+        b['Avg_Bill_Value'] = (b['Revenue'] / b['Bills']).round(2)
+        b['Revenue'] = b['Revenue'].round(2)
+        frames.append(b)
+    if given_col:
+        prod_lines = sales.groupby('Product').size().sort_values(ascending=False)
+        cum_share = prod_lines.cumsum() / prod_lines.sum()
+        rare = set(cum_share[cum_share > RARE_ITEM_VOLUME_CUTOFF].index)
+        s = sales[sales[given_col].notna()].copy()
+        s['Employee'] = _norm_name(s[given_col])
+        s['Is_Rare'] = s['Product'].isin(rare)
+        g = s.groupby(key).agg(Lines=('Product', 'size'), Bills_Fetched=('Inv.No', 'nunique'),
+                               Distinct_Products=('Product', 'nunique'), Rare_Item_Pct=('Is_Rare', 'mean')).reset_index()
+        g['Rare_Item_Pct'] = (g['Rare_Item_Pct'] * 100).round(1)
+        g['Lines_Per_Bill'] = (g['Lines'] / g['Bills_Fetched']).round(2)
+        frames.append(g.drop(columns=['Bills_Fetched']))
+    if created_col:
+        p = purch[purch[created_col].notna()].copy()
+        p['Employee'] = _norm_name(p[created_col])
+        c = p.groupby(key).agg(Invoices_Entered=('Inv.No', 'nunique')).reset_index()
+        err = p[(p['Sale Rate'] > p['MRP']) & (p['MRP'] > 0)].groupby(key).size().rename('PTR_Errors')
+        c = c.merge(err, on=key, how='left')
+        c['PTR_Errors'] = c['PTR_Errors'].fillna(0).astype(int)
+        if dist_lines is not None and created_col in dist_lines.columns:
+            d = dist_lines.copy()
+            d['Employee'] = _norm_name(d[created_col])
+            m = d.groupby(key).agg(Max_Sell_Pretax=('Max_Sell_Pretax', 'sum'),
+                                   Embedded_Profit=('Embedded_Profit', 'sum')).reset_index()
+            m['Margin_Pct'] = _margin_pct(m['Embedded_Profit'], m['Max_Sell_Pretax'])
+            m['Embedded_Profit'] = m['Embedded_Profit'].round(2)
+            c = c.merge(m.drop(columns=['Max_Sell_Pretax']), on=key, how='left')
+        frames.append(c)
+    # Days active counts purchase-entry days too - a back-office role can be
+    # in every day and never touch the sales floor.
+    day_frames = [act[['Employee', 'Calendar_Month', 'Day']]]
+    if created_col:
+        pdays = purch[purch[created_col].notna()][[created_col, 'Calendar_Month', 'Date']].copy()
+        pdays['Employee'] = _norm_name(pdays[created_col])
+        pdays['Day'] = pd.to_datetime(pdays['Date'], format='mixed').dt.normalize()
+        day_frames.append(pdays[['Employee', 'Calendar_Month', 'Day']])
+    frames.append(pd.concat(day_frames, ignore_index=True).groupby(key)['Day'].nunique()
+                  .rename('Days_Active').reset_index())
+
+    monthly = frames[0]
+    for f in frames[1:]:
+        monthly = monthly.merge(f, on=key, how='outer')
+    # Anchored to sales' real operating months - a purchase invoice with a
+    # stray/mistyped date would otherwise manufacture a phantom month here
+    # (same reasoning as build_monthly_trend).
+    monthly = monthly[monthly['Calendar_Month'].isin(set(sales['Calendar_Month'].unique()))]
+
+    daily, targets = _employee_shift_timing(act)
+    if daily is not None:
+        tol = SHIFT_TOLERANCE_MIN
+        tm = daily.groupby(key).agg(
+            Days_Timed=('Day', 'nunique'),
+            Arrive_Min=('Arrive_Min', 'median'), Late_Arrive_Avg_Min=('Late_Arrive_Min', 'mean'),
+            Days_Late=('Late_Arrive_Min', lambda s: int((s > tol).sum())),
+            Lunch_Out_Min=('Lunch_Out_Min', 'median'), Lunch_In_Min=('Lunch_In_Min', 'median'),
+            Lunch_Len_Min=('Lunch_Len_Min', 'median'), Lunch_Days=('Lunch_Len_Min', 'count'),
+            Days_Long_Lunch=('Long_Lunch_Min', lambda s: int((s > tol).sum())),
+            Exit_Min=('Exit_Min', 'median'), Early_Exit_Avg_Min=('Early_Exit_Min', 'mean'),
+            Days_Left_Early=('Early_Exit_Min', lambda s: int((s > tol).sum())),
+        ).reset_index()
+        monthly = monthly.merge(tm, on=key, how='left').merge(targets, on='Employee', how='left')
+        for c in ('Arrive', 'Lunch_Out', 'Lunch_In', 'Exit', 'Target_Arrive', 'Target_Exit'):
+            monthly[c] = monthly[f'{c}_Min'].apply(_minutes_to_clock)
+        for c in ('Late_Arrive_Avg_Min', 'Early_Exit_Avg_Min', 'Lunch_Len_Min', 'Target_Lunch_Len_Min'):
+            monthly[c] = monthly[c].round(0)
+    return monthly.sort_values(key).reset_index(drop=True), targets
+
+
+# ---------------------------------------------------------------------------
 # Analysis 2: Over/under purchased (cumulative, all history)
 #
 # Purchase 'Qty' is counted in PACKS (Factor = units per pack, e.g. a strip of
@@ -1943,6 +2140,7 @@ def build_report(sales, purch, out_path):
     employee_perf = build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = build_customer_loyalty(sales)
     refill_due = build_refill_due(sales)
+    employee_monthly, _employee_timing_targets = build_employee_monthly(sales, purch, dist_lines)
     hourly_branch, employee_windows, hours_included_months, hours_excluded_months, hours_billed_col = build_hours_staff(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
@@ -2015,6 +2213,7 @@ def build_report(sales, purch, out_path):
         'Monthly Trends - purchasing discipline (over/under-purchased, balanced, dead stock) and footfall, month by month, against goals - with next-month predictions.',
         'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
         'Employee Performance - Billed By / Item Given By / Created By breakdown. Given By is scored as the rack-search-and-fetch skill (lines per hour present, distinct products, rare-item %), plus a fetcher-shortage view (biller fetched it themselves, by branch and hour) and who-fetches-for-whom pairs. Activates once your export includes one of these columns.',
+        f'Employee by Month - all 18 parameters per employee per month: sales, fetching, purchase entry, days active, and shift timing (arrival / lunch out / lunch length / lunch back / exit) from their own bill and fetch stamps, each against that employee\'s own target = the best of their routine days. Off-target = {SHIFT_TOLERANCE_MIN}+ min beyond it.',
         'Customer Loyalty - new/returning/dropped-off customers by mobile number, month by month. Activates once your export includes a mobile number column.',
         f'Refill Due - CONTAINS REAL CUSTOMER NAMES/MOBILE NUMBERS. Customers likely due for a refill of a specific product, from their own repeat-purchase cadence - Due Soon / Overdue / Likely Lost. As-of today, not the latest upload month.',
         'Hours & Staff - bill pressure by hour of day per branch, and each employee\'s typical working window (first/last bill, bills/day). Needs a bill time-of-day - months exported in the older date-only format are excluded.',
@@ -2299,6 +2498,50 @@ def build_report(sales, purch, out_path):
                      money_cols=money_cols)
     autosize(ws, [26, 12, 12, 12, 14, 16, 16, 12, 10, 12, 14, 34])
     ws.freeze_panes = 'A2'
+
+    # ---- Employee by Month ----
+    ws = wb.create_sheet('Employee by Month')
+    ws.sheet_view.showGridLines = False
+    if employee_monthly is None or employee_monthly.empty:
+        ws['A1'] = 'Not available yet'
+        ws['A1'].font = Font(name=FONT, bold=True, size=13)
+        ws['A2'] = 'None of your exports include a "Billed By", "Item Given By", or "Created By" column yet.'
+        ws['A2'].font = Font(name=FONT, size=10, color='555555')
+    else:
+        ws['A1'] = ('Every employee, every month: sales (Billed By), fetching (Item Given By), purchase entry (Created By), '
+                    'days active, and shift timing from their own bill/fetch stamps - arrival, lunch out, lunch length, '
+                    f'lunch back, exit. Off-target = more than {SHIFT_TOLERANCE_MIN} min beyond that person\'s own target. '
+                    'Timing needs a bill time-of-day, so months exported date-only are blank there.')
+        ws['A1'].font = Font(name=FONT, bold=True, size=11)
+        ws['A2'] = ('Target = the best of that employee\'s ROUTINE days across all history (earliest 15% of arrivals, latest '
+                    '15% of exits, shortest 15% of lunches) - not their single best day, which is usually a one-off double '
+                    'shift. Lunch = the largest gap in their activity starting 11:00-17:00, trusted only on days with '
+                    f'{SHIFT_LUNCH_MIN_STAMPS}+ stamps; low-activity roles show arrival/exit only.')
+        ws['A2'].font = SUBTITLE_FONT
+        em_map = {
+            'Calendar_Month': 'Month', 'Days_Active': 'Days Active',
+            'Bills': 'Bills', 'Revenue': 'Revenue', 'Patients': 'Unique Patients', 'Avg_Bill_Value': 'Avg Bill Value',
+            'Lines': 'Line Items', 'Distinct_Products': 'Distinct Products', 'Rare_Item_Pct': 'Rare Item %',
+            'Lines_Per_Bill': 'Lines/Bill',
+            'Invoices_Entered': 'Invoices Entered', 'PTR_Errors': 'PTR > MRP Errors',
+            'Embedded_Profit': 'Embedded Profit', 'Margin_Pct': 'Margin %',
+            'Days_Timed': 'Days Timed', 'Arrive': 'Arrival (median)', 'Target_Arrive': 'Target Arrival',
+            'Late_Arrive_Avg_Min': 'Late vs Target (avg min)', 'Days_Late': 'Days Late',
+            'Lunch_Out': 'Lunch Out', 'Lunch_In': 'Lunch Back', 'Lunch_Len_Min': 'Lunch (min)',
+            'Target_Lunch_Len_Min': 'Target Lunch (min)', 'Days_Long_Lunch': 'Days Long Lunch',
+            'Exit': 'Exit (median)', 'Target_Exit': 'Target Exit', 'Early_Exit_Avg_Min': 'Early vs Target (avg min)',
+            'Days_Left_Early': 'Days Left Early',
+        }
+        em_cols = ['Employee'] + [c for c in em_map if c in employee_monthly.columns]
+        df_em = employee_monthly[em_cols].rename(columns=em_map)
+        write_df(ws, df_em, start_row=4,
+                 qty_cols=['Days Active', 'Bills', 'Unique Patients', 'Line Items', 'Distinct Products',
+                           'Invoices Entered', 'PTR > MRP Errors', 'Days Timed', 'Days Late', 'Days Long Lunch',
+                           'Days Left Early', 'Late vs Target (avg min)', 'Early vs Target (avg min)',
+                           'Lunch (min)', 'Target Lunch (min)'],
+                 money_cols=['Revenue', 'Avg Bill Value', 'Rare Item %', 'Lines/Bill', 'Embedded Profit', 'Margin %'])
+        autosize(ws, [26, 10, 10] + [13] * (len(em_cols) - 3))
+    ws.freeze_panes = 'B5'
 
     # ---- Customer Loyalty ----
     ws = wb.create_sheet('Customer Loyalty')
