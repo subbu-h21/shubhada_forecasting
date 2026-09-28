@@ -17,6 +17,7 @@ import math
 import re
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -1129,6 +1130,98 @@ def build_customer_loyalty(sales):
 
 
 # ---------------------------------------------------------------------------
+# Analysis 1f2: Refill-due list - per (customer, product), a repeat-purchase
+# cadence learned from that customer's OWN history of buying that exact
+# product, no drug-category list needed or used: a regular repeat-buy pattern
+# IS the refill signal. Excludes the B2B/Wholesale channel - its "Mobile"
+# field holds a distributor's own contact numbers (sometimes several,
+# comma-joined) with no Patient name, not an individual customer's number,
+# and would corrupt a call list if included.
+#
+# Status per pair: 'Due soon' (next expected purchase within
+# REFILL_DUE_SOON_DAYS), 'Overdue' (past due, within one of their own typical
+# cycles), 'Likely lost' (overdue by MORE than a full cycle - worth a
+# different kind of call: check in, don't just remind).
+#
+# REFILL_MIN_PURCHASES=3 (2 observed gaps) is the load-bearing guard here:
+# tried with 2 (1 gap), the list was dominated by things like two purchases
+# of an antibiotic 3 days apart during one illness, six months ago, now
+# reading as "173 days overdue" - a real pattern needs to have repeated at
+# least once to trust it's a cycle, not a single-episode top-up. That same
+# gate is what makes 'Likely lost' trustworthy too - no separate, higher bar
+# is needed once the base cycle itself is established.
+# REFILL_MIN_GAP_DAYS=10 catches the same failure mode from the other side -
+# a chronic refill is rarely bought more often than every ~10 days.
+# ---------------------------------------------------------------------------
+REFILL_MIN_PURCHASES = 3
+REFILL_DUE_SOON_DAYS = 7
+REFILL_MIN_GAP_DAYS = 10
+REFILL_MAX_GAP_DAYS = 120
+
+
+def build_refill_due(sales, today=None):
+    """Returns None if this export has no mobile number column yet. `today`
+    defaults to the real current date - this is a live list to act on now,
+    not a fixed report-time figure."""
+    mobile_col = find_col(sales, MOBILE_CANDIDATES)
+    if not mobile_col:
+        return None
+    today = pd.Timestamp(today) if today is not None else pd.Timestamp(datetime.now().date())
+
+    s = sales.copy()
+    s['Branch'] = s['Inv.No'].apply(extract_branch)
+    s = s[(s['Branch'] != WHOLESALE_LABEL) & s[mobile_col].notna()].copy()
+    s[mobile_col] = s[mobile_col].astype(str).str.strip()
+    s['Day'] = pd.to_datetime(s['Date'], format='mixed').dt.normalize()
+
+    cols = ['Mobile', 'Patient', 'Product', 'Purchases_Seen', 'Avg_Gap_Days', 'Min_Gap_Days',
+            'Max_Gap_Days', 'Last_Purchase', 'Next_Due', 'Days_Until_Due', 'Status']
+    # One row per (customer, product, calendar day) - several lines of the same
+    # product on one bill are one buying occasion, not separate data points.
+    occ = s.drop_duplicates([mobile_col, 'Product', 'Day']).sort_values([mobile_col, 'Product', 'Day'])
+    occ['Prev_Day'] = occ.groupby([mobile_col, 'Product'])['Day'].shift(1)
+    occ['Gap_Days'] = (occ['Day'] - occ['Prev_Day']).dt.days
+    # Every row surviving this dropna has a real gap - i.e. at least 2
+    # purchases of that product by that customer. Nothing below needs its own
+    # minimum-purchases check for that baseline; it's already structural.
+    gaps = occ.dropna(subset=['Gap_Days'])
+    if gaps.empty:
+        return pd.DataFrame(columns=cols)
+
+    g = gaps.groupby([mobile_col, 'Product']).agg(
+        Purchases_Seen=('Gap_Days', 'size'), Avg_Gap_Days=('Gap_Days', 'median'),
+        Min_Gap_Days=('Gap_Days', 'min'), Max_Gap_Days=('Gap_Days', 'max'),
+        Last_Purchase=('Day', 'max')).reset_index().rename(columns={mobile_col: 'Mobile'})
+    g['Purchases_Seen'] += 1
+
+    g = g[(g['Purchases_Seen'] >= REFILL_MIN_PURCHASES) &
+          (g['Avg_Gap_Days'] >= REFILL_MIN_GAP_DAYS) & (g['Avg_Gap_Days'] <= REFILL_MAX_GAP_DAYS)].copy()
+    g['Next_Due'] = g['Last_Purchase'] + pd.to_timedelta(g['Avg_Gap_Days'], unit='D')
+    g['Days_Until_Due'] = (g['Next_Due'] - today).dt.days
+
+    def classify(row):
+        d, gap = row['Days_Until_Due'], row['Avg_Gap_Days']
+        if d > REFILL_DUE_SOON_DAYS:
+            return 'Not due yet'
+        if d > 0:
+            return 'Due soon'
+        if d > -gap:
+            return 'Overdue'
+        return 'Likely lost'
+    g['Status'] = g.apply(classify, axis=1)
+
+    # Most recent name on file for this (customer, product) - names
+    # occasionally vary in spelling/casing across visits, same as elsewhere.
+    names = occ.sort_values('Day').drop_duplicates([mobile_col, 'Product'], keep='last').rename(
+        columns={mobile_col: 'Mobile'})[['Mobile', 'Product', 'Patient']]
+    g = g.merge(names, on=['Mobile', 'Product'], how='left')
+
+    g['Last_Purchase'] = g['Last_Purchase'].dt.date.astype(str)
+    g['Next_Due'] = g['Next_Due'].dt.date.astype(str)
+    return g[cols].sort_values('Days_Until_Due').reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Analysis 1g: Hours & Staff - hourly bill pressure per branch (bills per
 # staff member on duty that hour) and each employee's actual working window,
 # both derived from the bill's own timestamp (not just its date).
@@ -1849,6 +1942,7 @@ def build_report(sales, purch, out_path):
     dist_lines, dist_excluded = compute_distributor_lines(purch)
     employee_perf = build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = build_customer_loyalty(sales)
+    refill_due = build_refill_due(sales)
     hourly_branch, employee_windows, hours_included_months, hours_excluded_months, hours_billed_col = build_hours_staff(sales)
     monthly_trend, trend_prediction, trend_target_month = build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = build_daywise_forecast(sales, footfall_forecast)
@@ -1922,6 +2016,7 @@ def build_report(sales, purch, out_path):
         'Day-wise Forecast - next month broken down by calendar day per branch (footfall & revenue), using each branch\'s day-of-week pattern from all 3 months of history.',
         'Employee Performance - Billed By / Item Given By / Created By breakdown. Given By is scored as the rack-search-and-fetch skill (lines per hour present, distinct products, rare-item %), plus a fetcher-shortage view (biller fetched it themselves, by branch and hour) and who-fetches-for-whom pairs. Activates once your export includes one of these columns.',
         'Customer Loyalty - new/returning/dropped-off customers by mobile number, month by month. Activates once your export includes a mobile number column.',
+        f'Refill Due - CONTAINS REAL CUSTOMER NAMES/MOBILE NUMBERS. Customers likely due for a refill of a specific product, from their own repeat-purchase cadence - Due Soon / Overdue / Likely Lost. As-of today, not the latest upload month.',
         'Hours & Staff - bill pressure by hour of day per branch, and each employee\'s typical working window (first/last bill, bills/day). Needs a bill time-of-day - months exported in the older date-only format are excluded.',
         'Over-Purchased - bought well more than sold (but still sold some), biggest excess value first.',
         'Dead Stock - bought but never sold at all, separate from Over-Purchased, highest value tied up first.',
@@ -2225,6 +2320,34 @@ def build_report(sales, purch, out_path):
                                                  'Dropped Off (vs prev month)', 'Total Active This Month'])
     autosize(ws, [14, 16, 18, 22, 20])
     ws.freeze_panes = 'A4'
+
+    # ---- Refill Due ----
+    ws = wb.create_sheet('Refill Due')
+    ws.sheet_view.showGridLines = False
+    if refill_due is None:
+        ws['A1'] = 'Not available yet'
+        ws['A1'].font = Font(name=FONT, bold=True, size=13)
+        ws['A2'] = 'None of your exports include a mobile number column yet.'
+        ws['A2'].font = Font(name=FONT, size=10, color='555555')
+    else:
+        ws['A1'] = ('Contains real customer names and mobile numbers - a call list, not an anonymized report. '
+                    'Handle/share this file accordingly.')
+        ws['A1'].font = Font(name=FONT, bold=True, size=11, color='B23A32')
+        ws['A2'] = ('Each row = one customer + one product they buy on a regular cycle, learned from their own '
+                    'purchase history (no drug-category list is used). Due Soon = expected to need it within '
+                    f'{REFILL_DUE_SOON_DAYS} days. Overdue = past due, within one of their own typical cycles. '
+                    'Likely Lost = overdue by more than a full cycle - worth a check-in call, not just a reminder. '
+                    'B2B/Wholesale is excluded (no individual customer numbers there). As-of: today, not the '
+                    'latest upload month - this list changes daily even with no new data.')
+        ws['A2'].font = SUBTITLE_FONT
+        rd = refill_due[refill_due['Status'] != 'Not due yet'].rename(columns={
+            'Purchases_Seen': 'Purchases Seen', 'Avg_Gap_Days': 'Avg Cycle (days)',
+            'Min_Gap_Days': 'Shortest Cycle Seen', 'Max_Gap_Days': 'Longest Cycle Seen',
+            'Last_Purchase': 'Last Bought', 'Next_Due': 'Expected Next', 'Days_Until_Due': 'Days Overdue/Due'})
+        write_df(ws, rd, start_row=4, qty_cols=['Purchases Seen'],
+                 money_cols=['Avg Cycle (days)', 'Shortest Cycle Seen', 'Longest Cycle Seen', 'Days Overdue/Due'])
+    autosize(ws, [14, 22, 34, 12, 14, 16, 16, 14, 14, 14, 14])
+    ws.freeze_panes = 'A5'
 
     # ---- Hours & Staff ----
     ws = wb.create_sheet('Hours & Staff')

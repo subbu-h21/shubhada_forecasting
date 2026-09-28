@@ -160,6 +160,13 @@ Rules:
   get_optimum_stock. State the rule it uses (max = that branch's own average
   one-month sale) and that it is a ceiling, not an order quantity - the
   reckoner does not know current stock on hand.
+- If a question asks which customers are due/overdue for a refill, or about
+  repeat-purchase/reorder patterns for a product, use get_refill_due.
+  Customers there are pseudonymous codes, same privacy rule as
+  get_top_customers - if the owner wants to actually call someone, tell them
+  to use the mobile dashboard's People > Refills tab (or the Excel Refill Due
+  sheet), which have the real name and number; never ask for or assume you
+  can supply a real contact from this tool's output.
 """
 
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
@@ -376,6 +383,8 @@ def selftest():
         ('get_purchase_issues', {'n': 5}),
         ('get_optimum_stock', {'n': 5}),
         ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
+        ('get_refill_due', {'n': 5}),
+        ('get_refill_due', {'status': 'Overdue', 'n': 5}),
         ('get_thin_margin_purchases', {'n': 5}),
         ('get_notes', {'n': 5}),
         ('get_employee_performance', {}),

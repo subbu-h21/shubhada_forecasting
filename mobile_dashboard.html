@@ -372,6 +372,7 @@
     <div class="subtabs">
       <button class="subtab active" data-peoplesub="employees">Employees</button>
       <button class="subtab" data-peoplesub="customers">Customers</button>
+      <button class="subtab" data-peoplesub="refills">Refills</button>
       <button class="subtab" data-peoplesub="distributors">Distributors</button>
     </div>
     <div id="people-content"></div>
@@ -441,6 +442,7 @@ let DATA = null;
 let currentSub = 'ptr';
 let currentStockSub = 'over';
 let currentPeopleSub = 'employees';
+let currentRefillStatus = 'Overdue';
 let currentBranch = null;
 
 // --- Session / auto-logout -----------------------------------------------
@@ -676,6 +678,7 @@ function render() {
     ['var(--warn)', s.discount_shortfall_count, `Discount gaps, ${s.latest_month}`],
     ['var(--danger)', s.over_purchased_count, 'Over-purchased products'],
     ['var(--danger)', s.dead_stock_count, 'Dead stock products'],
+    ['var(--warn)', fmt(s.refill_overdue_count), 'Customers overdue for a refill'],
   ];
   document.getElementById('stat-grid').innerHTML = stats.map(([color, n, l]) => `
     <div class="stat-card" style="--stripe:${color}"><div class="n">${n}</div><div class="l">${l}</div></div>
@@ -804,6 +807,8 @@ function buildPeople() {
     renderEmployees(container);
   } else if (currentPeopleSub === 'customers') {
     renderCustomers(container);
+  } else if (currentPeopleSub === 'refills') {
+    renderRefills(container);
   } else {
     renderDistributors(container);
   }
@@ -878,6 +883,63 @@ function renderCustomers(container) {
       ['New', fmt(r.New_Customers)], ['Returning', fmt(r.Returning_Customers)],
       ['Dropped off', fmt(r.Dropped_Off_From_Prev_Month)], ['Total active', fmt(r.Total_Active_Customers)],
     ])).join('') + `</div>`;
+}
+
+const REFILL_STATUS_COLOR = {
+  'Overdue': ['var(--warn)', 'var(--warn-soft)'],
+  'Due soon': ['var(--accent)', 'var(--accent-soft)'],
+  'Likely lost': ['var(--danger)', 'var(--danger-soft)'],
+};
+
+function refillCard(r) {
+  const [color, bg] = REFILL_STATUS_COLOR[r.status] || ['var(--ink-soft)', 'var(--line)'];
+  const dueLabel = r.days_until_due <= 0 ? `${Math.abs(r.days_until_due)}d overdue` : `due in ${r.days_until_due}d`;
+  return `<div class="card" style="--card-stripe:${color}">
+    <div class="row1"><div class="name">${escHtml(r.patient || '(no name)')}<div class="meta">${escHtml(r.product)}</div></div>
+      <span class="pill" style="color:${color};background:${bg}">${dueLabel}</span></div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Mobile</div><div class="v"><a href="tel:${escAttr(r.mobile)}" style="color:inherit">${escHtml(r.mobile)}</a></div></div>
+      <div class="metric"><div class="k">Usual cycle</div><div class="v">${fmt(r.avg_gap_days)}d</div></div>
+      <div class="metric"><div class="k">Last bought</div><div class="v">${r.last_purchase}</div></div>
+      <div class="metric"><div class="k">Purchases seen</div><div class="v">${fmt(r.purchases_seen)}</div></div>
+    </div></div>`;
+}
+
+function renderRefills(container) {
+  if (!DATA.refill_due) {
+    container.innerHTML = `<div class="empty">Not available yet — none of your exports include a mobile number
+      column. This activates automatically once one shows up in an upload.</div>`;
+    return;
+  }
+  const rows = DATA.refill_due;
+  const counts = { 'Overdue': 0, 'Due soon': 0, 'Likely lost': 0 };
+  rows.forEach(r => { if (counts[r.status] !== undefined) counts[r.status]++; });
+
+  container.innerHTML = `
+    <div style="font-size:12px;color:var(--ink-soft);margin:14px 0 8px">
+      Customers likely due for a refill, from their own repeat-purchase pattern for that product — not a drug list.
+      Real name &amp; mobile — tap the number to call. As of today, not the latest upload month.
+    </div>
+    <div class="subtabs" id="refill-subtabs">
+      <button class="subtab${currentRefillStatus === 'Overdue' ? ' active' : ''}" data-refillstatus="Overdue">Overdue (${counts['Overdue']})</button>
+      <button class="subtab${currentRefillStatus === 'Due soon' ? ' active' : ''}" data-refillstatus="Due soon">Due Soon (${counts['Due soon']})</button>
+      <button class="subtab${currentRefillStatus === 'Likely lost' ? ' active' : ''}" data-refillstatus="Likely lost">Likely Lost (${counts['Likely lost']})</button>
+    </div>
+    <div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-refills" placeholder="Search product or name…">
+    </div>
+    <div class="result-count" id="rc-refills"></div>
+    <div class="card-list" id="list-refills"></div>`;
+
+  container.querySelectorAll('#refill-subtabs .subtab').forEach(btn => {
+    btn.addEventListener('click', () => { currentRefillStatus = btn.dataset.refillstatus; renderRefills(container); });
+  });
+
+  const data = rows.filter(r => r.status === currentRefillStatus);
+  setupSearch('search-refills', 'list-refills', 'rc-refills', data,
+    (r, q) => r.product.toLowerCase().includes(q) || (r.patient || '').toLowerCase().includes(q),
+    refillCard, 'No matching customers.');
 }
 
 function renderDistributors(container) {

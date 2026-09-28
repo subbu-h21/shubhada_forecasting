@@ -275,6 +275,7 @@ def compute_all():
     dist_lines, _ = rk.compute_distributor_lines(purch)
     employee_perf = rk.build_employee_performance(sales, purch, dist_lines)
     customer_loyalty, mobile_col = rk.build_customer_loyalty(sales)
+    refill_due = rk.build_refill_due(sales)
     hourly_branch, employee_windows, hours_included_months, hours_excluded_months, _ = rk.build_hours_staff(sales)
     monthly_trend, trend_prediction, trend_target_month = rk.build_monthly_trend(sales, purch, footfall_forecast)
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
@@ -306,6 +307,7 @@ def compute_all():
         'mrp_variance_count': len(variance),
         'scheme_shortfall_count': len(scheme_missed),
         'discount_shortfall_count': len(disc_missed),
+        'refill_overdue_count': int((refill_due['Status'].isin(['Overdue', 'Likely lost'])).sum()) if refill_due is not None else 0,
     }
 
     # qty fields sent to mobile are in strips (Qty / Factor), matching Excel
@@ -393,6 +395,11 @@ def compute_all():
             if employee_perf['fetch_pairs'] is not None else None,
         'customer_loyalty': df_records(customer_loyalty) if customer_loyalty is not None else None,
         'customer_loyalty_col': mobile_col,
+        'refill_due': df_records(refill_due[refill_due['Status'] != 'Not due yet'].rename(columns={
+            'Mobile': 'mobile', 'Patient': 'patient', 'Product': 'product', 'Purchases_Seen': 'purchases_seen',
+            'Avg_Gap_Days': 'avg_gap_days', 'Min_Gap_Days': 'min_gap_days', 'Max_Gap_Days': 'max_gap_days',
+            'Last_Purchase': 'last_purchase', 'Next_Due': 'next_due', 'Days_Until_Due': 'days_until_due',
+            'Status': 'status'})) if refill_due is not None else None,
         'hourly_branch': hourly_branch_out,
         'employee_windows': employee_windows_out,
         'hours_included_months': hours_included_months,

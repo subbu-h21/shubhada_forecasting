@@ -728,6 +728,42 @@ def get_customer_trends(churn_limit=20):
     })
 
 
+def get_refill_due(status=None, product=None, n=15):
+    """Customers likely due for a refill of a specific product, based on
+    THEIR OWN repeat-purchase cadence for that exact product (no drug-
+    category list is used or needed - a regular repeat-buy pattern is
+    the signal). Each customer is a pseudonymous 'Cust_xxxxxx' code, same as
+    get_top_customers - the real name/mobile never leaves this function; the
+    owner uses the mobile dashboard's People > Refills tab (or the Excel
+    Refill Due sheet) to get the real contact details and actually call
+    someone. B2B/Wholesale is excluded (no individual customer numbers
+    there). `status` filters to one of 'Due soon', 'Overdue', 'Likely lost'
+    (omit for a count of each plus the top n overall, most overdue first).
+    'Likely lost' means overdue by more than a full cycle - a check-in call,
+    not just a reminder. `product` filters to products containing that text
+    (call search_products first for an exact name). Returns available=False
+    if this export has no mobile number column yet."""
+    s, _ = _load()
+    if 'refill_due' not in _cache:
+        _cache['refill_due'] = rk.build_refill_due(s)
+    df = _cache['refill_due']
+    if df is None:
+        return _guard_no_pii({'available': False, 'reason': 'no mobile number column in the data yet'})
+    df = df[df['Status'] != 'Not due yet']
+    counts = df['Status'].value_counts().to_dict()
+    out = df.copy()
+    if status:
+        out = out[out['Status'].str.lower() == status.strip().lower()]
+    if product:
+        out = out[out['Product'].str.contains(product.strip(), case=False, na=False)]
+    out['customer'] = out['Mobile'].map(_mobile_code)
+    top = out.sort_values('Days_Until_Due').head(int(n))
+    return _guard_no_pii({
+        'available': True, 'counts_by_status': counts,
+        'rows': _records(top, ['customer', 'Product', 'Purchases_Seen', 'Avg_Gap_Days', 'Days_Until_Due', 'Status']),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Patient-identifying tools - deliberate exceptions to the PII guard. The
 # owner explicitly asked for real name/mobile/per-transaction lookup by
@@ -971,6 +1007,10 @@ TOOLS = [
     {'name': 'get_customer_trends', 'fn': get_customer_trends,
      'description': get_customer_trends.__doc__,
      'parameters': _schema({'churn_limit': {'type': 'integer'}})},
+    {'name': 'get_refill_due', 'fn': get_refill_due,
+     'description': get_refill_due.__doc__,
+     'parameters': _schema({'status': {'type': 'string', 'enum': ['Due soon', 'Overdue', 'Likely lost']},
+                            'product': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'query_sales', 'fn': query_sales,
      'description': query_sales.__doc__,
      'parameters': _schema({
