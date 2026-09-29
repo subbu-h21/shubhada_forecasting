@@ -248,8 +248,9 @@ def find_col(df, candidates):
 # rack), which splits one person's work across two identities and corrupts
 # anything scored per employee. Every pair below was confirmed by the owner
 # (2026-09-29) - never add one on resemblance alone: 'Raghavendra C Shet'
-# looks like the others and is deliberately NOT merged. Keys and values are in
-# the stripped, title-cased form _norm_name() produces.
+# looks like the others and is a DIFFERENT person (owner-confirmed), so it is
+# deliberately NOT merged. Keys and values are in the stripped, title-cased
+# form _norm_name() produces.
 EMPLOYEE_ALIASES = {
     'Deepa M Gouda': 'Deepa Manjunatha Gouda',
     'Narendra': 'Narendra Devadiga',
@@ -258,6 +259,10 @@ EMPLOYEE_ALIASES = {
     'Netravati Prakash Kotari': 'Netravati Prakash Kothari',
     'Raghavendra': 'Raghavendra S Palankar',
     'Raghavendra S Palanka': 'Raghavendra S Palankar',
+    'Asha': 'Asha Vinayak Bhovi',
+    'Asha V B': 'Asha Vinayak Bhovi',
+    'Ganesh': 'Ganesh Hegde',
+    'Sharath Nagendra Naik D': 'Sharath Nagendra Naik',
 }
 
 
