@@ -166,6 +166,13 @@ Rules:
   their own bill/fetch stamps; the target is the best of THEIR OWN routine
   days, not a fixed shift time; an off-target day is 15+ min beyond it -
   say so, and never present it as a punch-clock record.
+- If a question asks for an employee's SCORE, scorecard, rating, overall
+  performance in a month, or whether someone is improving or slipping
+  month to month, use get_employee_scorecard (with their name for the
+  progression). Always state that the score is measured against that
+  person's OWN best - it shows whether they are at their best, not who is
+  better - and mention Months_Scored when it is 1 or 2. For WHY a score
+  moved, follow up with get_employee_monthly for the underlying numbers.
 - If a question asks which customers are due/overdue for a refill, or about
   repeat-purchase/reorder patterns for a product, use get_refill_due.
   Customers there are pseudonymous codes, same privacy rule as
@@ -396,6 +403,8 @@ def selftest():
         ('get_employee_performance', {}),
         ('get_employee_monthly', {}),
         ('get_employee_monthly', {'name': 'Keerthana'}),
+        ('get_employee_scorecard', {}),
+        ('get_employee_scorecard', {'name': 'Keerthana'}),
         ('get_employee_targets', {}),
         ('get_employee_attendance', {}),
         ('get_top_customers', {'n': 5, 'by': 'spend'}),

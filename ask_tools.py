@@ -72,6 +72,7 @@ def _load():
         # run_reckoner.normalize_sale_units docstring) - never call
         # normalize_sale_units() again here, it would double-convert B2B rows.
         sales, purch = rk.add_calendar_month(sales), rk.add_calendar_month(purch)
+        sales, purch = rk.canonicalize_employee_names(sales), rk.canonicalize_employee_names(purch)
         _cache.clear()  # drop every derived rollup below too - they're stale now
         _cache['sales'] = sales
         _cache['purch'] = purch
@@ -532,9 +533,10 @@ def get_employee_monthly(name=None, month=None, n=12):
     activity), each with the person's own Target_* and counts of off-target
     days (Days_Late, Days_Long_Lunch, Days_Left_Early - more than
     tolerance_min beyond target). Target = the best of THEIR routine days
-    (earliest-15% arrival, latest-15% exit, shortest-15% lunch), not a
-    fixed shift time and not their single best day - so it is fair across
-    different shift patterns. Everyone works two shifts with a lunch gap;
+    (earliest-15% arrival, latest-15% exit, shortest-15% lunch) over that
+    month and the two before it - not a fixed shift time, not their single
+    best day, and not all history, so it is fair across different shift
+    patterns and a changed shift is not held against earlier months. Everyone works two shifts with a lunch gap;
     lunch is detected from the activity gap and is blank on low-activity
     days (Lunch_Days says how many days it was reliable). Timing is blank
     for months exported without a time-of-day. This is NOT a punch-clock
@@ -569,7 +571,61 @@ def get_employee_monthly(name=None, month=None, n=12):
             'Lunch_Out', 'Lunch_In', 'Lunch_Len_Min', 'Target_Lunch_Len_Min', 'Lunch_Days', 'Days_Long_Lunch',
             'Exit', 'Target_Exit', 'Early_Exit_Avg_Min', 'Days_Left_Early']
     return _guard_no_pii({'available': True, 'tolerance_min': rk.SHIFT_TOLERANCE_MIN,
-                          'target_rule': 'best of that employee\'s own routine days (15% boundary), all history',
+                          'target_rule': 'best of that employee\'s own routine days (15% boundary), '
+                                         'that month and the two before it',
+                          'rows': _records(df, cols)})
+
+
+def get_employee_scorecard(name=None, month=None, n=15):
+    """Monthly employee SCORECARD - one score out of 100 per employee per
+    month and its month-wise progression. Score = Output 50 + Attendance 20
+    + Punctuality 30. Output = the parameters of the roles that are really
+    that person's job that month (Billing / Fetching / purchase Entry),
+    each against THEIR OWN best month, per day worked. Attendance = share
+    of the store's open days they were active, against their own best.
+    Punctuality = arrival, lunch and exit graded by minutes against their
+    own target (full marks within 15 min, zero at 60). A block without
+    enough data is left out and the rest re-scaled (Punctuality is blank
+    for back-office roles with few timed days).
+
+    READ IT CORRECTLY: it is scored against each person's own best, so it
+    says whether someone is at THEIR best, NOT who is better than whom -
+    never rank people's ability from it, and say so if asked to compare.
+    An employee's first scored month is by construction their best, so a
+    high score with Months_Scored of 1 or 2 means little yet. Months whose
+    export lacks the employee columns are not scored at all.
+
+    With `name` (contains-match): that person's scored months in order,
+    with Score_Change from their previous scored month - use this for
+    progression/trend questions. With `month` ('YYYY-MM'): everyone scored
+    that month, highest first. With neither: the latest scored month, top
+    n."""
+    s, p = _load()
+    if 'employee_scorecard' not in _cache:
+        lines, _ = rk.compute_distributor_lines(p)
+        if 'employee_monthly' not in _cache:
+            _cache['employee_monthly'] = rk.build_employee_monthly(s, p, lines)
+        _cache['employee_scorecard'] = rk.build_employee_scorecard(s, p, lines, _cache['employee_monthly'][0])
+    sc = _cache['employee_scorecard']
+    if sc is None or sc.empty:
+        return _guard_no_pii({'available': False, 'reason': 'no month in the data carries employee columns yet'})
+    months = sorted(sc['Calendar_Month'].unique())
+    df = sc
+    if name:
+        df = df[df['Employee'].str.contains(name.strip(), case=False, na=False)]
+    if month:
+        df = df[df['Calendar_Month'] == month.strip()]
+    if not name and not month:
+        df = df[df['Calendar_Month'] == months[-1]]
+    if df.empty:
+        return _guard_no_pii({'available': True, 'months_scored': months, 'rows': [],
+                              'note': 'no scored employee/month matches those filters'})
+    df = df.sort_values(['Employee', 'Calendar_Month']) if name else df.sort_values('Score', ascending=False).head(int(n))
+    cols = ['Employee', 'Calendar_Month', 'Roles', 'Score', 'Score_Change', 'Prev_Month', 'Output', 'Attendance',
+            'Punctuality', 'Billing_Score', 'Fetching_Score', 'Entry_Score', 'Arrive_Score', 'Lunch_Score',
+            'Exit_Score', 'Days_Active', 'Days_Timed', 'Months_Scored']
+    return _guard_no_pii({'available': True, 'weights': rk.SCORE_WEIGHTS, 'months_scored': months,
+                          'basis': 'each block is measured against that employee\'s own best, not against other people',
                           'rows': _records(df, cols)})
 
 
@@ -1049,6 +1105,9 @@ TOOLS = [
      'description': get_employee_performance.__doc__, 'parameters': _schema({})},
     {'name': 'get_employee_monthly', 'fn': get_employee_monthly,
      'description': get_employee_monthly.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
+    {'name': 'get_employee_scorecard', 'fn': get_employee_scorecard,
+     'description': get_employee_scorecard.__doc__,
      'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,

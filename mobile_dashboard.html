@@ -445,6 +445,8 @@ let currentPeopleSub = 'employees';
 let currentRefillStatus = 'Overdue';
 let currentEmpView = 'all';
 let currentEmpMonth = null;
+let currentScoreMonth = null;
+let SCORE_HISTORY = {};
 let currentBranch = null;
 
 // --- Session / auto-logout -----------------------------------------------
@@ -835,7 +837,38 @@ function renderEmployees(container) {
   let html = `<div class="subtabs" id="emp-view-tabs" style="margin-top:14px">
       <button class="subtab${currentEmpView === 'all' ? ' active' : ''}" data-empview="all">All history</button>
       <button class="subtab${currentEmpView === 'month' ? ' active' : ''}" data-empview="month">By month</button>
+      <button class="subtab${currentEmpView === 'score' ? ' active' : ''}" data-empview="score">Scorecard</button>
     </div>`;
+  if (currentEmpView === 'score') {
+    const sc = DATA.employee_scorecard || [];
+    const scMonths = [...new Set(sc.map(r => r.month))].sort();
+    if (!scMonths.length) {
+      container.innerHTML = html + '<div class="empty">No month can be scored yet — none of your exports carry the employee columns.</div>';
+      bindEmployeeViewTabs(container);
+      return;
+    }
+    if (!currentScoreMonth || !scMonths.includes(currentScoreMonth)) currentScoreMonth = scMonths[scMonths.length - 1];
+    SCORE_HISTORY = {};
+    sc.forEach(r => { (SCORE_HISTORY[r.employee] = SCORE_HISTORY[r.employee] || []).push({ month: r.month, score: r.score }); });
+    Object.values(SCORE_HISTORY).forEach(h => h.sort((a, b) => a.month < b.month ? -1 : 1));
+    const w = DATA.score_weights || { Output: 50, Attendance: 20, Punctuality: 30 };
+    html += `<div class="subtabs" id="emp-score-tabs">` +
+      scMonths.map(m => `<button class="subtab${m === currentScoreMonth ? ' active' : ''}" data-scoremonth="${m}">${m}</button>`).join('') +
+      `</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin:-4px 0 8px">Score out of 100 = Output ${w.Output} + Attendance ${w.Attendance} + Punctuality ${w.Punctuality}, each against the person's <b>own best</b> — it shows whether someone is at their best, not who is better. A block without enough data is left out and the rest re-scaled.</div>
+      <div class="search-bar">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" id="search-empscore" placeholder="Search employee…">
+      </div>
+      <div class="result-count" id="rc-empscore"></div>
+      <div class="card-list" id="list-empscore"></div>`;
+    container.innerHTML = html;
+    bindEmployeeViewTabs(container);
+    const rows = sc.filter(r => r.month === currentScoreMonth).sort((a, b) => b.score - a.score);
+    setupSearch('search-empscore', 'list-empscore', 'rc-empscore', rows,
+      (r, q) => r.employee.toLowerCase().includes(q), employeeScoreCard, 'No matching employees.');
+    return;
+  }
   if (currentEmpView === 'month') {
     if (!months.length) {
       html += '<div class="empty">No monthly employee data yet.</div>';
@@ -910,6 +943,59 @@ function bindEmployeeViewTabs(container) {
   container.querySelectorAll('#emp-month-tabs .subtab').forEach(btn => {
     btn.addEventListener('click', () => { currentEmpMonth = btn.dataset.empmonth; renderEmployees(container); });
   });
+  container.querySelectorAll('#emp-score-tabs .subtab').forEach(btn => {
+    btn.addEventListener('click', () => { currentScoreMonth = btn.dataset.scoremonth; renderEmployees(container); });
+  });
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function monthAbbr(ym) { return MONTH_ABBR[Number(ym.slice(5, 7)) - 1] || ym; }
+
+function scoreColor(s) {
+  if (s >= 85) return ['var(--ok)', 'var(--ok-soft)'];
+  if (s >= 70) return ['var(--warn)', 'var(--warn-soft)'];
+  return ['var(--danger)', 'var(--danger-soft)'];
+}
+
+// Scores live in a narrow band near the top, so the trend line is drawn on a
+// fixed 50-100 scale - a 0-100 axis would flatten every real movement.
+function scoreSparkline(hist, color, currentMonth) {
+  if (hist.length < 2) return '';
+  const W = 96, H = 34, pad = 5;
+  const step = (W - pad * 2) / (hist.length - 1);
+  const y = v => pad + (H - pad * 2) * (1 - (Math.min(100, Math.max(50, v)) - 50) / 50);
+  const pts = hist.map((h, i) => [pad + i * step, y(h.score), h.month]);
+  const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const dots = pts.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${p[2] === currentMonth ? 3.2 : 1.8}" style="fill:${color}"/>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="flex:none;width:96px;height:34px" role="img" aria-label="Score trend">
+    <path d="${d}" fill="none" style="stroke:${color}" stroke-width="2"/>${dots}</svg>`;
+}
+
+function employeeScoreCard(r) {
+  const [color, bg] = scoreColor(r.score);
+  const hist = SCORE_HISTORY[r.employee] || [];
+  const blk = v => v == null ? '—' : fmt(v);
+  let change = 'first scored month';
+  if (r.score_change != null) {
+    const c = r.score_change, arrow = c > 0 ? '▲' : (c < 0 ? '▼' : '●');
+    const cc = c > 0 ? 'var(--ok)' : (c < 0 ? 'var(--danger)' : 'var(--ink-soft)');
+    change = `<span style="color:${cc}">${arrow} ${c > 0 ? '+' : ''}${fmt(c)}</span> vs ${monthAbbr(r.prev_month)}`;
+  }
+  const trail = hist.map(h => `${h.month === r.month ? '<b>' : ''}${monthAbbr(h.month)} ${fmt(h.score)}${h.month === r.month ? '</b>' : ''}`).join(' → ');
+  const record = r.months_scored <= 2 ? ` · only ${r.months_scored} month${r.months_scored === 1 ? '' : 's'} on record` : '';
+  return `<div class="card" style="--card-stripe:${color}">
+    <div class="row1"><div class="name">${escHtml(r.employee)}<div class="meta">${escHtml(r.roles || '')}${record}</div></div>
+      <span class="pill" style="color:${color};background:${bg};font-size:13px">${fmt(r.score)} / 100</span></div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Output</div><div class="v">${blk(r.output)}</div></div>
+      <div class="metric"><div class="k">Attendance</div><div class="v">${blk(r.attendance)}</div></div>
+      <div class="metric"><div class="k">Punctuality</div><div class="v">${blk(r.punctuality)}</div></div>
+      <div class="metric"><div class="k">Change</div><div class="v">${change}</div></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+      ${scoreSparkline(hist, color, r.month)}
+      <div class="meta" style="margin-top:0">${trail}</div>
+    </div></div>`;
 }
 
 const EMP_OFF_COLOR = [['var(--ok)', 'var(--ok-soft)'], ['var(--warn)', 'var(--warn-soft)'], ['var(--danger)', 'var(--danger-soft)']];
