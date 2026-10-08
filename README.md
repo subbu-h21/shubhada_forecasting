@@ -133,6 +133,35 @@ numbers are identical. Patient lookups are switched off in voice mode.
 - What is sent to OpenAI: your voice, the transcript, and each answer it
   speaks.
 
+## Dual mode: orders + sales on one Ask page
+
+The Ask page can answer **order** questions ("where is my Dolo order?", "what is
+overdue at DRK?") as well as **sales / forecast / history** ones. The model decides
+per question which system to use - or uses both - and says where each figure came from.
+Order questions are answered from the order-automation dashboard (a separate project);
+sales, forecasts, margins and anything older than ~90 days come from this project's
+history as before.
+
+To switch it on, put two lines in this project's `.env`:
+
+    ORDER_ASK_URL=http://127.0.0.1:8000
+    ORDER_ASK_KEY=<the same long secret as ASK_BRIDGE_KEY in the order project's .env>
+
+then restart the reckoner server. Without them nothing changes - the page behaves exactly
+as before. If the order dashboard is off or unreachable, the page quietly falls back to
+sales questions only and tells you order tracking is offline if you ask about orders.
+
+- **Read-only.** The order tools only read; nothing can be placed or changed from here.
+  Profit-by-day on the order side is *not* exposed through this (use the Order dashboard's
+  Ask page and its admin password for that). The order project's key check, lockout and
+  rate limit live in its `dashboard/backend/ask_bridge_routes.py`.
+- **Limits.** `/api/ask` now has a brake (`ask_limits.py`): `ASK_DAILY_LIMIT_QUESTIONS`
+  (default 200 a day) and `ASK_PER_10_MIN` (default 20); `0` turns a limit off. It exists
+  because every question can trigger several paid model calls, and a question asked here
+  never passes the order dashboard's own spending cap.
+- **Tests.** `venv/Scripts/python.exe test_dual_ask.py` (offline - a stub order dashboard
+  and a scripted model).
+
 ## Backups & recovery
 
 Every time `run_reckoner.py` (directly, via a `.bat` file, or through a mobile

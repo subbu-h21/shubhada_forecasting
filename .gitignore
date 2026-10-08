@@ -30,6 +30,9 @@ data/employee_attendance/*
 # business notes the assistant writes itself, local to this machine.
 data/ask_memory.json
 
+# ask_limits.py's per-day question counter - local to this machine.
+data/ask_daily.json
+
 # Generated reports also contain real figures (revenue, profit, margins)
 reports/**/*.xlsx
 

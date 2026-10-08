@@ -29,6 +29,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 import ask as ask_mod
+import ask_limits
 import run_reckoner as rk
 
 ROOT = Path(__file__).parent
@@ -620,6 +621,10 @@ def api_ask():
     question = (body.get('question') or '').strip()[:4000]
     if not question:
         return jsonify({'error': 'question is required'}), 400
+    try:
+        ask_limits.check()   # daily + burst cap; this page is also the front door for order questions
+    except ask_limits.LimitReached as e:
+        return jsonify({'error': str(e)}), 429
     # Optional: earlier turns of the same conversation (voice follow-ups like
     # "and last month?"), and the voice flag (spoken-answer rules, no
     # patient-identity tools - see ask.py's VOICE_PROMPT).
