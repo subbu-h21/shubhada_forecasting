@@ -248,7 +248,7 @@ check('spoken mode works with order tools', answer == 'Two carts are waiting.', 
 check('spoken mode: the speakable-answer rules and the dual section are both in the prompt',
       'DUAL MODE' in fake.requests[0]['messages'][0]['content'] and 'read' in fake.requests[0]['messages'][0]['content'].lower())
 
-# --- 7b. subbi's identity (owner's instruction 2026-10-08: remember it always) ---------------
+# --- 7b. suubbiii's identity (owner's instruction 2026-10-08: remember it always) ---------------
 # The family facts are private and this repo is public, so they live in the gitignored
 # owner_facts.txt; the test points ask at a stand-in file with made-up names.
 _real_facts_path = ask.OWNER_FACTS_PATH
@@ -256,7 +256,7 @@ ask.OWNER_FACTS_PATH = Path(tempfile.mkdtemp(prefix='owner_facts_')) / 'owner_fa
 ask.OWNER_FACTS_PATH.write_text('# stand-in facts for the test\n'
                                 "Your boss is Test Owner. Test Owner's wife is Test Spouse, and Test Owner's son is Test Son.\n",
                                 encoding='utf-8')
-NAMES = ('subbi', 'Test Owner', 'Test Spouse', 'Test Son')
+NAMES = ('suubbiii', 'Test Owner', 'Test Spouse', 'Test Son')
 for label, kw, on in (('typed, dual mode off', {}, False), ('typed, dual mode on', {}, True),
                       ('voice', {'voice': True}, True), ('spoken (push-to-talk)', {'speak': True}, True)):
     (dual_on if on else dual_off)()
@@ -268,16 +268,18 @@ p = ' '.join(ask._build_system_prompt().split())     # whitespace-normalised, so
 check('the family facts are stated as given, from the private file',
       "Your boss is Test Owner. Test Owner's wife is Test Spouse, and Test Owner's son is Test Son." in p, p[:300])
 check('comment lines in the facts file are not sent to the model', 'stand-in facts' not in p)
+check('the assistant is named suubbiii, spelled exactly, and the old name still counts as it',
+      'Your name is suubbiii (spelled exactly like that)' in p and 'You used to be called subbi' in p)
 check('it does not guess who is asking', 'You do not know which of these people is asking' in p)
 check('it defers to the identify_person lookup rule (the names may also be employees/customers)',
       'They do NOT replace the lookup rule below' in p and 'still call identify_person first' in p)
 check('the rule it defers to is still in the prompt', 'call identify_person FIRST' in p)
-answer, fake = run_with([reply('(ready)'), reply('Hello, I am subbi.')])
-check('the identity reaches the model on a real turn', 'Your name is subbi' in fake.requests[0]['messages'][0]['content'])
+answer, fake = run_with([reply('(ready)'), reply('Hello, I am suubbiii.')])
+check('the identity reaches the model on a real turn', 'Your name is suubbiii' in fake.requests[0]['messages'][0]['content'])
 ask.OWNER_FACTS_PATH.unlink()
 p = ask._build_system_prompt()
 check('without the private file the name is still there, but no family facts and no rules about them',
-      'Your name is subbi' in p and 'Test Owner' not in p and 'these people' not in p)
+      'Your name is suubbiii' in p and 'Test Owner' not in p and 'these people' not in p)
 ask.OWNER_FACTS_PATH = _real_facts_path
 
 # --- 8. the limiter ----------------------------------------------------------------------------

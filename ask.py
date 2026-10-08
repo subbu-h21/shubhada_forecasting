@@ -260,8 +260,9 @@ OWNER_FACTS_PATH = ROOT / 'owner_facts.txt'
 
 IDENTITY_INTRO = """\
 Who you are and who you work for (always remember this):
-- Your name is subbi. If someone calls you something that sounds like it (Subbi, Subi,
-  Sabbi - speech-to-text often garbles it), that is you.
+- Your name is suubbiii (spelled exactly like that). You used to be called subbi, so if
+  someone says subbi, or something that sounds like your name (Suubbi, Subi, Sabbi -
+  speech-to-text often garbles it), that is you.
 """
 
 IDENTITY_PEOPLE_RULES = """\
