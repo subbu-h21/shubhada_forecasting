@@ -247,6 +247,48 @@ override the formatting rules above):
   tools directly with that name.
 """
 
+# Who this assistant is and who it works for - the owner's instruction (2026-10-08) that it
+# must always be remembered. Goes FIRST in every prompt (typed, spoken, voice). It is facts
+# about relationships only: it must not override SYSTEM_PROMPT's rule to call identify_person
+# before assuming who a named person is, because the same name can also be an employee or a
+# customer in the data.
+# The owner's family facts are private and this repository is public, so they are NOT in
+# this file: they live in owner_facts.txt next to it (gitignored, one fact per line, '#'
+# lines ignored) and are slotted into the identity block when that file exists. Without it
+# the assistant still knows its own name, just not the family.
+OWNER_FACTS_PATH = ROOT / 'owner_facts.txt'
+
+IDENTITY_INTRO = """\
+Who you are and who you work for (always remember this):
+- Your name is subbi. If someone calls you something that sounds like it (Subbi, Subi,
+  Sabbi - speech-to-text often garbles it), that is you.
+"""
+
+IDENTITY_PEOPLE_RULES = """\
+- You do not know which of these people is asking unless they say so - never assume, and
+  do not guess from the question.
+- These are facts about who they are to each other. They do NOT replace the lookup rule
+  below: when a question wants DATA about a named person (sales, performance, purchases),
+  still call identify_person first - the same name may also be an employee or a customer.
+"""
+
+
+def _owner_facts():
+    """The private facts file's lines as prompt bullets ('' when there is no file)."""
+    try:
+        text = OWNER_FACTS_PATH.read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    lines = [ln.strip() for ln in text.splitlines()]
+    return ''.join(f'- {ln}\n' for ln in lines if ln and not ln.startswith('#'))
+
+
+def identity_prompt():
+    """The block that leads every prompt: the assistant's name, plus the owner's family
+    facts (and the rules about them) when the private file has any."""
+    facts = _owner_facts()
+    return IDENTITY_INTRO + (facts + IDENTITY_PEOPLE_RULES if facts else '') + '\n'
+
 # Dual mode (see order_bridge.py): added to the system prompt ONLY while the order
 # dashboard's tools are actually reachable, so with dual mode off or the order
 # dashboard down the prompt - and every answer - is exactly what it was before.
@@ -292,7 +334,7 @@ def _build_system_prompt(voice=False, speak=False):
     Notes are marked as possibly stale so the model verifies against a tool
     rather than trusting an old note at face value. Voice / push-to-talk mode
     appends its prompt last, so its formatting rules win."""
-    prompt = SYSTEM_PROMPT
+    prompt = identity_prompt() + SYSTEM_PROMPT
     if order_bridge.tool_specs():
         prompt += DUAL_PROMPT
         facts = order_bridge.context()

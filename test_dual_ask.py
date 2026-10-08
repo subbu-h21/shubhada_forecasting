@@ -128,7 +128,7 @@ check('order tool description is marked and keeps its schema', spec['description
 prompt = ask._build_system_prompt()
 check('dual mode on: prompt has the DUAL MODE section', 'DUAL MODE' in prompt and 'orders_' in prompt)
 check("dual mode on: prompt carries the order system's own facts", 'OVERDUE means placed and late' in prompt)
-check('the original reckoner prompt is untouched inside it', prompt.startswith(ask.SYSTEM_PROMPT))
+check('the original reckoner prompt is untouched, right after the identity block', prompt.startswith(ask.identity_prompt() + ask.SYSTEM_PROMPT))
 before = STUB['tools_hits']
 for _ in range(5):
     ask._available_tools()
@@ -247,6 +247,38 @@ answer, fake = run_with([reply(calls=[('orders_get_held_carts', {})]), reply('(r
 check('spoken mode works with order tools', answer == 'Two carts are waiting.', answer)
 check('spoken mode: the speakable-answer rules and the dual section are both in the prompt',
       'DUAL MODE' in fake.requests[0]['messages'][0]['content'] and 'read' in fake.requests[0]['messages'][0]['content'].lower())
+
+# --- 7b. subbi's identity (owner's instruction 2026-10-08: remember it always) ---------------
+# The family facts are private and this repo is public, so they live in the gitignored
+# owner_facts.txt; the test points ask at a stand-in file with made-up names.
+_real_facts_path = ask.OWNER_FACTS_PATH
+ask.OWNER_FACTS_PATH = Path(tempfile.mkdtemp(prefix='owner_facts_')) / 'owner_facts.txt'
+ask.OWNER_FACTS_PATH.write_text('# stand-in facts for the test\n'
+                                "Your boss is Test Owner. Test Owner's wife is Test Spouse, and Test Owner's son is Test Son.\n",
+                                encoding='utf-8')
+NAMES = ('subbi', 'Test Owner', 'Test Spouse', 'Test Son')
+for label, kw, on in (('typed, dual mode off', {}, False), ('typed, dual mode on', {}, True),
+                      ('voice', {'voice': True}, True), ('spoken (push-to-talk)', {'speak': True}, True)):
+    (dual_on if on else dual_off)()
+    p = ask._build_system_prompt(**kw)
+    check(f'identity + family facts are in the prompt: {label}', all(n in p for n in NAMES), [n for n in NAMES if n not in p])
+    check(f'...and come FIRST: {label}', p.startswith('Who you are and who you work for'))
+dual_on()
+p = ' '.join(ask._build_system_prompt().split())     # whitespace-normalised, so line wrapping can't matter
+check('the family facts are stated as given, from the private file',
+      "Your boss is Test Owner. Test Owner's wife is Test Spouse, and Test Owner's son is Test Son." in p, p[:300])
+check('comment lines in the facts file are not sent to the model', 'stand-in facts' not in p)
+check('it does not guess who is asking', 'You do not know which of these people is asking' in p)
+check('it defers to the identify_person lookup rule (the names may also be employees/customers)',
+      'They do NOT replace the lookup rule below' in p and 'still call identify_person first' in p)
+check('the rule it defers to is still in the prompt', 'call identify_person FIRST' in p)
+answer, fake = run_with([reply('(ready)'), reply('Hello, I am subbi.')])
+check('the identity reaches the model on a real turn', 'Your name is subbi' in fake.requests[0]['messages'][0]['content'])
+ask.OWNER_FACTS_PATH.unlink()
+p = ask._build_system_prompt()
+check('without the private file the name is still there, but no family facts and no rules about them',
+      'Your name is subbi' in p and 'Test Owner' not in p and 'these people' not in p)
+ask.OWNER_FACTS_PATH = _real_facts_path
 
 # --- 8. the limiter ----------------------------------------------------------------------------
 ask_limits._PATH = Path(tempfile.mkdtemp(prefix='ask_limits_')) / 'ask_daily.json'

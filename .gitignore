@@ -57,3 +57,7 @@ Thumbs.db
 # --- Machine-specific shortcuts ---
 # Desktop shortcuts point to an absolute local path - meaningless on another PC
 *.lnk
+
+# The owner's family facts for the Ask assistant (ask.py reads them) - private,
+# kept off this public repo.
+owner_facts.txt
