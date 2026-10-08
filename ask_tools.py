@@ -101,6 +101,26 @@ def _over_under():
     return _cache['over_under']
 
 
+def _forecast():
+    # build_demand_forecast takes ~80s on the full history (measured
+    # 2026-10-04), and get_overview/get_forecast used to recompute it on every
+    # question - fine for a report run, far too slow for a spoken question.
+    # Cached like _profit/_over_under; _load() clears it when the data changes.
+    if 'forecast' not in _cache:
+        s, _ = _load()
+        _cache['forecast'] = rk.build_demand_forecast(s)   # (forecast, target_month, months)
+    return _cache['forecast']
+
+
+def warm_cache():
+    """Compute the slow shared rollups ahead of the first question (the
+    server runs this in the background), so a question doesn't wait on them."""
+    _load()
+    _forecast()
+    _profit()
+    _over_under()
+
+
 def _distributors():
     if 'dist' not in _cache:
         _, p = _load()
@@ -190,7 +210,7 @@ def get_overview():
     profit, _unknown = _profit()
     ou = _over_under()
     channel = rk.build_channel_profit(s, p)
-    forecast, target_month, months = rk.build_demand_forecast(s)
+    forecast, target_month, months = _forecast()
     pretax = profit['Pretax_Revenue'].sum()
     return _guard_no_pii({
         'months_of_history': list(months),
@@ -310,7 +330,7 @@ def get_forecast(product=None, n=15):
     predicted value, plus the per-branch footfall forecast. With a product:
     that product's predicted quantity, value and trend."""
     s, _ = _load()
-    forecast, target_month, _ = rk.build_demand_forecast(s)
+    forecast, target_month, _ = _forecast()
     if product:
         row = forecast[forecast['Product'] == product]
         if row.empty:

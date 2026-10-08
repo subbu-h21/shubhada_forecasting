@@ -86,6 +86,53 @@ For access away from your home network, this is designed to be used over
 [Tailscale](https://tailscale.com/) (a private device-to-device tunnel) —
 **not** by exposing the port to the public internet.
 
+## Voice (trial)
+
+The Ask page has two voice buttons. Both answer from the same Ask the
+Reckoner assistant as typed questions, with patient lookups switched off.
+
+### 🗣 Push to talk (cheaper)
+
+Tap 🗣, ask, tap ■ to send. The recording goes to speech-to-text, the
+assistant answers in the language you spoke (Kannada or English), and a
+text-to-speech voice reads it out. Tap ■ while it speaks to stop it. You pay
+only for the seconds spoken and read out - about 1 to 2 US cents per answer
+for the voice parts (measured 2026-10-04: reading out a 15-21 second answer
+cost $0.008-0.022; transcribing the question ~$0.0003) - nothing while idle. Uses the existing `OPENROUTER_API_KEY`:
+
+- Speech-to-text: `microsoft/mai-transcribe-2` (fastest and best on mixed
+  Kannada-English in a 2026-10-04 test).
+- Text-to-speech: `google/gemini-3.1-flash-tts-preview`, voice `Kore` (the
+  only voice whose Kannada came back word-perfect). If it fails, the phone's
+  own built-in voice reads the answer instead.
+- Override with `SPEECH_STT_MODEL`, `SPEECH_TTS_MODEL`, `SPEECH_TTS_VOICE` in
+  `.env`. This OpenRouter account has zero-data-retention on, which blocks
+  some models (e.g. Gemini 3.8 TTS) - pick ones it allows.
+
+### 🎤 Live conversation (GPT-Live-1) - switched off
+
+Switched off on 2026-10-04 as too expensive; the 🎤 button is hidden and
+`/api/voice/session` refuses to start. The code is kept: add
+`VOICE_LIVE_ENABLED=1` to `.env` and restart the server to bring it back.
+
+Ask your question out loud and hear the answer.
+OpenAI's GPT-Live-1 does the talking; every business question it hears is
+handed to the same Ask the Reckoner assistant as a typed question, so the
+numbers are identical. Patient lookups are switched off in voice mode.
+
+- Needs `OPENAI_API_KEY=...` in `.env` (the key stays on the PC).
+- Costs $0.05 per minute of voice, billed per second, plus the normal
+  per-question cost. A voice session ends itself after 10 minutes.
+- Browsers only allow the microphone on **https** pages or on the PC itself
+  (this applies to both voice buttons).
+  Over the plain `http://` Tailscale/LAN address the phone shows a message
+  instead. To use it from a phone, either serve the dashboard over https
+  (e.g. `tailscale serve`, run from the Windows account that owns Tailscale)
+  or, on Android Chrome only, add the dashboard address under
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+- What is sent to OpenAI: your voice, the transcript, and each answer it
+  speaks.
+
 ## Backups & recovery
 
 Every time `run_reckoner.py` (directly, via a `.bat` file, or through a mobile

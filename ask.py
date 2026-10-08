@@ -182,28 +182,123 @@ Rules:
   can supply a real contact from this tool's output.
 """
 
+# Voice mode: the question came from the GPT-Live-1 voice front end on the
+# Ask page (see server.py's /api/voice/session). GPT-Live does the talking
+# and hands every business question to this same ask() - so voice answers use
+# exactly the same tools and numbers as typed ones - and speaks the answer in
+# its own words. Patient-level tools (PII_ALLOWED_TOOLS) are withheld in
+# voice mode (owner's trial decision, 2026-10-04): with voice, the spoken
+# conversation also goes to OpenAI, so patient identity stays on the typed
+# page only.
+VOICE_PROMPT = """\
+## Voice conversation context
+This request comes from a LIVE VOICE conversation. A separate voice assistant
+is talking with the owner; it handed this request to you and will speak your
+answer aloud in its own words. The request is the transcript of what was said
+since the last question you answered: "User:" lines are the owner, "Voice
+assistant:" lines are the voice assistant. Speech transcripts can contain
+mistakes, unfinished phrases and later corrections - use the latest correction
+and the earlier turns of this conversation. If a needed detail is genuinely
+unclear, say exactly what to ask the owner instead of guessing.
+
+Voice-mode rules (these override the formatting rules above):
+- Plain sentences only: no tables, bullets, markdown, emoji or headings.
+- Lead with the answer. At most 5 short sentences, about 90 words.
+- Give at most 3 figures; round money to whole rupees.
+- English only - skip the Kannada summary; the voice assistant speaks in the
+  owner's own language.
+- Patient-level lookups are switched off in voice mode (no patient names,
+  phone-number lookups, or who-bought-what lists). If asked, say this is
+  available on the typed Ask page instead.
+- When a person is named, assume it is an employee and call the employee
+  tools directly with that name.
+"""
+
+# Push-to-talk mode (speak=True): the stitched, cheaper voice path - the
+# owner's recording goes through speech-to-text, this assistant answers, and a
+# text-to-speech voice reads the answer out word for word (server.py's
+# /api/speech/* routes). Unlike GPT-Live there is no voice layer to rephrase
+# or translate, so the answer itself must already be in the owner's language
+# and in speakable words. Same patient-tool rule as voice mode.
+SPEAK_PROMPT = """\
+## Spoken question and answer
+The owner asked this by voice. The request is a speech-to-text transcript, so
+it can contain recognition mistakes - especially in product, supplier and
+staff names, and English words written in Kannada script (for example
+"ಡೆಡ್ ಸ್ಟಾಕ್" means dead stock, "ಹಾಸ್ಪಿಟ್ ರೋಡ್" means Hospet Road). Interpret
+it sensibly; if a needed detail is genuinely unclear, ask one short question
+instead of guessing.
+
+Your answer is read aloud word for word by a text-to-speech voice, so (these
+override the formatting rules above):
+- Reply in the language the owner used: if the request is mostly Kannada,
+  reply entirely in Kannada script; otherwise reply in English. Do not add a
+  second summary in the other language.
+- Plain sentences only: no tables, bullets, markdown, emoji, symbols or
+  headings.
+- Lead with the answer. At most 4 short sentences, about 70 words.
+- Give at most 3 figures. Say money the way a person says it aloud: "about
+  67 lakh rupees" or "ಸುಮಾರು 67 ಲಕ್ಷ ರೂಪಾಯಿ" - never "₹67,18,938".
+- Patient-level lookups are switched off for spoken questions (no patient
+  names, phone-number lookups, or who-bought-what lists). If asked, say this
+  is available on the typed Ask page instead.
+- When a person is named, assume it is an employee and call the employee
+  tools directly with that name.
+"""
+
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
+MAX_HISTORY_TURNS = 4  # earlier question/answer pairs kept for follow-up questions
 
 
-def _build_system_prompt():
+def _build_system_prompt(voice=False, speak=False):
     """SYSTEM_PROMPT plus recent persisted notes (see ask_tools.save_note) -
     this is what actually gives every NEW conversation access to what was
     learned in past ones, since each ask() call otherwise starts from zero.
     Notes are marked as possibly stale so the model verifies against a tool
-    rather than trusting an old note at face value."""
+    rather than trusting an old note at face value. Voice / push-to-talk mode
+    appends its prompt last, so its formatting rules win."""
+    prompt = SYSTEM_PROMPT
     notes = T.get_notes(n=30).get('notes') or []
-    if not notes:
-        return SYSTEM_PROMPT
-    notes_text = '\n'.join(f"- [{n['timestamp']}] {n['note']}" for n in notes)
-    return (SYSTEM_PROMPT + '\n\nNotes saved from previous conversations (may be outdated - '
-            'verify against a tool before relying on one):\n' + notes_text)
+    if notes:
+        notes_text = '\n'.join(f"- [{n['timestamp']}] {n['note']}" for n in notes)
+        prompt += ('\n\nNotes saved from previous conversations (may be outdated - '
+                   'verify against a tool before relying on one):\n' + notes_text)
+    if speak:
+        prompt += '\n\n' + SPEAK_PROMPT
+    elif voice:
+        prompt += '\n\n' + VOICE_PROMPT
+    return prompt
+
+
+def _available_tools(voice=False):
+    """Every tool, minus the patient-identity ones in voice mode."""
+    return [t for t in T.TOOLS if not (voice and t['name'] in T.PII_ALLOWED_TOOLS)]
+
+
+def _run_allowed_tool(name, args, allowed_names):
+    """run_tool, but refuse a tool that was withheld from this conversation -
+    a model can still emit a call to a tool name it saw in the system prompt
+    even when that tool wasn't offered."""
+    if name not in allowed_names:
+        return {'error': f'tool {name} is not available in this mode'}
+    return T.run_tool(name, args)
+
+
+def _clean_history(history):
+    """Earlier (question, answer) pairs from the same conversation, newest
+    last, capped - lets "and last month?" follow a previous question."""
+    out = []
+    for h in (history or [])[-MAX_HISTORY_TURNS:]:
+        if isinstance(h, dict) and h.get('question') and h.get('answer'):
+            out.append((str(h['question']), str(h['answer'])))
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Vertex / Gemini integration (the only part that talks to Google).
 # Isolated on purpose: swapping providers or going local = edit this function.
 # ---------------------------------------------------------------------------
-def _gemini_answer(question, verbose=False):
+def _gemini_answer(question, verbose=False, history=None, voice=False, speak=False):
     from google import genai
     from google.genai import types
 
@@ -214,16 +309,22 @@ def _gemini_answer(question, verbose=False):
         raise RuntimeError('Set VERTEX_PROJECT (your Google Cloud project id).')
 
     client = genai.Client(vertexai=True, project=project, location=location)
+    available = _available_tools(voice or speak)
+    allowed_names = {t['name'] for t in available}
     tools = [types.Tool(function_declarations=[
         types.FunctionDeclaration(name=t['name'], description=t['description'],
                                   parameters=t['parameters'])
-        for t in T.TOOLS])]
-    system_prompt = _build_system_prompt()
+        for t in available])]
+    system_prompt = _build_system_prompt(voice, speak)
     config = types.GenerateContentConfig(
         system_instruction=system_prompt, tools=tools, temperature=0.2)
 
-    contents = [types.Content(role='user',
-                              parts=[types.Part.from_text(T.scrub_question(question))])]
+    contents = []
+    for q, a in _clean_history(history):
+        contents.append(types.Content(role='user', parts=[types.Part.from_text(q)]))
+        contents.append(types.Content(role='model', parts=[types.Part.from_text(a)]))
+    contents.append(types.Content(role='user',
+                                  parts=[types.Part.from_text(T.scrub_question(question))]))
     for _ in range(MAX_STEPS):
         resp = client.models.generate_content(model=model, contents=contents, config=config)
         parts = resp.candidates[0].content.parts
@@ -235,7 +336,7 @@ def _gemini_answer(question, verbose=False):
             args = dict(fc.args) if fc.args else {}
             if verbose:
                 print(f'  → tool: {fc.name}({json.dumps(args, default=str)})')
-            result = T.run_tool(fc.name, args)
+            result = _run_allowed_tool(fc.name, args, allowed_names)
             contents.append(types.Content(role='user', parts=[
                 types.Part.from_function_response(name=fc.name, response={'result': result})]))
     # ran out of steps - ask for a final answer with no more tools
@@ -250,7 +351,7 @@ def _gemini_answer(question, verbose=False):
 # official `openai` SDK is pointed at OpenRouter's base_url instead of
 # OpenAI's. Default backend.
 # ---------------------------------------------------------------------------
-def _openrouter_answer(question, verbose=False):
+def _openrouter_answer(question, verbose=False, history=None, voice=False, speak=False):
     from openai import APIStatusError, OpenAI
 
     api_key = os.environ.get('OPENROUTER_API_KEY')
@@ -274,13 +375,16 @@ def _openrouter_answer(question, verbose=False):
         base_url='https://openrouter.ai/api/v1', api_key=api_key,
         default_headers={'HTTP-Referer': 'https://github.com/subbu-h21/shubhada_forecasting',
                          'X-Title': 'Pharmacy Reckoner - Ask'})
+    available = _available_tools(voice or speak)
+    allowed_names = {t['name'] for t in available}
     tools = [{'type': 'function', 'function': {
         'name': t['name'], 'description': t['description'], 'parameters': t['parameters']}}
-        for t in T.TOOLS]
-    messages = [
-        {'role': 'system', 'content': _build_system_prompt()},
-        {'role': 'user', 'content': T.scrub_question(question)},
-    ]
+        for t in available]
+    messages = [{'role': 'system', 'content': _build_system_prompt(voice, speak)}]
+    for q, a in _clean_history(history):
+        messages.append({'role': 'user', 'content': q})
+        messages.append({'role': 'assistant', 'content': a})
+    messages.append({'role': 'user', 'content': T.scrub_question(question)})
 
     def complete(model, with_tools):
         kwargs = {'model': model, 'messages': messages}
@@ -314,7 +418,7 @@ def _openrouter_answer(question, verbose=False):
                 args = {}
             if verbose:
                 print(f'  → tool [{fast_model}]: {name}({json.dumps(args, default=str)})')
-            result = T.run_tool(name, args)
+            result = _run_allowed_tool(name, args, allowed_names)
             messages.append({'role': 'tool', 'tool_call_id': tc.id,
                              'content': json.dumps(result, default=str)})
     # Final answer: the reasoning model synthesizes the actual response from
@@ -338,12 +442,17 @@ def _openrouter_answer(question, verbose=False):
     return answer or "Sorry, I couldn't generate an answer for that - try rephrasing the question."
 
 
-def ask(question, verbose=False):
+def ask(question, verbose=False, history=None, voice=False, speak=False):
+    """Answer one question. `history` is earlier [{'question','answer'}] pairs
+    from the same conversation (for follow-ups). `voice` = GPT-Live mode
+    (short English facts for the live voice to rephrase); `speak` =
+    push-to-talk mode (an answer read out word for word, in the owner's
+    language). Both withhold patient-identity tools."""
     backend = os.environ.get('ASK_BACKEND', 'openrouter')
     if backend == 'openrouter':
-        return _openrouter_answer(question, verbose=verbose)
+        return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
     if backend == 'vertex':
-        return _gemini_answer(question, verbose=verbose)
+        return _gemini_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
     raise RuntimeError(f"Unknown ASK_BACKEND '{backend}' - use 'openrouter' or 'vertex'.")
 
 

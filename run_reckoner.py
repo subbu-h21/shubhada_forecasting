@@ -263,6 +263,15 @@ EMPLOYEE_ALIASES = {
     'Asha V B': 'Asha Vinayak Bhovi',
     'Ganesh': 'Ganesh Hegde',
     'Sharath Nagendra Naik D': 'Sharath Nagendra Naik',
+    # Confirmed same person by the owner, 2026-10-03 (Salary Review Round 2)
+    'Fazil Unshalli': 'Fazil Unchalli',
+    'Fazil Unshall': 'Fazil Unchalli',
+    'Manjunata D Gosavime': 'Manjunata D Gosavi',
+    'Archana.G.Marathi': 'Archana.Gopal.Marathi',
+    'Manjunata D Gosavi058': 'Manjunata D Gosavi',
+    'Narendra3': 'Narendra Devadiga',
+    'Parashuram (Prajwal)': 'Parashuram T Naik',
+    'G Hegde': 'Ganesh Hegde',
 }
 
 

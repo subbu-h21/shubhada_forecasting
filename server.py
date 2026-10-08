@@ -13,6 +13,7 @@ Then on your phone (same WiFi as this PC), open:
 import io
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -616,11 +617,19 @@ def api_upload():
 @requires_auth
 def api_ask():
     body = request.get_json(force=True, silent=True) or {}
-    question = (body.get('question') or '').strip()
+    question = (body.get('question') or '').strip()[:4000]
     if not question:
         return jsonify({'error': 'question is required'}), 400
+    # Optional: earlier turns of the same conversation (voice follow-ups like
+    # "and last month?"), and the voice flag (spoken-answer rules, no
+    # patient-identity tools - see ask.py's VOICE_PROMPT).
+    history = body.get('history') if isinstance(body.get('history'), list) else []
+    history = [{'question': str(h.get('question', ''))[:3000], 'answer': str(h.get('answer', ''))[:3000]}
+               for h in history[-ask_mod.MAX_HISTORY_TURNS:] if isinstance(h, dict)]
+    voice = body.get('voice') is True
+    speak = body.get('speak') is True  # push-to-talk: answer is read aloud as-is
     try:
-        answer = ask_mod.ask(question)
+        answer = ask_mod.ask(question, history=history, voice=voice, speak=speak)
     except Exception as e:
         # Missing/bad API key, no network, model provider error, etc. - not a
         # bug in this server, so log it quietly and hand the reason to the
@@ -628,6 +637,211 @@ def api_ask():
         logger.warning('Ask failed for "%s": %s: %s', question, type(e).__name__, e)
         return jsonify({'error': f'Could not reach the model ({type(e).__name__}: {e}).'}), 502
     return jsonify({'answer': answer})
+
+
+# The assistant's slow shared rollups (next-month forecast ~80s, profit,
+# over/under) are cached in ask_tools once computed. Warming them in the
+# background - at startup and when a voice question begins - keeps a spoken
+# question from waiting on them. One warm-up at a time.
+_warm_lock = threading.Lock()
+
+
+def _warm_ask_cache():
+    if not _warm_lock.acquire(blocking=False):
+        return
+    try:
+        ask_mod.T.warm_cache()
+    except Exception:
+        logger.warning('Ask cache warm-up failed:\n%s', traceback.format_exc())
+    finally:
+        _warm_lock.release()
+
+
+def warm_ask_cache_in_background():
+    threading.Thread(target=_warm_ask_cache, daemon=True).start()
+
+
+# --- Voice: GPT-Live-1 (trial, 2026-10-04) --------------------------------
+# GPT-Live-1 only does the TALKING - listening, turn-taking, interruptions,
+# speaking. It has no pharmacy data. Every business question it hears is
+# handed back ("client delegation") to the Ask page, which sends it to the
+# same /api/ask above (voice=True) and passes the answer back to be spoken.
+# So voice and typed answers come from the same tools and numbers.
+#
+# The browser connects its microphone straight to OpenAI over WebRTC, but the
+# session is created HERE with OPENAI_API_KEY from .env - the key never
+# reaches the phone. The phone's data channel is limited to the three
+# commands the page actually sends.
+#
+# Browsers only allow the microphone on https pages or on the PC itself
+# (localhost) - over a plain http LAN/Tailscale address the Ask page explains
+# that instead of failing silently.
+# Switched OFF by the owner (2026-10-04) as too expensive - push-to-talk below
+# replaces it. All the code stays: set VOICE_LIVE_ENABLED=1 in .env and
+# restart to bring the 🎤 button back on the Ask page.
+VOICE_LIVE_ENABLED = os.environ.get('VOICE_LIVE_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+VOICE_MODEL = 'gpt-live-1'
+VOICE_NAME = os.environ.get('VOICE_NAME', 'marin')
+VOICE_MAX_MINUTES = 10  # the page ends a session after this, to cap spend
+VOICE_ALLOWED_CLIENT_EVENTS = ['session.commentary.append', 'session.thinking.append', 'session.close']
+VOICE_INSTRUCTIONS = """\
+# Personality
+You are the voice of "Ask the Reckoner", the business analyst for Shubhada
+Pharma in Karnataka, India: retail branches in Sirsi (Shivaji Chowk and
+Hospet Road), a small Herur counter, and a B2B / wholesale channel. You talk
+with the owner. Be warm, calm and brief, like a trusted manager. Speak at a
+relaxed pace.
+
+# Language
+Reply in the language the user is speaking - English, Kannada or Hindi. If
+unsure, use English. Say money in rupees, rounded, using Indian number words
+(thousand, lakh, crore), for example "about 1 lakh 20 thousand rupees".
+
+# Backchannel policy
+While the user is talking, stay quiet except for a very short acknowledgement
+if they pause mid-thought.
+
+# Interruption policy
+If the user interrupts, stop speaking at once and listen. If they change the
+question, treat the new one as the current task.
+
+# Delegation policy
+You do NOT have the pharmacy's numbers. The backend analyst does: it reads
+the real sales, purchase, profit, stock, supplier, staff and customer
+reports.
+- Delegate every question that needs a figure, a name, a list, a trend, a
+  comparison or a recommendation about the business. Delegate before
+  answering. Never guess or invent a number while waiting.
+- Do not delegate greetings, thanks, or a request to repeat what you said.
+- If a question is genuinely ambiguous, ask one short clarifying question;
+  otherwise delegate and let the analyst decide.
+- When you delegate, say one short line such as "Let me check the
+  reckoner." Then wait. If it takes long, you may say "Still checking" once.
+- When the result arrives, say it plainly in a few sentences, leading with
+  the answer. Do not read long lists - give the top two or three and offer
+  more.
+- Patient-level lookups (a patient's history, who bought a product) are not
+  available by voice; say they can use the typed Ask page.
+- Never give dosage or treatment advice for a specific patient; say a
+  pharmacist should assess that patient directly.
+"""
+
+
+@app.route('/api/voice/session', methods=['POST'])
+@requires_auth
+def api_voice_session():
+    if not VOICE_LIVE_ENABLED:
+        return jsonify({'error': 'Live voice is switched off (set VOICE_LIVE_ENABLED=1 in .env to use it).'}), 404
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'Voice is not set up on the PC yet (OPENAI_API_KEY is missing from .env).'}), 503
+    body = request.get_json(force=True, silent=True) or {}
+    sdp = body.get('sdp')
+    if not isinstance(sdp, str) or not sdp.startswith('v=0') or len(sdp) > 50_000:
+        return jsonify({'error': 'invalid voice connection offer'}), 400
+    try:
+        from openai import OpenAI
+        result = OpenAI(api_key=api_key).live.create(
+            session={
+                'model': VOICE_MODEL,
+                'instructions': VOICE_INSTRUCTIONS,
+                'audio': {'output': {'voice': VOICE_NAME}},
+                'delegation': {'type': 'client'},
+                'client': {'data_channel': {'allowed_client_events': VOICE_ALLOWED_CLIENT_EVENTS,
+                                            'allowed_server_events': 'all'}},
+            },
+            transport={'type': 'webrtc', 'sdp': sdp})
+    except Exception as e:
+        logger.warning('Voice session failed to start: %s: %s', type(e).__name__, e)
+        return jsonify({'error': f'Could not start voice ({type(e).__name__}: {e}).'}), 502
+    # Prepare the history and slow rollups now, while the user is still
+    # speaking, so the first delegated question doesn't wait on them.
+    warm_ask_cache_in_background()
+    logger.info('Voice session started: %s', result.session.id)
+    return jsonify({'session_id': result.session.id, 'sdp': result.transport.sdp,
+                    'max_minutes': VOICE_MAX_MINUTES})
+
+
+# --- Push-to-talk voice: speech-to-text + the same assistant + text-to-speech
+# The cheaper, stitched alternative to GPT-Live (2026-10-04): billed only for
+# the seconds actually spoken and read out, never for an open session. The
+# Ask page records a WAV, sends it to /api/speech/transcribe, asks /api/ask
+# with speak=True (answer in the owner's language, speakable words), then
+# plays /api/speech/tts sentence by sentence. Both speech models run through
+# the existing OpenRouter key. Defaults were picked by a round-trip test on
+# 2026-10-04: MAI-Transcribe-2 was the fastest and best on mixed
+# Kannada-English; Gemini 3.1 Flash TTS was the only voice whose Kannada came
+# back word-perfect. Both are allowed by this account's OpenRouter
+# zero-data-retention setting (Gemini 3.8 TTS is not). Override in .env.
+SPEECH_STT_MODEL = os.environ.get('SPEECH_STT_MODEL', 'microsoft/mai-transcribe-2')
+SPEECH_TTS_MODEL = os.environ.get('SPEECH_TTS_MODEL', 'google/gemini-3.1-flash-tts-preview')
+SPEECH_TTS_VOICE = os.environ.get('SPEECH_TTS_VOICE', 'Kore')
+SPEECH_MAX_AUDIO_BYTES = 4_000_000  # ~2 minutes of 16 kHz mono WAV
+SPEECH_MAX_TTS_CHARS = 1500
+
+
+def _openrouter_client():
+    from openai import OpenAI
+    key = os.environ.get('OPENROUTER_API_KEY')
+    if not key:
+        raise RuntimeError('OPENROUTER_API_KEY is missing from .env')
+    return OpenAI(base_url='https://openrouter.ai/api/v1', api_key=key,
+                  default_headers={'X-Title': 'Pharmacy Reckoner - Push to talk'})
+
+
+def _pcm_to_wav(pcm, rate):
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)  # 16-bit little-endian, as OpenRouter's pcm format is
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+@app.route('/api/speech/transcribe', methods=['POST'])
+@requires_auth
+def api_speech_transcribe():
+    if (request.content_length or 0) > SPEECH_MAX_AUDIO_BYTES:
+        return jsonify({'error': 'That recording is too long - keep a question under a minute.'}), 413
+    audio = request.get_data(cache=False)
+    if not audio.startswith(b'RIFF'):
+        return jsonify({'error': 'expected a WAV recording'}), 400
+    # Prepare the history and slow rollups now, while speech-to-text runs, so
+    # the question that follows doesn't wait on them.
+    warm_ask_cache_in_background()
+    try:
+        result = _openrouter_client().audio.transcriptions.create(
+            model=SPEECH_STT_MODEL, file=('question.wav', audio, 'audio/wav'))
+    except Exception as e:
+        logger.warning('Speech-to-text failed: %s: %s', type(e).__name__, e)
+        return jsonify({'error': f'Could not transcribe ({type(e).__name__}).'}), 502
+    return jsonify({'text': (getattr(result, 'text', '') or '').strip()})
+
+
+@app.route('/api/speech/tts', methods=['POST'])
+@requires_auth
+def api_speech_tts():
+    body = request.get_json(force=True, silent=True) or {}
+    text = str(body.get('text') or '').strip()[:SPEECH_MAX_TTS_CHARS]
+    if not text:
+        return jsonify({'error': 'text is required'}), 400
+    # Gemini TTS only returns raw PCM; other providers can return MP3.
+    fmt = 'pcm' if 'gemini' in SPEECH_TTS_MODEL else 'mp3'
+    try:
+        result = _openrouter_client().audio.speech.create(
+            model=SPEECH_TTS_MODEL, voice=SPEECH_TTS_VOICE, input=text, response_format=fmt)
+    except Exception as e:
+        logger.warning('Text-to-speech failed: %s: %s', type(e).__name__, e)
+        return jsonify({'error': f'Could not create speech ({type(e).__name__}).'}), 502
+    audio = result.content
+    if fmt == 'mp3':
+        return Response(audio, mimetype='audio/mpeg')
+    # e.g. 'audio/pcm;rate=24000;channels=1'
+    ctype = result.response.headers.get('content-type', '')
+    rate = next((int(p.split('=', 1)[1]) for p in ctype.split(';') if p.strip().startswith('rate=')), 24000)
+    return Response(_pcm_to_wav(audio, rate), mimetype='audio/wav')
 
 
 @app.route('/')
@@ -641,7 +855,10 @@ def index():
 def ask_page():
     # Public shell, same pattern as index() above - the page checks for a
     # session token client-side and calls /api/ask (gated) to do anything.
-    return Response((ROOT / 'ask_dashboard.html').read_text(encoding='utf-8'), mimetype='text/html')
+    html = (ROOT / 'ask_dashboard.html').read_text(encoding='utf-8')
+    if VOICE_LIVE_ENABLED:  # the page hides the 🎤 live-voice button unless told otherwise
+        html = html.replace('<body>', '<body data-live-voice="1">', 1)
+    return Response(html, mimetype='text/html')
 
 
 if __name__ == '__main__':
@@ -666,6 +883,7 @@ if __name__ == '__main__':
     print()
     print('Warming up (computing reports once)...')
     get_cached_data()
+    warm_ask_cache_in_background()  # Ask / voice answers: forecast etc., in the background
     print('Ready.')
     print()
     logger.info('Server starting on http://%s:8420', lan_ip)

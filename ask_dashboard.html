@@ -61,7 +61,7 @@
     background: var(--paper); border-top: 1px solid var(--line-strong); position: sticky; bottom: 0;
   }
   #question {
-    flex: 1; border: 1px solid var(--line-strong); border-radius: 20px; background: var(--paper-raised);
+    flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 20px; background: var(--paper-raised);
     color: var(--ink); padding: 10px 15px; font-size: 15px; outline: none;
   }
   #question:focus { border-color: var(--accent); }
@@ -74,6 +74,41 @@
     display: none; flex: 1; align-items: center; justify-content: center; text-align: center;
     padding: 30px; color: var(--ink-soft); font-size: 14px;
   }
+  /* --- Voice (GPT-Live-1) --- */
+  #mic-btn {
+    flex: none; width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line-strong);
+    background: var(--paper-raised); color: var(--accent); font-size: 18px; cursor: pointer; padding: 0;
+  }
+  /* GPT-Live (🎤) is switched off unless the server adds data-live-voice="1" to the body tag */
+  #mic-btn, .live-only { display: none; }
+  body[data-live-voice="1"] #mic-btn { display: block; }
+  body[data-live-voice="1"] .live-only { display: inline; }
+  #mic-btn.live { background: var(--danger); border-color: var(--danger); color: #fff; }
+  #mic-btn:disabled { opacity: .5; }
+  #ptt-btn {
+    flex: none; width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line-strong);
+    background: var(--paper-raised); color: var(--accent); font-size: 18px; cursor: pointer; padding: 0;
+  }
+  #ptt-btn.live { background: var(--danger); border-color: var(--danger); color: #fff; }
+  #ptt-btn:disabled { opacity: .5; }
+  #voice-bar {
+    display: none; align-items: center; gap: 10px; padding: 9px 12px;
+    background: var(--accent-soft); border-top: 1px solid var(--line-strong); font-size: 13.5px;
+  }
+  #voice-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #voice-status { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #voice-meta { color: var(--ink-soft); font-variant-numeric: tabular-nums; flex: none; }
+  #voice-bar button {
+    flex: none; border: 1px solid var(--line-strong); background: var(--paper-raised); color: var(--ink);
+    border-radius: 14px; padding: 5px 11px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  #voice-bar button.end { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .msg.voice-user { align-self: flex-end; background: var(--accent-soft); color: var(--ink); border-bottom-right-radius: 4px; }
+  .msg.voice-user::before { content: '\1F3A4  '; }
+  .msg.voice-out { align-self: flex-start; background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-soft); border-bottom-left-radius: 4px; }
+  .msg.voice-out::before { content: '\1F50A  '; }
+  .msg.note { align-self: center; max-width: 100%; color: var(--ink-faint); font-size: 12.5px; padding: 2px 8px; text-align: center; }
 </style>
 </head>
 <body>
@@ -92,10 +127,22 @@
     <span class="ex" onclick="askExample(this)">Is the wholesale channel worth it?</span>
     <span class="ex" onclick="askExample(this)">What's dead stock, biggest value first?</span>
     <span class="ex" onclick="askExample(this)">Who are my top 10 customers?</span>
+    <br>Tap &#128483; to record a question and hear the answer<span class="live-only">,
+    <br>or &#127908; for a live conversation</span>.
   </div>
 </div>
 
+<div id="voice-bar" role="status">
+  <span id="voice-dot"></span>
+  <span id="voice-status">Connecting…</span>
+  <span id="voice-meta"></span>
+  <button type="button" id="mute-btn">Mute</button>
+  <button type="button" id="end-btn" class="end">End</button>
+</div>
+
 <form id="ask-form">
+  <button type="button" id="ptt-btn" title="Record a question" aria-label="Record a question">&#128483;</button>
+  <button type="button" id="mic-btn" title="Talk" aria-label="Talk">&#127908;</button>
   <input type="text" id="question" placeholder="Ask a question…" autocomplete="off">
   <button type="submit" id="send-btn">Send</button>
 </form>
@@ -162,6 +209,552 @@ form.addEventListener('submit', (e) => {
   if (!q) return;
   input.value = '';
   ask(q);
+});
+
+// ---------------------------------------------------------------------------
+// Voice - GPT-Live-1 does the talking; every business question it hears comes
+// back here as a "delegation", goes to the same /api/ask as a typed question
+// (voice: true), and the answer is handed back for it to speak. The PC server
+// creates the session (/api/voice/session) so the OpenAI key never reaches
+// this page.
+// ---------------------------------------------------------------------------
+const micBtn = document.getElementById('mic-btn');
+const voiceBar = document.getElementById('voice-bar');
+const voiceStatus = document.getElementById('voice-status');
+const voiceMeta = document.getElementById('voice-meta');
+const muteBtn = document.getElementById('mute-btn');
+const endBtn = document.getElementById('end-btn');
+const VOICE_USD_PER_MIN = 0.05;
+const VOICE_HISTORY_TURNS = 3;   // earlier Q&A sent along, for follow-ups
+const TRANSCRIPT_SETTLE_MS = 700; // let the last words' transcript arrive
+let voice = null;                // the active voice session, or null
+
+function addNote(text) { return addMsg(text, 'note'); }
+function setVoiceStatus(text) { voiceStatus.textContent = text; }
+
+function voiceSupported() {
+  return window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+    && !!window.RTCPeerConnection;
+}
+
+function sendVoice(v, event) {
+  if (v.dc && v.dc.readyState === 'open') v.dc.send(JSON.stringify(event));
+}
+
+function mmss(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function voiceCostUsd(v) {
+  const secs = v.usageSec || (Date.now() - v.started) / 1000;
+  return secs / 60 * VOICE_USD_PER_MIN;
+}
+
+function tickVoice(v) {
+  const elapsed = Date.now() - v.started;
+  voiceMeta.textContent = mmss(elapsed) + ' · ~$' + voiceCostUsd(v).toFixed(2);
+  if (elapsed >= v.maxMs) {
+    endVoice('Voice stopped after ' + Math.round(v.maxMs / 60000) + ' minutes to keep costs low. Tap the microphone to start again.');
+  }
+}
+
+async function startVoice() {
+  if (voice) return;
+  if (ptt) { addMsg('Finish the recorded question first.', 'error'); return; }
+  if (!voiceSupported()) {
+    addMsg('Voice cannot use the microphone on this address, because it is not a secure (https) page. '
+      + 'It works when this page is opened on the PC itself, or through an https address.', 'error');
+    return;
+  }
+  const v = voice = {
+    pc: null, dc: null, mic: null, audio: null, timer: null, started: Date.now(), maxMs: 10 * 60000,
+    ended: false, muted: false, usageSec: 0, turns: [], delegStart: 0, lastSpeaker: null,
+    curBubble: null, history: [], latestDelegation: null, pending: 0,
+  };
+  micBtn.disabled = true;
+  voiceBar.style.display = 'flex';
+  muteBtn.textContent = 'Mute';
+  setVoiceStatus('Connecting…');
+  voiceMeta.textContent = '';
+  try {
+    v.mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    if (v.ended) { v.mic.getTracks().forEach(t => t.stop()); return; }
+    v.pc = new RTCPeerConnection();
+    v.audio = document.createElement('audio');
+    v.audio.autoplay = true;
+    v.audio.setAttribute('playsinline', '');
+    document.body.appendChild(v.audio);
+    v.pc.ontrack = (e) => { v.audio.srcObject = e.streams[0]; v.audio.play().catch(() => {}); };
+    for (const track of v.mic.getAudioTracks()) v.pc.addTrack(track, v.mic);
+    v.dc = v.pc.createDataChannel('oai-events');
+    v.dc.addEventListener('message', (e) => {
+      try { onVoiceEvent(v, JSON.parse(e.data)); } catch (err) { console.error('voice event', err); }
+    });
+    v.pc.addEventListener('connectionstatechange', () => {
+      if (v.pc.connectionState === 'failed' && !v.ended) endVoice('The voice connection dropped. Tap the microphone to try again.');
+    });
+    const offer = await v.pc.createOffer();
+    await v.pc.setLocalDescription(offer);
+    const res = await fetch('/api/voice/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Token': getToken() },
+      body: JSON.stringify({ sdp: v.pc.localDescription.sdp }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
+      endVoice('Session expired - please log in again from the main dashboard.');
+      return;
+    }
+    if (!res.ok) throw new Error(out.error || 'Could not start a voice session.');
+    if (v.ended) return;  // End was pressed while connecting
+    if (out.max_minutes) v.maxMs = out.max_minutes * 60000;
+    await v.pc.setRemoteDescription({ type: 'answer', sdp: out.sdp });
+    v.timer = setInterval(() => tickVoice(v), 1000);
+    micBtn.classList.add('live');
+    micBtn.title = 'End voice';
+    micBtn.disabled = false;
+  } catch (e) {
+    endVoice(e && e.name === 'NotAllowedError'
+      ? 'Microphone permission was refused. Allow the microphone for this page and try again.'
+      : 'Voice could not start: ' + ((e && e.message) || e));
+  }
+}
+
+function endVoice(message) {
+  const v = voice;
+  if (!v || v.ended) return;
+  v.ended = true;
+  voice = null;
+  clearInterval(v.timer);
+  clearTimeout(v.idleTimer);
+  try { sendVoice(v, { type: 'session.close' }); } catch (e) { /* closing anyway */ }
+  setTimeout(() => { try { if (v.pc) v.pc.close(); } catch (e) { /* already closed */ } }, 500);
+  if (v.mic) v.mic.getTracks().forEach(t => t.stop());
+  if (v.audio) { v.audio.srcObject = null; v.audio.remove(); }
+  voiceBar.style.display = 'none';
+  micBtn.classList.remove('live');
+  micBtn.title = 'Talk';
+  micBtn.disabled = false;
+  if (message) addMsg(message, 'error');
+  if (v.timer) addNote('Voice ended · ' + mmss(Date.now() - v.started) + ' · about $' + voiceCostUsd(v).toFixed(2));
+}
+
+function onVoiceEvent(v, ev) {
+  if (v.ended) return;
+  switch (ev.type) {
+    case 'session.started':
+      setVoiceStatus('Listening - ask your question');
+      addNote('Voice is on. Ask your question out loud.');
+      break;
+    case 'session.input_transcript.delta':
+      voiceSpeech(v, 'user', ev.delta);
+      break;
+    case 'session.output_transcript.delta':
+      voiceSpeech(v, 'assistant', ev.delta);
+      break;
+    case 'session.delegation.created':
+      if (ev.delegation && ev.delegation.target === 'client') handleDelegation(v, ev.delegation.id);
+      break;
+    case 'session.usage.updated':
+      if (ev.usage && ev.usage.seconds) v.usageSec = ev.usage.seconds;
+      break;
+    case 'session.closed':
+      endVoice(ev.reason === 'expired' ? 'The voice session reached its time limit.'
+        : ev.reason === 'content' ? "The voice session was stopped by OpenAI's safety filter."
+        : ev.reason === 'connection_lost' ? 'The voice connection was lost.' : null);
+      break;
+    case 'error':
+      console.warn('voice error event', ev);
+      addMsg('Voice error: ' + ((ev.error && ev.error.message) || 'unknown'), 'error');
+      v.curBubble = null;
+      break;
+    default:
+      break;  // info notices, append acknowledgements
+  }
+}
+
+// Live transcript: one bubble per turn, growing as words arrive.
+function voiceSpeech(v, who, delta) {
+  if (!delta) return;
+  if (v.lastSpeaker !== who || !v.curBubble) {
+    v.curBubble = addMsg('', who === 'user' ? 'voice-user' : 'voice-out');
+    v.lastSpeaker = who;
+    v.turns.push({ who, text: '' });
+  }
+  const turn = v.turns[v.turns.length - 1];
+  turn.text += delta;
+  v.curBubble.textContent = turn.text;
+  chat.scrollTop = chat.scrollHeight;
+  if (!v.pending) setVoiceStatus(who === 'user' ? 'Listening…' : 'Speaking…');
+  // There is no "finished speaking" event - once the words stop, go back
+  // to Listening.
+  clearTimeout(v.idleTimer);
+  v.idleTimer = setTimeout(() => { if (!v.ended && !v.pending && !v.muted) setVoiceStatus('Listening…'); }, 1500);
+}
+
+// The delegation event carries no question text - rebuild it from what was
+// said since the previous delegation (owner + voice assistant lines, so a
+// clarifying "which month?" / "September" exchange stays together).
+function voiceRequest(v) {
+  const recent = v.turns.slice(v.delegStart)
+    .filter(t => t.text.trim())
+    .map(t => (t.who === 'user' ? 'User: ' : 'Voice assistant: ') + t.text.trim());
+  if (!recent.some(l => l.startsWith('User: '))) {
+    const lastUser = v.turns.slice().reverse().find(t => t.who === 'user' && t.text.trim());
+    if (lastUser) recent.unshift('User: ' + lastUser.text.trim());
+  }
+  // Words still arriving for the turn in progress (usually the voice's own
+  // "let me check") keep growing its bubble; only speech AFTER this point
+  // counts toward the next request.
+  v.delegStart = v.turns.length;
+  return recent.join('\n').slice(-3000);
+}
+
+// Split a long answer into appends the model accepts (500 tokens each).
+function chunkText(text, max) {
+  const parts = [];
+  let rest = text.trim();
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('. ', max);
+    if (cut < max / 2) cut = rest.lastIndexOf(' ', max);
+    if (cut < 1) cut = max;
+    parts.push(rest.slice(0, cut + 1).trim());
+    rest = rest.slice(cut + 1).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
+async function handleDelegation(v, id) {
+  v.latestDelegation = id;
+  v.pending += 1;
+  setVoiceStatus('Checking the reckoner…');
+  sendVoice(v, { type: 'session.thinking.append', delegation_id: id,
+    content: 'The reckoner analyst is looking this up now. No result yet - do not state or guess any figures until it arrives.' });
+  await new Promise(r => setTimeout(r, TRANSCRIPT_SETTLE_MS));
+  if (v.ended) return;
+  const request = voiceRequest(v);
+  const pending = addMsg('Checking the reckoner…', 'pending');
+  try {
+    if (!request) throw new Error('no question was heard');
+    const res = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Token': getToken() },
+      body: JSON.stringify({ question: request, history: v.history.slice(-VOICE_HISTORY_TURNS), voice: true }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      pending.remove();
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
+      endVoice('Session expired - please log in again from the main dashboard.');
+      return;
+    }
+    if (!res.ok) throw new Error(out.error || 'the reckoner could not answer');
+    const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
+    v.history.push({ question: request, answer });
+    pending.remove();
+    addMsg(answer, 'assistant');
+    v.curBubble = null;
+    // A newer question superseded this one while it ran - show the answer,
+    // but don't have the voice read out a stale result.
+    if (v.ended || id !== v.latestDelegation) return;
+    for (const part of chunkText(answer, 1200)) {
+      sendVoice(v, { type: 'session.commentary.append', delegation_id: id, content: part });
+    }
+  } catch (e) {
+    pending.remove();
+    addMsg('Reckoner error: ' + ((e && e.message) || e), 'error');
+    v.curBubble = null;
+    sendVoice(v, { type: 'session.commentary.append', delegation_id: id,
+      content: 'The reckoner could not answer this right now (' + String((e && e.message) || e).slice(0, 200)
+        + '). Tell the user briefly and suggest asking again.' });
+  } finally {
+    v.pending -= 1;
+    if (!v.ended && !v.pending) setVoiceStatus('Listening…');
+  }
+}
+
+micBtn.addEventListener('click', () => { if (voice) endVoice(); else startVoice(); });
+endBtn.addEventListener('click', () => endVoice());
+muteBtn.addEventListener('click', () => {
+  const v = voice;
+  if (!v || !v.mic) return;
+  v.muted = !v.muted;
+  v.mic.getAudioTracks().forEach(t => { t.enabled = !v.muted; });
+  muteBtn.textContent = v.muted ? 'Unmute' : 'Mute';
+  setVoiceStatus(v.muted ? 'Muted' : 'Listening…');
+});
+window.addEventListener('pagehide', () => endVoice());
+
+// ---------------------------------------------------------------------------
+// Push to talk (cheaper) - record one question, then speech-to-text -> the
+// same /api/ask (speak: true, answer in the owner's language) ->
+// text-to-speech, read out sentence by sentence. Billed only for the seconds
+// spoken and read out - nothing is open in between.
+// ---------------------------------------------------------------------------
+const pttBtn = document.getElementById('ptt-btn');
+const PTT_MAX_SECONDS = 45;
+const PTT_RATE = 16000;            // speech-to-text needs no more than this
+const PTT_CHUNK_CHARS = 240;       // read out in pieces so the first starts sooner
+const PTT_FIRST_CHARS = 80;        // ...and the very first piece kept short
+const pttHistory = [];             // earlier Q&A, for follow-ups like "and last month?"
+const player = new Audio();
+player.setAttribute('playsinline', '');
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+let ptt = null;  // { stage: 'recording' | 'working' | 'speaking', ... } or null
+
+function setPttButton(stage) {
+  const active = stage === 'recording' || stage === 'speaking';
+  pttBtn.classList.toggle('live', active);
+  pttBtn.disabled = stage === 'working';
+  pttBtn.textContent = active ? '■' : '🗣';
+  pttBtn.title = stage === 'recording' ? 'Stop and send' : stage === 'speaking' ? 'Stop speaking'
+    : stage === 'working' ? 'Working…' : 'Record a question';
+}
+
+// Phones only let a page play sound after a tap. Playing a silent clip
+// during the tap lets the answer play seconds later.
+function unlockPlayer() {
+  try { player.src = SILENT_WAV; player.play().catch(() => {}); } catch (e) { /* best effort */ }
+}
+
+async function authPost(url, body, contentType) {
+  const res = await fetch(url, {
+    method: 'POST', body,
+    headers: { 'Content-Type': contentType, 'X-Session-Token': getToken() },
+  });
+  if (res.status === 401) {
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    throw new Error('Session expired - please log in again from the main dashboard.');
+  }
+  return res;
+}
+
+async function authPostJson(url, body, contentType) {
+  const res = await authPost(url, body, contentType);
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || ('Server error ' + res.status));
+  return out;
+}
+
+async function pttStart() {
+  if (voice) { addMsg('End the live conversation first (tap End).', 'error'); return; }
+  if (!voiceSupported()) {
+    addMsg('Voice cannot use the microphone on this address, because it is not a secure (https) page. '
+      + 'It works when this page is opened on the PC itself, or through an https address.', 'error');
+    return;
+  }
+  unlockPlayer();
+  const p = ptt = { stage: 'working', stopped: false, onStop: null };
+  setPttButton('working');
+  try {
+    p.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    ptt = null;
+    setPttButton('idle');
+    addMsg(e && e.name === 'NotAllowedError'
+      ? 'Microphone permission was refused. Allow the microphone for this page and try again.'
+      : 'Could not use the microphone: ' + ((e && e.message) || e), 'error');
+    return;
+  }
+  try { p.ctx = new AudioContext({ sampleRate: PTT_RATE }); } catch (e) { p.ctx = new AudioContext(); }
+  p.src = p.ctx.createMediaStreamSource(p.stream);
+  p.proc = p.ctx.createScriptProcessor(4096, 1, 1);
+  p.chunks = [];
+  p.proc.onaudioprocess = (e) => p.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  p.src.connect(p.proc);
+  p.proc.connect(p.ctx.destination);  // outputs silence; needed for the processor to run
+  p.started = Date.now();
+  p.note = addMsg('Recording… tap ■ to send', 'pending');
+  p.tick = setInterval(() => { p.note.textContent = 'Recording ' + mmss(Date.now() - p.started) + ' … tap ■ to send'; }, 500);
+  p.limit = setTimeout(() => pttFinishRecording(), PTT_MAX_SECONDS * 1000);
+  p.stage = 'recording';
+  setPttButton('recording');
+}
+
+async function pttFinishRecording() {
+  const p = ptt;
+  if (!p || p.stage !== 'recording') return;
+  clearInterval(p.tick);
+  clearTimeout(p.limit);
+  p.stage = 'working';
+  setPttButton('working');
+  try { p.src.disconnect(); p.proc.disconnect(); } catch (e) { /* already disconnected */ }
+  p.stream.getTracks().forEach(t => t.stop());
+  const rate = p.ctx.sampleRate;
+  p.ctx.close().catch(() => {});
+  p.note.remove();
+  const samples = flattenChunks(p.chunks);
+  if (samples.length < rate * 0.5) {
+    addNote('That was too short - tap 🗣 and ask again.');
+    pttDone();
+    return;
+  }
+  try {
+    await pttAnswer(encodeWav(resampleLinear(samples, rate, PTT_RATE), PTT_RATE), p);
+  } finally {
+    pttDone();
+  }
+}
+
+async function pttAnswer(wav, p) {
+  let pending = addMsg('Listening to your question…', 'pending');
+  try {
+    const heard = await authPostJson('/api/speech/transcribe', wav, 'audio/wav');
+    const question = (heard.text || '').trim();
+    pending.remove();
+    if (!question) { addMsg("Couldn't hear anything clearly. Please try again.", 'error'); return; }
+    addMsg(question, 'voice-user');
+    pending = addMsg('Checking the reckoner…', 'pending');
+    const out = await authPostJson('/api/ask',
+      JSON.stringify({ question, history: pttHistory.slice(-VOICE_HISTORY_TURNS), speak: true }), 'application/json');
+    pending.remove();
+    const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
+    pttHistory.push({ question, answer });
+    addMsg(answer, 'assistant');
+    if (!p.stopped) await pttSpeak(answer, p);
+  } catch (e) {
+    pending.remove();
+    addMsg((e && e.message) || String(e), 'error');
+  }
+}
+
+// Read the answer aloud. Every piece is requested at once (each takes ~4-9s
+// to create), then played in order - so later pieces are ready by the time
+// the earlier ones finish, with no silent gap between sentences.
+async function pttSpeak(text, p) {
+  p.stage = 'speaking';
+  setPttButton('speaking');
+  const parts = speechChunks(text, PTT_CHUNK_CHARS);
+  const audio = parts.map((part) => { const req = fetchSpeech(part); req.catch(() => {}); return req; });
+  for (let i = 0; i < parts.length; i++) {
+    let blob;
+    try {
+      blob = await audio[i];
+    } catch (e) {
+      if (p.stopped) return;
+      addNote("The online voice didn't respond - using the phone's own voice.");
+      await speakWithBrowser(parts.slice(i).join(' '), p);
+      return;
+    }
+    if (p.stopped) return;
+    await playBlob(blob, p);
+    if (p.stopped) return;
+  }
+}
+
+async function fetchSpeech(text) {
+  const res = await authPost('/api/speech/tts', JSON.stringify({ text }), 'application/json');
+  if (!res.ok) throw new Error('speech failed');
+  return res.blob();
+}
+
+function playBlob(blob, p) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const done = () => {
+      player.onended = player.onerror = null;
+      p.onStop = null;
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    player.onended = done;
+    player.onerror = done;
+    p.onStop = () => { player.pause(); done(); };
+    player.src = url;
+    player.play().catch((e) => {
+      if (e && e.name === 'NotAllowedError') addNote('The phone blocked the sound - tap 🗣 again to ask.');
+      done();
+    });
+  });
+}
+
+// Free fallback: the phone's built-in voice (Kannada if the text is Kannada).
+function speakWithBrowser(text, p) {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) { resolve(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = /[ಀ-೿]/.test(text) ? 'kn-IN' : 'en-IN';
+    u.onend = u.onerror = () => resolve();
+    p.onStop = () => { speechSynthesis.cancel(); resolve(); };
+    speechSynthesis.speak(u);
+  });
+}
+
+function pttDone() {
+  ptt = null;
+  setPttButton('idle');
+}
+
+// Split into sentence-sized pieces, the first kept short so it plays sooner.
+function speechChunks(text, max) {
+  // Split only where punctuation is followed by a space, so "19.9" stays whole.
+  const sentences = text.replace(/\s+/g, ' ').trim().split(/(?<=[.?!।])\s+/);
+  const out = [];
+  let cur = '';
+  for (const s of sentences) {
+    const limit = out.length ? max : max / 2;
+    if (cur && (cur + ' ' + s).length > limit) { out.push(cur.trim()); cur = ''; }
+    cur += (cur ? ' ' : '') + s;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  // The voice takes ~4s plus a bit per character, so a long first sentence
+  // delays the first sound. Cut it at a comma near 80 characters - or, for
+  // English only, at a space (a mid-phrase pause sounds wrong in Kannada).
+  const first = out[0] || '';
+  if (first.length > PTT_FIRST_CHARS) {
+    let cut = first.lastIndexOf(', ', PTT_FIRST_CHARS);
+    if (cut < 25 && !/[ಀ-೿]/.test(first)) cut = first.lastIndexOf(' ', PTT_FIRST_CHARS);
+    if (cut >= 25) out.splice(0, 1, first.slice(0, cut + 1).trim(), first.slice(cut + 1).trim());
+  }
+  return out;
+}
+
+function flattenChunks(chunks) {
+  const out = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+function resampleLinear(samples, from, to) {
+  if (from === to) return samples;
+  const ratio = from / to;
+  const out = new Float32Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio, i0 = Math.floor(pos), f = pos - i0;
+    out[i] = samples[i0] * (1 - f) + (samples[i0 + 1] || 0) * f;
+  }
+  return out;
+}
+
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+pttBtn.addEventListener('click', () => {
+  if (!ptt) pttStart();
+  else if (ptt.stage === 'recording') pttFinishRecording();
+  else if (ptt.stage === 'speaking') { ptt.stopped = true; if (ptt.onStop) ptt.onStop(); }
+});
+window.addEventListener('pagehide', () => {
+  if (ptt && ptt.stream) ptt.stream.getTracks().forEach(t => t.stop());
+  if (ptt) { ptt.stopped = true; if (ptt.onStop) ptt.onStop(); }
 });
 </script>
 </body>
