@@ -86,6 +86,28 @@ For access away from your home network, this is designed to be used over
 [Tailscale](https://tailscale.com/) (a private device-to-device tunnel) —
 **not** by exposing the port to the public internet.
 
+## Salary calculator (People → Salary)
+
+Monthly slips built from the rules agreed in the two Salary Review rounds
+(Oct 2026) - the rules and their reasons are at the top of `salary.py`.
+Salary = Fixed 35% + Performance 45% + Discipline 20% of each person's base;
+performance is against their own best month, discipline loses ₹50 per late
+arrival / long lunch after 3 free ones (early exit counts half). Until the
+trial month in Setup → Rules, nobody is paid below their base.
+
+Each month:
+1. **Setup** (once, then when pay changes): base salary and role per person.
+2. **Log**, on the day it happens: wrong item, cash short, near-expiry left
+   on a rack, complaints, compliments, covering for a colleague, unplanned
+   leave. Late arrival, lunch and exit are read from the bills automatically.
+3. **Charts**, after the month ends: upload each back-office person's
+   Performance Chart from shubhadahealth.com.
+4. **Ratings**: 1-5 on the four O1-O4 points.
+5. **Slips**: tap a person to see how every rupee was worked out.
+
+What you enter is kept in `data/processed/salary/`, so it's included in the
+normal backups.
+
 ## Voice (trial)
 
 The Ask page has two voice buttons. Both answer from the same Ask the

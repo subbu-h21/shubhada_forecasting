@@ -184,6 +184,39 @@
   nav.bottom button.active { color: var(--accent); }
   nav.bottom svg { width: 18px; height: 18px; }
 
+
+  /* Salary (People > Salary) */
+  .sal-note { font-size: 12px; color: var(--ink-soft); margin: -4px 0 10px; line-height: 1.45; }
+  .sal-note .kn, .sal-kn { color: var(--ink-faint); }
+  .sal-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); margin-top: 9px; }
+  .sal-bar i { display: block; height: 100%; }
+  .sal-detail { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 12.5px; }
+  .sal-detail table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .sal-detail td { padding: 4px 2px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .sal-detail td.n { text-align: right; font-family: ui-monospace, "SF Mono", Consolas, monospace; white-space: nowrap; }
+  .sal-detail tr.grp td { font-weight: 700; padding-top: 9px; border-bottom: 1px solid var(--line-strong); }
+  .sal-detail .raw { color: var(--ink-soft); font-size: 11.5px; }
+  .sal-link { background: none; border: none; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 0 0; cursor: pointer; }
+  .sal-form { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; display: grid; gap: 9px; margin-bottom: 12px; }
+  .sal-form label { display: grid; gap: 3px; font-size: 11.5px; color: var(--ink-soft); font-weight: 600; }
+  .sal-form input, .sal-form select, .sal-row select, .sal-row input {
+    font-family: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line-strong);
+    border-radius: 8px; background: var(--paper); color: var(--ink); min-width: 0; width: 100%; }
+  .sal-btn { font-family: inherit; background: var(--accent); color: white; border: none; padding: 10px 18px;
+    border-radius: 20px; font-weight: 600; font-size: 13.5px; cursor: pointer; }
+  .sal-btn:disabled { opacity: .6; cursor: default; }
+  .sal-btn.ghost { background: var(--accent-soft); color: var(--accent); }
+  .sal-row { display: grid; grid-template-columns: minmax(0, 1fr) 118px 100px; gap: 6px; align-items: center;
+    padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .sal-rate { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 6px; }
+  .sal-rate label { font-size: 10px; color: var(--ink-faint); display: grid; gap: 2px; text-transform: uppercase; letter-spacing: .03em; }
+  .sal-msg { font-size: 12.5px; margin: 0 0 10px; padding: 8px 11px; border-radius: 8px; }
+  .sal-msg.err { background: var(--danger-soft); color: var(--danger); }
+  .sal-msg.ok { background: var(--ok-soft); color: var(--ok); }
+  .sal-rules { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 6px 10px; align-items: center; font-size: 12.5px; }
+  .sal-rules input { font-family: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line-strong);
+    border-radius: 8px; background: var(--paper); color: var(--ink); width: 100%; text-align: right; }
+  @media (max-width: 380px) { .sal-row { grid-template-columns: minmax(0, 1fr) 104px; } .sal-row .sal-sal { grid-column: 2; } }
   .login-banner { background: var(--warn-soft); color: var(--warn); font-size: 12px; padding: 8px 14px; text-align: center; }
 
   /* Login screen */
@@ -374,6 +407,7 @@
       <button class="subtab" data-peoplesub="customers">Customers</button>
       <button class="subtab" data-peoplesub="refills">Refills</button>
       <button class="subtab" data-peoplesub="distributors">Distributors</button>
+      <button class="subtab" data-peoplesub="salary">Salary</button>
     </div>
     <div id="people-content"></div>
   </div>
@@ -813,6 +847,8 @@ function buildPeople() {
     renderCustomers(container);
   } else if (currentPeopleSub === 'refills') {
     renderRefills(container);
+  } else if (currentPeopleSub === 'salary') {
+    renderSalary(container);
   } else {
     renderDistributors(container);
   }
@@ -1029,6 +1065,364 @@ function employeeMonthCard(r) {
       <div class="metric" style="margin-top:8px"><div class="k">${title}</div></div>
       <div class="metrics" style="margin-top:2px">${metrics.map(([k, v]) => `<div class="metric"><div class="k">${escHtml(k)}</div><div class="v">${v}</div></div>`).join('')}</div>`).join('')}
   </div>`;
+}
+
+// --- Salary (People > Salary) ---------------------------------------------
+// The rules live server-side in salary.py; this screen only shows the slips
+// and collects what the owner enters by hand: base salaries and roles, the
+// day-by-day incident log, monthly 1-5 ratings and Performance Charts.
+let SAL = null;
+let salView = 'slips';
+let salMonth = null;
+let salOpen = {};
+let salMsg = null;   // {kind: 'ok'|'err', text}
+let salBusy = false;
+
+const SAL_VIEWS = [['slips', 'Slips', 'ಸಂಬಳ ಚೀಟಿ'], ['log', 'Log', 'ದಾಖಲೆ'], ['ratings', 'Ratings', 'ಅಂಕ'],
+  ['charts', 'Charts', 'ಚಾರ್ಟ್'], ['setup', 'Setup', 'ಹೊಂದಿಸು']];
+const SAL_RULE_LABELS = {
+  fixed_pct: 'Fixed part, % of salary', perf_pct: 'Performance part, %', disc_pct: 'Discipline part, %',
+  full_at_pct: 'Full marks at this % of own best', item_cap_pct: 'Highest marks per item, %',
+  perf_cap_pct: 'Highest performance pay, %', floor_pct: 'No performance pay below, %',
+  biller_share_pct: "Biller's share of each sale, %", free_incidents: 'Free late / lunch / exit incidents a month',
+  rs_per_incident: '₹ cut per incident after that', early_exit_weight: 'An early exit counts as (0.5 = half)',
+  unplanned_leave_rs: '₹ per unplanned leave day (to admin savings)', marks_per_mistake: 'Marks lost per logged mistake',
+  marks_per_complaint: 'Marks lost per complaint', marks_per_compliment: 'Marks gained per compliment',
+  marks_per_cover: 'Marks gained per day covering a colleague', returns_gate_pct: 'No performance pay if returns above, % of sales',
+  trial_until: 'Trial until (month) — nobody paid below base', min_days_active: 'Fewest active days to score a month',
+  min_role_lines: 'Lines needed for a role to count that month',
+};
+
+function salToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function loadSalary(month) {
+  const res = await authFetch('/api/salary' + (month ? '?month=' + encodeURIComponent(month) : ''));
+  const out = await res.json();
+  if (!res.ok) throw new Error(out.error || 'Could not load salary data.');
+  SAL = out;
+  salMonth = out.month;
+}
+
+async function salPost(url, body, okText) {
+  if (salBusy) return;
+  salBusy = true;
+  try {
+    const isForm = body instanceof FormData;
+    const res = await authFetch(url, isForm ? { method: 'POST', body } :
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ month: salMonth }, body)) });
+    const out = await res.json();
+    if (!res.ok) { salMsg = { kind: 'err', text: out.error || 'That did not save.' }; }
+    else { SAL = out; salMonth = out.month; salMsg = okText ? { kind: 'ok', text: okText } : null; }
+  } catch (e) {
+    if (e.message !== 'unauthorized') salMsg = { kind: 'err', text: 'Could not reach the server — nothing was saved.' };
+  } finally {
+    salBusy = false;
+    renderSalary(document.getElementById('people-content'));
+  }
+}
+
+function renderSalary(container) {
+  if (!SAL || (salMonth && SAL.month !== salMonth)) {
+    container.innerHTML = '<div class="loading">Working out salaries…</div>';
+    loadSalary(salMonth).then(() => renderSalary(container)).catch(e => {
+      if (e.message !== 'unauthorized') container.innerHTML = `<div class="empty">${escHtml(e.message)}</div>`;
+    });
+    return;
+  }
+  if (!SAL.months.length) {
+    container.innerHTML = '<div class="empty">No month can be paid yet — none of your sale exports carry the "Billed By" column.</div>';
+    return;
+  }
+  let html = `<div class="subtabs" id="sal-month-tabs" style="margin-top:14px">` +
+    SAL.months.map(m => `<button class="subtab${m === SAL.month ? ' active' : ''}" data-salmonth="${m}">${monthAbbr(m)} ${m.slice(0, 4)}</button>`).join('') +
+    `</div><div class="subtabs" id="sal-view-tabs">` +
+    SAL_VIEWS.map(([k, en, kn]) => `<button class="subtab${k === salView ? ' active' : ''}" data-salview="${k}">${en} <span style="font-weight:500;opacity:.75">${kn}</span></button>`).join('') +
+    `</div>`;
+  if (salMsg) html += `<div class="sal-msg ${salMsg.kind}" role="status">${escHtml(salMsg.text)}</div>`;
+  salMsg = null;
+  if (salView === 'slips') html += salSlipsHTML();
+  else if (salView === 'log') html += salLogHTML();
+  else if (salView === 'ratings') html += salRatingsHTML();
+  else if (salView === 'charts') html += salChartsHTML();
+  else html += salSetupHTML();
+  container.innerHTML = html;
+  salBind(container);
+}
+
+function salTrialText() {
+  const t = SAL.rules.trial_until;
+  if (!t) return '';
+  return SAL.month <= t
+    ? `<b>Trial month</b> (until ${monthAbbr(t)} ${t.slice(0, 4)}): slips are calculated and shown, but nobody is paid less than their base salary. <span class="kn">ಪ್ರಯೋಗ ಅವಧಿ — ಯಾರಿಗೂ ಮೂಲ ಸಂಬಳಕ್ಕಿಂತ ಕಡಿಮೆ ಇಲ್ಲ.</span>`
+    : '';
+}
+
+function salSlipsHTML() {
+  const s = SAL.summary, r = SAL.rules;
+  const stats = [];
+  if (s.with_salary) {
+    stats.push(['var(--accent)', money(s.calculated_total), `Calculated for ${s.with_salary} staff (base ${money(s.base_total)})`]);
+    stats.push(['var(--ok)', money(s.payable_total), SAL.month <= (r.trial_until || '') ? 'To pay (trial: never below base)' : 'To pay']);
+  }
+  stats.push([s.below_floor ? 'var(--danger)' : 'var(--ok)', fmt(s.below_floor), `Below the ${fmt(r.floor_pct)}% floor — no performance pay`]);
+  stats.push(['var(--warn)', money(s.admin_savings), 'To admin savings (unplanned leave)']);
+  let html = `<div class="sal-note">Salary = Fixed ${fmt(r.fixed_pct)}% + Performance ${fmt(r.perf_pct)}% + Discipline ${fmt(r.disc_pct)}%.
+    Performance is against each person's <b>own best</b>; ${fmt(r.full_at_pct)}% of their best already earns full marks.
+    Discipline loses ₹${fmt(r.rs_per_incident)} per late arrival or long lunch after ${fmt(r.free_incidents)} free ones (an early exit counts half).
+    <span class="kn">ಸ್ವಂತ ಉತ್ತಮ ತಿಂಗಳ ${fmt(r.full_at_pct)}% ಮಾಡಿದರೆ ಪೂರ್ಣ ಅಂಕ.</span></div>`;
+  const trial = salTrialText();
+  if (trial) html += `<div class="sal-msg ok" style="font-weight:500">${trial}</div>`;
+  html += `<div class="stat-grid">` + stats.map(([c, n, l]) =>
+    `<div class="stat-card" style="--stripe:${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('') + `</div>`;
+  const missing = SAL.slips.filter(x => !x.money).length;
+  if (missing) html += `<div class="sal-msg err">${missing} of ${SAL.slips.length} people have no base salary yet, so their slips show marks but no rupees. Add them in <b>Setup</b>.</div>`;
+  if (SAL.needs_role.length) html += `<div class="sal-msg err">New name${SAL.needs_role.length > 1 ? 's' : ''} without a role: ${SAL.needs_role.map(escHtml).join(', ')}. Set ${SAL.needs_role.length > 1 ? 'them' : 'it'} in <b>Setup</b>.</div>`;
+  if (s.not_rated) html += `<div class="sal-note">${s.not_rated} not rated for ${monthAbbr(SAL.month)} yet — their rating part is left out until you rate them in <b>Ratings</b>.</div>`;
+  html += `<div class="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-sal" placeholder="Search employee…"></div>
+    <div class="result-count" id="rc-sal"></div><div class="card-list" id="list-sal"></div>`;
+  return html;
+}
+
+function salColor(x) {
+  if (x.floor_hit || (x.gate && x.gate.failed)) return ['var(--danger)', 'var(--danger-soft)'];
+  if (x.money && x.money.vs_base < 0) return ['var(--warn)', 'var(--warn-soft)'];
+  return ['var(--ok)', 'var(--ok-soft)'];
+}
+
+function salSlipCard(x) {
+  const [color, bg] = salColor(x);
+  const m = x.money, d = x.discipline;
+  const flags = [x.role, `${x.days_active} day${x.days_active === 1 ? '' : 's'}`];
+  if (!x.rated) flags.push('not rated');
+  if (x.log_count) flags.push(`${x.log_count} logged`);
+  const pill = m ? `${money(m.payable)}` : (x.perf_score == null ? '—' : `${fmt(x.perf_score)}%`);
+  let metrics = `<div class="metric"><div class="k">Performance</div><div class="v">${x.perf_score == null ? '—' : fmt(x.perf_score) + '%'}${x.floor_hit ? ' <span style="color:var(--danger)">below floor</span>' : ''}</div></div>
+    <div class="metric"><div class="k">Incidents</div><div class="v">${d.timed ? d.incidents : '—'}</div></div>`;
+  if (m) metrics += `<div class="metric"><div class="k">vs base</div><div class="v" style="color:${m.vs_base < 0 ? 'var(--danger)' : 'var(--ok)'}">${m.vs_base > 0 ? '+' : (m.vs_base < 0 ? '−' : '')}${money(Math.abs(m.vs_base))}</div></div>`;
+  let bar = '';
+  if (m) {
+    const tot = Math.max(m.base * (SAL.rules.perf_cap_pct / 100 * SAL.rules.perf_pct + SAL.rules.fixed_pct + SAL.rules.disc_pct) / 100, 1);
+    const w = v => (v / tot * 100).toFixed(1) + '%';
+    bar = `<div class="sal-bar" role="img" aria-label="Fixed ${money(m.fixed)}, performance ${money(m.perf_pay)}, discipline ${money(m.disc_pay)}">
+      <i style="width:${w(m.fixed)};background:var(--ink-faint)"></i><i style="width:${w(m.perf_pay)};background:var(--accent)"></i><i style="width:${w(m.disc_pay)};background:var(--ok)"></i></div>
+      <div class="meta" style="margin-top:4px">Fixed ${money(m.fixed)} · Performance ${money(m.perf_pay)} of ${money(m.perf_max)} · Discipline ${money(m.disc_pay)} of ${money(m.disc_max)}</div>`;
+  }
+  const open = salOpen[x.employee];
+  return `<div class="card" style="--card-stripe:${color}">
+    <div class="row1"><div class="name">${escHtml(x.employee)}<div class="meta">${flags.map(escHtml).join(' · ')}</div></div>
+      <span class="pill" style="color:${color};background:${bg};font-size:13px">${pill}</span></div>
+    <div class="metrics">${metrics}</div>${bar}
+    <button class="sal-link" data-salopen="${escAttr(x.employee)}" aria-expanded="${open ? 'true' : 'false'}">${open ? 'Hide details' : 'Show how this was worked out'}</button>
+    ${open ? salDetailHTML(x) : ''}</div>`;
+}
+
+function salDetailHTML(x) {
+  const r = SAL.rules, m = x.money, d = x.discipline;
+  let h = `<div class="sal-detail"><table><tbody>`;
+  for (const g of x.groups) {
+    h += `<tr class="grp"><td>${escHtml(g.name)} <span class="sal-kn">${escHtml(g.kn)}</span> · counts ${g.share_pct}%</td><td class="n">${fmt(g.score)}</td></tr>`;
+    for (const i of x.items.filter(i => i.group === g.code)) {
+      h += `<tr><td>${escHtml(i.label)}<div class="raw">${escHtml(i.raw)} · ${escHtml(i.basis)}</div></td><td class="n">${i.score == null ? '—' : fmt(i.score)}</td></tr>`;
+    }
+  }
+  const perfLine = x.perf_score == null ? 'Nothing measurable this month'
+    : x.floor_hit ? `${fmt(x.perf_score)}% is below the ${fmt(r.floor_pct)}% floor → no performance pay`
+    : (x.gate && x.gate.failed) ? `Returns ${x.gate.returns_pct}% of sales, above the ${x.gate.limit}% limit → no performance pay`
+    : `${fmt(x.perf_score)}%${x.perf_score > r.perf_cap_pct ? `, capped at ${fmt(r.perf_cap_pct)}%` : ''} → paid ${fmt(x.perf_paid_pct)}% of the performance part`;
+  h += `<tr class="grp"><td>Performance score <span class="sal-kn">ಸಾಧನೆ</span></td><td class="n">${x.perf_score == null ? '—' : fmt(x.perf_score) + '%'}</td></tr>
+    <tr><td colspan="2" class="raw">${escHtml(perfLine)}</td></tr>`;
+  if (x.gate && !x.gate.failed) h += `<tr><td colspan="2" class="raw">Returns ${x.gate.returns_pct}% of sales — within the ${x.gate.limit}% limit.</td></tr>`;
+  h += `<tr class="grp"><td>Discipline <span class="sal-kn">ಶಿಸ್ತು</span></td><td class="n">${d.timed ? d.incidents + ' incidents' : '—'}</td></tr>`;
+  if (d.timed) {
+    h += `<tr><td>Late arrivals</td><td class="n">${fmt(d.late)}</td></tr>
+      <tr><td>Long lunches</td><td class="n">${fmt(d.long_lunch)}</td></tr>
+      <tr><td>Early exits (count ${r.early_exit_weight})</td><td class="n">${fmt(d.early_exit)}</td></tr>
+      <tr><td colspan="2" class="raw">${fmt(d.free)} free, ${d.charged} charged × ₹${fmt(r.rs_per_incident)}${m ? ` = ${money(m.disc_deduction)} off` : ''}</td></tr>`;
+  }
+  if (d.leave_days) h += `<tr><td>Unplanned leave days</td><td class="n">${fmt(d.leave_days)}${m ? ' · ' + money(m.admin_savings) : ''}</td></tr>`;
+  if (m) {
+    h += `<tr class="grp"><td>Salary <span class="sal-kn">ಸಂಬಳ</span> (base ${money(m.base)})</td><td class="n"></td></tr>
+      <tr><td>Fixed ${fmt(r.fixed_pct)}%</td><td class="n">${money(m.fixed)}</td></tr>
+      <tr><td>Performance (out of ${money(m.perf_max)})</td><td class="n">${money(m.perf_pay)}</td></tr>
+      <tr><td>Discipline (out of ${money(m.disc_max)})</td><td class="n">${money(m.disc_pay)}</td></tr>
+      ${m.admin_savings ? `<tr><td>Unplanned leave → admin savings</td><td class="n">−${money(m.admin_savings)}</td></tr>` : ''}
+      <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
+      ${x.trial ? `<tr><td>To pay (trial: never below base)</td><td class="n"><b>${money(m.payable)}</b></td></tr>` : ''}`;
+  } else {
+    h += `<tr><td colspan="2" class="raw">Add a base salary in Setup to see rupees.</td></tr>`;
+  }
+  h += `</tbody></table>`;
+  if (x.notes.length) h += `<div class="raw" style="margin-top:8px">${x.notes.map(n => '• ' + escHtml(n)).join('<br>')}</div>`;
+  return h + `</div>`;
+}
+
+function salStaffOptions(selected) {
+  return `<option value="">Choose…</option>` + SAL.staff.map(n =>
+    `<option value="${escAttr(n)}"${n === selected ? ' selected' : ''}>${escHtml(n)}</option>`).join('');
+}
+
+function salLogHTML() {
+  const types = SAL.incident_types;
+  let html = `<div class="sal-note">Log things on the day they happen. Late arrivals, lunches and exits are read from the bills automatically — log only what the reckoner can't see.
+    <span class="kn">ನಡೆದ ದಿನವೇ ದಾಖಲಿಸಿ.</span></div>
+    <form class="sal-form" id="sal-log-form">
+      <label>Date<input type="date" id="sal-log-date" value="${salToday()}" max="${salToday()}" required></label>
+      <label>Person<select id="sal-log-emp" required>${salStaffOptions('')}</select></label>
+      <label>What happened<select id="sal-log-type" required><option value="">Choose…</option>${Object.entries(types).map(([k, t]) =>
+        `<option value="${k}">${escHtml(t.label)} — ${escHtml(t.kn)}</option>`).join('')}</select></label>
+      <label>Note (optional)<input type="text" id="sal-log-note" maxlength="300" placeholder="e.g. gave 10 strips instead of 1"></label>
+      <button type="submit" class="sal-btn">Add to log</button>
+    </form>
+    <div class="section-title">Logged for ${monthAbbr(SAL.month)} ${SAL.month.slice(0, 4)} (${SAL.incidents.length})</div>`;
+  if (!SAL.incidents.length) return html + `<div class="empty">Nothing logged this month yet.</div>`;
+  return html + `<div class="card-list">` + SAL.incidents.map(r => {
+    const t = types[r.type] || { label: r.type, kn: '' };
+    const good = r.type === 'compliment' || r.type === 'covered';
+    return `<div class="card" style="--card-stripe:${good ? 'var(--ok)' : 'var(--warn)'}">
+      <div class="row1"><div class="name">${escHtml(r.employee)}<div class="meta">${escHtml(r.date)} · ${escHtml(t.label)} <span class="sal-kn">${escHtml(t.kn)}</span></div>
+      ${r.note ? `<div class="meta">${escHtml(r.note)}</div>` : ''}</div>
+      <button class="sal-link" style="padding:0;color:var(--danger)" data-saldel="${escAttr(r.id)}">Remove</button></div></div>`;
+  }).join('') + `</div>`;
+}
+
+function salRatingsHTML() {
+  const keys = SAL.rating_keys;
+  const people = SAL.slips.map(x => x.employee);
+  const done = people.filter(p => SAL.ratings[p]).length;
+  let html = `<div class="sal-note">Rate each person 1 to 5 for ${monthAbbr(SAL.month)}. 5 = 100 marks, 4 = 80, 3 = 60. Saves as you choose.
+    <span class="kn">1 ರಿಂದ 5 ಅಂಕ ಕೊಡಿ.</span><br>${Object.entries(keys).map(([k, v]) => `<b>${k}</b> ${escHtml(v)}`).join(' · ')}</div>
+    <div class="result-count">${done} of ${people.length} rated</div><div class="card-list">`;
+  for (const p of people) {
+    const r = SAL.ratings[p] || {};
+    html += `<div class="card" style="--card-stripe:${SAL.ratings[p] ? 'var(--ok)' : 'var(--line-strong)'}"><div class="name">${escHtml(p)}</div>
+      <div class="sal-rate">${Object.keys(keys).map(k => `<label>${k}<select data-salrate="${escAttr(p)}" data-key="${k}" aria-label="${escAttr(p)} ${escAttr(keys[k])}">
+        <option value="">–</option>${[1, 2, 3, 4, 5].map(v => `<option value="${v}"${r[k] === v ? ' selected' : ''}>${v}</option>`).join('')}</select></label>`).join('')}</div></div>`;
+  }
+  return html + `</div>`;
+}
+
+function salChartsHTML() {
+  const ch = SAL.charts;
+  let html = `<div class="sal-note">Upload each person's Performance Chart from shubhadahealth.com <b>after the month has ended</b>, so it covers the whole month. Its items are scored against that person's own best chart month.
+    <span class="kn">ತಿಂಗಳು ಮುಗಿದ ನಂತರ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ.</span></div>
+    <form class="sal-form" id="sal-chart-form">
+      <label>Month it covers<select id="sal-chart-month">${SAL.months.map(m => `<option value="${m}"${m === SAL.month ? ' selected' : ''}>${monthAbbr(m)} ${m.slice(0, 4)}</option>`).join('')}</select></label>
+      <label>Chart file (.xlsx)<input type="file" id="sal-chart-file" accept=".xlsx" required></label>
+      <label>Whose chart<select id="sal-chart-emp" required>${salStaffOptions('')}</select></label>
+      <button type="submit" class="sal-btn">Upload chart</button>
+    </form>
+    <div class="section-title">Charts for ${monthAbbr(SAL.month)} ${SAL.month.slice(0, 4)} (${Object.keys(ch).length})</div>`;
+  if (!Object.keys(ch).length) return html + `<div class="empty">No charts uploaded for this month.</div>`;
+  return html + `<div class="card-list">` + Object.entries(ch).sort().map(([e, c]) =>
+    `<div class="card" style="--card-stripe:var(--accent)"><div class="row1"><div class="name">${escHtml(e)}<div class="meta">${escHtml(c.original_name || c.file)} · uploaded ${escHtml(c.uploaded_at || '')}</div></div>
+      <button class="sal-link" style="padding:0;color:var(--danger)" data-salchartdel="${escAttr(e)}">Remove</button></div></div>`).join('') + `</div>`;
+}
+
+function salSetupHTML() {
+  const roles = SAL.role_names.concat(['Not staff']);
+  const people = [...new Set(SAL.staff.concat(Object.keys(SAL.salaries)))].sort();
+  let html = `<div class="sal-note">Base salary is what you pay today for a full month. The calculator splits it into the fixed, performance and discipline parts.
+    <span class="kn">ಇಂದಿನ ಪೂರ್ಣ ತಿಂಗಳ ಸಂಬಳ ನಮೂದಿಸಿ.</span></div>
+    <div class="sal-form" style="gap:0"><div class="sal-row" style="font-size:11px;color:var(--ink-faint);font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding-top:0">
+      <div>Person</div><div>Role</div><div class="sal-sal">Base ₹</div></div>` +
+    people.map((p, i) => `<div class="sal-row"><div>${escHtml(p)}</div>
+      <select data-salrole="${escAttr(p)}" id="sal-role-${i}" aria-label="Role for ${escAttr(p)}">${roles.map(r => `<option${(SAL.roles[p] || '') === r ? ' selected' : ''}>${r}</option>`).join('')}${SAL.roles[p] ? '' : '<option selected value="">Choose…</option>'}</select>
+      <input class="sal-sal" type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="₹" aria-label="Base salary for ${escAttr(p)}"></div>`).join('') +
+    `<div style="padding-top:10px"><button class="sal-btn" id="sal-save-people">Save salaries and roles</button></div></div>
+    <div class="section-title">Role weights (agreed in review round 2)</div>
+    <div class="chart-card" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums">
+      <thead><tr><th style="text-align:left;padding:4px">Group</th>${SAL.role_names.map(r => `<th style="text-align:right;padding:4px">${r}</th>`).join('')}</tr></thead><tbody>` +
+    SAL.groups.map(g => `<tr><td style="padding:4px;border-top:1px solid var(--line)">${escHtml(g.name)} <span class="sal-kn">${escHtml(g.kn)}</span></td>${SAL.role_names.map(r =>
+      `<td style="text-align:right;padding:4px;border-top:1px solid var(--line)">${SAL.group_weights[r][g.code] || '–'}</td>`).join('')}</tr>`).join('') +
+    `</tbody></table></div>
+    <div class="section-title">Rules</div>
+    <div class="sal-form"><div class="sal-rules">` +
+    Object.keys(SAL.default_rules).map(k => `<label for="sal-rule-${k}" style="font-size:12.5px;color:var(--ink);font-weight:500">${escHtml(SAL_RULE_LABELS[k] || k)}${SAL.rules[k] != SAL.default_rules[k] ? ` <span class="sal-kn">(agreed: ${escHtml(String(SAL.default_rules[k]))})</span>` : ''}</label>
+      <input id="sal-rule-${k}" data-salrule="${k}" ${k === 'trial_until' ? 'type="month"' : 'type="number" step="any"'} value="${escAttr(String(SAL.rules[k] ?? ''))}">`).join('') +
+    `</div><button class="sal-btn ghost" id="sal-save-rules">Save rules</button></div>`;
+  return html;
+}
+
+function salBind(container) {
+  container.querySelectorAll('[data-salmonth]').forEach(b => b.addEventListener('click', () => { salMonth = b.dataset.salmonth; renderSalary(container); }));
+  container.querySelectorAll('[data-salview]').forEach(b => b.addEventListener('click', () => { salView = b.dataset.salview; renderSalary(container); }));
+  if (salView === 'slips') {
+    setupSearch('search-sal', 'list-sal', 'rc-sal', SAL.slips, (x, q) => x.employee.toLowerCase().includes(q), salSlipCard, 'No matching employees.');
+    container.querySelector('#list-sal').addEventListener('click', e => {
+      const b = e.target.closest('[data-salopen]');
+      if (!b) return;
+      salOpen[b.dataset.salopen] = !salOpen[b.dataset.salopen];
+      const q = container.querySelector('#search-sal').value;
+      renderSalary(container);
+      const box = container.querySelector('#search-sal');
+      if (q) { box.value = q; box.dispatchEvent(new Event('input')); }
+    });
+  }
+  const logForm = container.querySelector('#sal-log-form');
+  if (logForm) logForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const date = container.querySelector('#sal-log-date').value;
+    const employee = container.querySelector('#sal-log-emp').value, type = container.querySelector('#sal-log-type').value;
+    if (!date || !employee || !type) { salMsg = { kind: 'err', text: 'Choose the date, the person and what happened.' }; renderSalary(container); return; }
+    salPost('/api/salary/incident', { date, employee, type, note: container.querySelector('#sal-log-note').value },
+      `Logged for ${employee} on ${date}.` + (date.slice(0, 7) !== salMonth ? ` It counts in ${date.slice(0, 7)}.` : ''));
+  });
+  container.querySelectorAll('[data-saldel]').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to remove'; return; }
+    salPost('/api/salary/incident', { delete: b.dataset.saldel }, 'Removed from the log.');
+  }));
+  container.querySelectorAll('[data-salrate]').forEach(sel => sel.addEventListener('change', () => {
+    const p = sel.dataset.salrate, ratings = {};
+    container.querySelectorAll(`[data-salrate="${CSS.escape(p)}"]`).forEach(s2 => { ratings[s2.dataset.key] = s2.value ? Number(s2.value) : null; });
+    salPost('/api/salary/rating', { employee: p, ratings }, `Saved ${p}'s rating.`);
+  }));
+  const chartForm = container.querySelector('#sal-chart-form');
+  if (chartForm) {
+    const fileIn = container.querySelector('#sal-chart-file'), empSel = container.querySelector('#sal-chart-emp');
+    fileIn.addEventListener('change', () => {
+      // "Performance Chart of NETRAVATI PRAKASH KOTHARI.xlsx" -> pick that person if the name matches
+      const f = fileIn.files[0];
+      if (!f) return;
+      const raw = f.name.replace(/\.xlsx$/i, '').replace(/^performance chart of\s*/i, '').replace(/[^a-z]/gi, '').toLowerCase();
+      const hit = SAL.staff.find(n => n.replace(/[^a-z]/gi, '').toLowerCase() === raw);
+      if (hit) empSel.value = hit;
+    });
+    chartForm.addEventListener('submit', e => {
+      e.preventDefault();
+      const f = fileIn.files[0], employee = empSel.value, month = container.querySelector('#sal-chart-month').value;
+      if (!f || !employee) { salMsg = { kind: 'err', text: 'Choose the chart file and whose chart it is.' }; renderSalary(container); return; }
+      const fd = new FormData();
+      fd.append('file', f); fd.append('employee', employee); fd.append('month', month);
+      salMonth = month;
+      salPost('/api/salary/chart', fd, `Chart saved for ${employee}, ${month}.`);
+    });
+  }
+  container.querySelectorAll('[data-salchartdel]').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to remove'; return; }
+    const fd = new FormData();
+    fd.append('delete', '1'); fd.append('employee', b.dataset.salchartdel); fd.append('month', salMonth);
+    salPost('/api/salary/chart', fd, 'Chart removed.');
+  }));
+  const savePeople = container.querySelector('#sal-save-people');
+  if (savePeople) savePeople.addEventListener('click', () => {
+    const roles = {}, salaries = {};
+    container.querySelectorAll('[data-salrole]').forEach(s2 => { if (s2.value) roles[s2.dataset.salrole] = s2.value; });
+    container.querySelectorAll('[data-salbase]').forEach(i => { salaries[i.dataset.salbase] = i.value === '' ? null : Number(i.value); });
+    savePeople.disabled = true;
+    salPost('/api/salary/settings', { roles, salaries }, 'Salaries and roles saved.');
+  });
+  const saveRules = container.querySelector('#sal-save-rules');
+  if (saveRules) saveRules.addEventListener('click', () => {
+    const rules = {};
+    container.querySelectorAll('[data-salrule]').forEach(i => { rules[i.dataset.salrule] = i.dataset.salrule === 'trial_until' ? i.value : (i.value === '' ? null : Number(i.value)); });
+    saveRules.disabled = true;
+    salPost('/api/salary/settings', { rules }, 'Rules saved — every slip has been recalculated.');
+  });
 }
 
 function renderCustomers(container) {

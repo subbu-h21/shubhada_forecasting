@@ -33,6 +33,7 @@ from werkzeug.utils import secure_filename
 import ask as ask_mod
 import ask_limits
 import run_reckoner as rk
+import salary as salary_mod
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -127,6 +128,7 @@ def _drop_session(token):
 # there - from ANY source - as a reason to recompute.
 _cache_lock = threading.Lock()
 _cache = {'data': None, 'stamp': None, 'source_mtime': None}
+_salary_inputs = {'v': None}  # filled by compute_all()
 
 
 def _master_files_mtime():
@@ -288,6 +290,15 @@ def compute_all():
     daywise_forecast, dow_index, daywise_target_month = rk.build_daywise_forecast(sales, footfall_forecast)
     over_under = rk.build_over_under(sales, purch)
     profit, profit_unknown = rk.build_profit_margin(sales, purch)
+    # Salary needs a few of these frames again on every Salary screen action
+    # (logging an incident, a rating) - keep them so those stay instant
+    # instead of recomputing the whole reckoner. A salary problem must never
+    # take the rest of the dashboard down with it.
+    try:
+        _salary_inputs['v'] = salary_mod.build_inputs(sales, employee_monthly, employee_scorecard, profit)
+    except Exception:
+        logger.error('Salary inputs failed:\n%s', traceback.format_exc())
+        _salary_inputs['v'] = None
     channel_profit = rk.build_channel_profit(sales, purch)
     distributor_summary = rk.build_distributor_summary(dist_lines)
     latest_month = all_months[-1]
@@ -614,6 +625,100 @@ def api_upload():
     invalidate_cache()
     logger.info('Upload processed: %s', saved)
     return jsonify({'saved': saved, 'log': log.getvalue()})
+
+
+# --- Salary (People > Salary) ---------------------------------------------
+def _salary_payload(month=None):
+    get_cached_data()  # recomputes first if the master files changed on disk
+    inputs = _salary_inputs['v']
+    months = salary_mod.months_available(inputs)
+    if not month or month not in months:
+        month = months[-1] if months else None
+    result = salary_mod.compute_slips(inputs, month) if month else {'slips': [], 'needs_role': []}
+    settings = salary_mod.load_settings()
+    staff = sorted({s['employee'] for s in result['slips']} | set(result['needs_role'])
+                   | {n for n, r in settings['roles'].items() if r != 'Not staff'})
+    charts = salary_mod.load_charts().get(month, {}) if month else {}
+    return {
+        'month': month, 'months': months, 'slips': result['slips'], 'needs_role': result['needs_role'],
+        'summary': salary_mod.summary(result), 'staff': staff,
+        'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
+        'salaries': settings['salaries'], 'role_names': salary_mod.ROLES, 'group_weights': salary_mod.GROUP_WEIGHTS,
+        'groups': [{'code': c, 'name': n, 'kn': k} for c, n, k in salary_mod.GROUPS],
+        'incident_types': salary_mod.INCIDENT_TYPES, 'rating_keys': salary_mod.RATING_KEYS,
+        'incidents': sorted([r for r in salary_mod.load_incidents() if r.get('month') == month],
+                            key=lambda r: (r['date'], r['logged_at']), reverse=True),
+        'ratings': salary_mod.load_ratings().get(month, {}) if month else {},
+        'charts': {e: {k: v for k, v in c.items() if k != 'rows'} for e, c in charts.items()},
+    }
+
+
+@app.route('/api/salary')
+@requires_auth
+def api_salary():
+    if _salary_inputs['v'] is None and get_cached_data()[0] is None:
+        return jsonify({'error': 'No data ingested yet.'}), 400
+    return jsonify(_salary_payload(request.args.get('month')))
+
+
+def _json_body():
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+@app.route('/api/salary/settings', methods=['POST'])
+@requires_auth
+def api_salary_settings():
+    b = _json_body()
+    _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'))
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries') if b.get(k)))
+    return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/incident', methods=['POST'])
+@requires_auth
+def api_salary_incident():
+    b = _json_body()
+    if b.get('delete'):
+        if not salary_mod.delete_incident(str(b['delete'])):
+            return jsonify({'error': 'That entry was already removed.'}), 404
+    else:
+        _, err = salary_mod.add_incident(b.get('date'), b.get('employee'), b.get('type'), b.get('note'))
+        if err:
+            return jsonify({'error': err}), 400
+    return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/rating', methods=['POST'])
+@requires_auth
+def api_salary_rating():
+    b = _json_body()
+    err = salary_mod.save_rating(b.get('month'), b.get('employee'), b.get('ratings'))
+    if err:
+        return jsonify({'error': err}), 400
+    return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/chart', methods=['POST'])
+@requires_auth
+def api_salary_chart():
+    month, employee = request.form.get('month'), request.form.get('employee')
+    if request.form.get('delete'):
+        salary_mod.delete_chart(month, employee)
+        return jsonify(_salary_payload(month))
+    f = request.files.get('file')
+    if not f or not f.filename.lower().endswith('.xlsx'):
+        return jsonify({'error': 'Choose the Performance Chart .xlsx file.'}), 400
+    data = f.read()
+    if len(data) > 5 * 1024 * 1024:
+        return jsonify({'error': 'That file is too big for a Performance Chart.'}), 400
+    _, err = salary_mod.save_chart(data, f.filename, month, employee)
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Performance chart uploaded: %s %s', month, employee)
+    return jsonify(_salary_payload(month))
 
 
 @app.route('/api/ask', methods=['POST'])
