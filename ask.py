@@ -148,9 +148,21 @@ Rules:
   totals) - e.g. "who bought X", "sales history of X" - call
   get_product_patient_history and show the buyers (name, mobile, date, qty,
   amount) alongside any aggregate figures from get_product.
-- If a question is about thin/negative purchase margins, loss-making
-  purchases, or "party issues" with a supplier, use
-  get_thin_margin_purchases (all-history, not just the latest month).
+- DISTRIBUTOR / PARTY ISSUES - the owner's own definition, ALWAYS apply it:
+  when a question asks about the "issues", "problems", "trouble",
+  "complaints", "ತೊಂದರೆ" (tondare) or "ಸಮಸ್ಯೆ" (samasye) of a distributor /
+  supplier / party, it means exactly these four checks for that party - the
+  same as the dashboard's Issues tab: (1) PTR higher than MRP, (2) MRP
+  variance, (3) scheme gaps (free quantity lower than the party usually
+  gives), (4) discount gaps (discount lower than usual). Call
+  get_distributor_issues with the party's name and report ALL FOUR, saying
+  plainly when one is clean ("no PTR-above-MRP bills"), with the rupee impact
+  where given. It covers the latest month unless the owner names a month or
+  asks about all months (month='all'). If the name matches several parties,
+  report each separately. Do not swap in other checks for "issues".
+- If a question is about thin/negative purchase margins or loss-making
+  purchases (not "issues" - see above), use get_thin_margin_purchases
+  (all-history, not just the latest month).
   A supplier with several flagged lines across different products is a
   pricing pattern with that party - flag it as such. Never guess whether a
   specific flagged line is a data-entry mistake or a genuine supplier
@@ -610,6 +622,8 @@ def selftest():
         ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
+        ('get_distributor_issues', {'supplier': 'Kapila', 'n': 3}),
+        ('get_distributor_issues', {'supplier': 'drk', 'month': 'all', 'n': 3}),
         ('get_optimum_stock', {'n': 5}),
         ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
         ('get_refill_due', {'n': 5}),

@@ -26,6 +26,7 @@ separate shubhadahealth.com system (see that function's docstring) - never
 fetched live (no stored credentials for that site), only what's been
 manually exported and dropped in data/employee_targets/.
 """
+import difflib
 import hashlib
 import json
 import re
@@ -381,9 +382,10 @@ def get_optimum_stock(branch=None, product=None, n=20):
 
 
 def get_purchase_issues(n=10):
-    """Latest-month purchase-entry problems and supplier-terms slippage:
-    PTR-above-MRP entries, scheme (free-goods) shortfalls, and discount
-    shortfalls - counts plus the top few by impact. Supplier names only."""
+    """Latest-month purchase-entry problems and supplier-terms slippage
+    ACROSS ALL suppliers: PTR-above-MRP entries, scheme (free-goods)
+    shortfalls, and discount shortfalls - counts plus the top few by impact.
+    For ONE party's issues use get_distributor_issues instead."""
     _, p = _load()
     month = _latest_month()
     ptr_high, mrp_missing, _gifts, variance = rk.build_purchase_errors(p, month)
@@ -400,6 +402,147 @@ def get_purchase_issues(n=10):
                               'top': _records(scheme.head(n), ['Supplier', 'Product', 'Shortfall_Qty'])},
         'discount_shortfalls': {'count': len(disc),
                                 'top': _records(disc.head(n), ['Supplier', 'Product', 'Disc_Gap_pct_pts', 'Value_Lost_Approx'])},
+    })
+
+
+# The owner's definition (2026-10-10): a distributor's / party's "issues",
+# "problems" or "ತೊಂದರೆ" mean exactly these four checks for that party - the
+# same four as the dashboard's Issues tab. Thin margins are a separate topic
+# (get_thin_margin_purchases).
+DISTRIBUTOR_ISSUE_TYPES = ['PTR higher than MRP', 'MRP variance', 'Scheme gaps', 'Discount gaps']
+_MAX_PARTIES = 4
+
+
+def _match_suppliers(name, purch):
+    """Supplier names containing `name`, ignoring case, spaces and
+    punctuation ('drk', 'Kapila'). Failing that, names that START almost the
+    same way - speech-to-text and typing misspell party names ('kapilla
+    medicals' -> KAPILA MEDICAL AGENCIES). Else ([], closest spellings)."""
+    names = sorted(set(purch['Supplier'].dropna().astype(str).str.strip()) - {''})
+    norm = lambda x: re.sub(r'[^a-z0-9]', '', str(x).lower())
+    key = norm(name or '')
+    if not key:
+        return [], []
+    hits = [n for n in names if key in norm(n)]
+    if hits:
+        return hits, []
+    scored = sorted(((difflib.SequenceMatcher(None, key, norm(n)[:len(key) + 2]).ratio(), n) for n in names),
+                    reverse=True)
+    near = [n for score, n in scored if score >= 0.8]
+    if near:
+        return near, []
+    return [], [n for _, n in scored[:5]]
+
+
+def get_distributor_issues(supplier, month=None, n=10):
+    """ALL the 'issues' / 'problems' / 'trouble' / ತೊಂದರೆ (tondare) / ಸಮಸ್ಯೆ
+    for ONE distributor (party / supplier) - the owner's own definition, the
+    same four checks as the dashboard's Issues tab: (1) PTR higher than MRP,
+    (2) MRP variance, (3) scheme gaps - free quantity lower than that party
+    usually gives, (4) discount gaps - discount lower than that party usually
+    gives. `supplier` = the party's name or part of it ('Kapila', 'DRK'); if
+    it matches several parties each is reported separately. `month` =
+    'YYYY-MM', or 'all' for every month; omit for the latest month. PTR,
+    scheme and discount are checked per month (scheme/discount against that
+    party's own usual terms); MRP variance is all-history, for products this
+    party supplied. Each check is always listed, with count 0 when clean, plus
+    the rupee impact where it can be worked out and who entered the bill."""
+    s, p = _load()
+    parties, close = _match_suppliers(supplier, p)
+    if not parties:
+        return _guard_no_pii({'supplier_searched': supplier, 'found': False,
+                              'closest_party_names': close,
+                              'hint': 'no party by that name - ask the owner which of the closest names they mean'})
+    if len(parties) > _MAX_PARTIES:
+        return _guard_no_pii({'supplier_searched': supplier, 'found': True, 'too_many_matches': parties[:15],
+                              'hint': 'several parties match - ask the owner which one'})
+
+    operating = sorted(s['Calendar_Month'].unique())
+    if month in (None, '', 'latest'):
+        months = [operating[-1]]
+    elif str(month).lower() == 'all':
+        months = operating
+    elif month in operating:
+        months = [month]
+    else:
+        return _guard_no_pii({'error': f'no data for month {month!r}', 'months_available': operating})
+
+    created_col = rk.find_col(p, rk.CREATED_BY_CANDIDATES)
+    ptr_parts, scheme_parts, disc_parts = [], [], []
+    for m in months:
+        ptr_high, _missing, _gifts, variance = rk.build_purchase_errors(p, m)
+        scheme, _ = rk.build_scheme_consistency(p, m)
+        disc, _ = rk.build_discount_consistency(p, m)
+        ptr_parts.append(ptr_high)
+        scheme_parts.append(scheme)
+        disc_parts.append(disc)
+    ptr_all = pd.concat(ptr_parts, ignore_index=True)
+    scheme_all = pd.concat(scheme_parts, ignore_index=True)
+    disc_all = pd.concat(disc_parts, ignore_index=True)
+    variance_products = set(variance['Product'])  # all-history; same for every month
+
+    def rows(df, cols):
+        out = df.copy()
+        if 'Date' in out.columns:
+            out['Date'] = pd.to_datetime(out['Date'], format='mixed').dt.strftime('%Y-%m-%d')
+        if created_col and created_col in out.columns:
+            out = out.rename(columns={created_col: 'Entered_By'})
+        return _records(out.head(int(n)), cols)
+
+    reports = []
+    for party in parties:
+        ptr = ptr_all[ptr_all['Supplier'].astype(str).str.strip() == party].copy()
+        ptr['Extra_Paid'] = (ptr['Excess'] * ptr['Qty']).round(2)
+        ptr = ptr.sort_values('Extra_Paid', ascending=False).rename(columns={'Sale Rate': 'PTR'})
+
+        sch = scheme_all[scheme_all['Supplier'].astype(str).str.strip() == party].copy()
+        sch['Free_Goods_Missed_Rs'] = (sch['Shortfall_Qty'].clip(lower=0) * sch['Sale Rate']).round(2)
+        sch = sch.sort_values('Free_Goods_Missed_Rs', ascending=False).rename(
+            columns={'FreeRatio': 'Free_Ratio_Got', 'Typical_Ratio': 'Free_Ratio_Usual'})
+
+        dsc = disc_all[disc_all['Supplier'].astype(str).str.strip() == party].copy()
+        dsc = dsc.sort_values('Value_Lost_Approx', ascending=False).rename(
+            columns={'Disc Percentage': 'Disc_Pct_Got', 'Typical_Disc': 'Disc_Pct_Usual'})
+
+        # MRP variance is a product-level check; for this party, the variance
+        # products it supplied, with its own MRPs next to the overall range.
+        own = p[p['Supplier'].astype(str).str.strip() == party]
+        own = own[own['Product'].isin(variance_products) & (own['MRP'] > 0)]
+        mv = own.groupby('Product').agg(Party_MRP_Low=('MRP', 'min'), Party_MRP_High=('MRP', 'max'),
+                                        Party_Lines=('MRP', 'size')).reset_index()
+        mv = mv.merge(variance.rename(columns={'min': 'All_Bills_MRP_Low', 'max': 'All_Bills_MRP_High',
+                                               'ratio': 'High_Low_Ratio'})[
+            ['Product', 'All_Bills_MRP_Low', 'All_Bills_MRP_High', 'High_Low_Ratio']], on='Product')
+        mv['High_Low_Ratio'] = mv['High_Low_Ratio'].round(1)
+        mv = mv.sort_values('High_Low_Ratio', ascending=False)
+
+        counts = {'ptr_above_mrp': len(ptr), 'mrp_variance': len(mv),
+                  'scheme_gaps': len(sch), 'discount_gaps': len(dsc)}
+        reports.append({
+            'party': party,
+            'total_issues': sum(counts.values()),
+            'counts': counts,
+            'ptr_above_mrp': {
+                'count': len(ptr), 'extra_paid_over_mrp_rs': _round(ptr['Extra_Paid'].sum()),
+                'top': rows(ptr, ['Date', 'Inv.No', 'Product', 'Qty', 'MRP', 'PTR', 'Excess', 'Extra_Paid', 'Entered_By'])},
+            'mrp_variance': {
+                'count': len(mv), 'period': 'all history',
+                'top': _records(mv.head(int(n)), ['Product', 'Party_MRP_Low', 'Party_MRP_High', 'All_Bills_MRP_Low',
+                                                  'All_Bills_MRP_High', 'High_Low_Ratio', 'Party_Lines'])},
+            'scheme_gaps': {
+                'count': len(sch), 'free_goods_missed_rs_approx': _round(sch['Free_Goods_Missed_Rs'].sum()),
+                'top': rows(sch, ['Date', 'Inv.No', 'Product', 'Qty', 'Free Qty', 'Free_Ratio_Got', 'Free_Ratio_Usual',
+                                  'Shortfall_Qty', 'Free_Goods_Missed_Rs', 'Entered_By'])},
+            'discount_gaps': {
+                'count': len(dsc), 'discount_lost_rs_approx': _round(dsc['Value_Lost_Approx'].sum()),
+                'top': rows(dsc, ['Date', 'Inv.No', 'Product', 'Qty', 'Disc_Pct_Got', 'Disc_Pct_Usual',
+                                  'Disc_Gap_pct_pts', 'Value_Lost_Approx', 'Entered_By'])},
+        })
+    return _guard_no_pii({
+        'supplier_searched': supplier, 'found': True,
+        'period': months[0] if len(months) == 1 else f'{months[0]} to {months[-1]}',
+        'what_counts_as_an_issue': DISTRIBUTOR_ISSUE_TYPES,
+        'parties': reports,
     })
 
 
@@ -1114,6 +1257,10 @@ TOOLS = [
     {'name': 'get_purchase_issues', 'fn': get_purchase_issues,
      'description': get_purchase_issues.__doc__,
      'parameters': _schema({'n': {'type': 'integer'}})},
+    {'name': 'get_distributor_issues', 'fn': get_distributor_issues,
+     'description': get_distributor_issues.__doc__,
+     'parameters': _schema({'supplier': {'type': 'string'}, 'month': {'type': 'string'},
+                            'n': {'type': 'integer'}}, ['supplier'])},
     {'name': 'get_thin_margin_purchases', 'fn': get_thin_margin_purchases,
      'description': get_thin_margin_purchases.__doc__,
      'parameters': _schema({'supplier': {'type': 'string'}, 'n': {'type': 'integer'}})},
