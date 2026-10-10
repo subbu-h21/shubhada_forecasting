@@ -272,6 +272,12 @@ EMPLOYEE_ALIASES = {
     'Narendra3': 'Narendra Devadiga',
     'Parashuram (Prajwal)': 'Parashuram T Naik',
     'G Hegde': 'Ganesh Hegde',
+    # Confirmed same person by the owner, 2026-10-10 (spellings found by the salary calculator)
+    'Akshataa': 'Akshata Naik',
+    'Raghavendra.': 'Raghavendra S Palankar',
+    'Abhishek Seetaram Naik000000': 'Abhishek Seetaram Naik',
+    'Narend Devadiga': 'Narendra Devadiga',
+    'Sharath Nagendra Naik A': 'Sharath Nagendra Naik',
 }
 
 
