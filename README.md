@@ -91,15 +91,16 @@ For access away from your home network, this is designed to be used over
 Monthly slips built from the rules agreed in the two Salary Review rounds
 (Oct 2026) - the rules and their reasons are at the top of `salary.py`.
 Salary = Fixed 35% + Performance 45% + Discipline 20% of each person's base;
-performance is against their own best month, discipline loses ₹50 per late
-arrival / long lunch after 3 free ones (early exit counts half). Until the
+performance is against their own best month, discipline loses 5% per late
+arrival / long break after 3 free ones (early exit counts half). Until the
 trial month in Setup → Rules, nobody is paid below their base.
 
 Each month:
 1. **Setup** (once, then when pay changes): base salary and role per person.
-   Tick **Half-day** for half-day / contract staff and enter their agreed
-   shift - they're judged against it (no lunch counted); until it's entered
-   no late/early is counted for them.
+   Enter each person's agreed timings (start, break out, break back, end) -
+   late / long break / early are judged against them. Tick **Half-day** for
+   half-day / contract staff: only start and end, no break counted, and
+   nothing is counted until their shift is entered.
 2. **Log**, on the day it happens: wrong item, cash short, near-expiry left
    on a rack, complaints, compliments, covering for a colleague, unplanned
    leave. Late arrival, lunch and exit are read from the bills automatically.
