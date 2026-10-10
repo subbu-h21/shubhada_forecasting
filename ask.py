@@ -440,7 +440,7 @@ def _gemini_answer(question, verbose=False, history=None, voice=False, speak=Fal
 # official `openai` SDK is pointed at OpenRouter's base_url instead of
 # OpenAI's. Default backend.
 # ---------------------------------------------------------------------------
-def _openrouter_answer(question, verbose=False, history=None, voice=False, speak=False):
+def _openrouter_answer(question, verbose=False, history=None, voice=False, speak=False, cost_out=None):
     from openai import APIStatusError, OpenAI
 
     api_key = os.environ.get('OPENROUTER_API_KEY')
@@ -476,14 +476,19 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     messages.append({'role': 'user', 'content': T.scrub_question(question)})
 
     def complete(model, with_tools):
-        kwargs = {'model': model, 'messages': messages}
+        # usage.include makes OpenRouter report each call's actual charge,
+        # summed into cost_out so a voice conversation can show what it cost.
+        kwargs = {'model': model, 'messages': messages, 'extra_body': {'usage': {'include': True}}}
         if with_tools:
             kwargs['tools'] = tools
         try:
-            return client.chat.completions.create(**kwargs)
+            resp = client.chat.completions.create(**kwargs)
         except APIStatusError as e:
             detail = e.body if getattr(e, 'body', None) is not None else str(e)
             raise RuntimeError(f'OpenRouter API error {e.status_code}: {detail}') from None
+        if cost_out is not None:
+            cost_out['usd'] = cost_out.get('usd', 0.0) + usage_cost(resp.usage)
+        return resp
 
     for _ in range(MAX_STEPS):
         resp = complete(fast_model, with_tools=True)
@@ -531,7 +536,19 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     return answer or "Sorry, I couldn't generate an answer for that - try rephrasing the question."
 
 
-def ask(question, verbose=False, history=None, voice=False, speak=False):
+def usage_cost(usage):
+    """OpenRouter's reported charge (USD) for one call, from its usage block;
+    0 when absent. Works on an SDK usage object or a plain dict."""
+    if usage is None:
+        return 0.0
+    cost = usage.get('cost') if isinstance(usage, dict) else getattr(usage, 'cost', None)
+    try:
+        return float(cost or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def ask(question, verbose=False, history=None, voice=False, speak=False, cost_out=None):
     """Answer one question. `history` is earlier [{'question','answer'}] pairs
     from the same conversation (for follow-ups). `voice` = GPT-Live mode
     (short English facts for the live voice to rephrase); `speak` =
@@ -539,7 +556,8 @@ def ask(question, verbose=False, history=None, voice=False, speak=False):
     language). Both withhold patient-identity tools."""
     backend = os.environ.get('ASK_BACKEND', 'openrouter')
     if backend == 'openrouter':
-        return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
+        return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak,
+                                  cost_out=cost_out)
     if backend == 'vertex':
         return _gemini_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
     raise RuntimeError(f"Unknown ASK_BACKEND '{backend}' - use 'openrouter' or 'vertex'.")

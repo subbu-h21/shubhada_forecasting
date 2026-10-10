@@ -127,7 +127,7 @@
     <span class="ex" onclick="askExample(this)">Is the wholesale channel worth it?</span>
     <span class="ex" onclick="askExample(this)">What's dead stock, biggest value first?</span>
     <span class="ex" onclick="askExample(this)">Who are my top 10 customers?</span>
-    <br>Tap &#128483; to record a question and hear the answer<span class="live-only">,
+    <br>Tap &#128483; and just talk - it answers out loud<span class="live-only">,
     <br>or &#127908; for a live conversation</span>.
   </div>
 </div>
@@ -141,7 +141,7 @@
 </div>
 
 <form id="ask-form">
-  <button type="button" id="ptt-btn" title="Record a question" aria-label="Record a question">&#128483;</button>
+  <button type="button" id="ptt-btn" title="Talk (hands-free)" aria-label="Talk (hands-free)">&#128483;</button>
   <button type="button" id="mic-btn" title="Talk" aria-label="Talk">&#127908;</button>
   <input type="text" id="question" placeholder="Ask a question…" autocomplete="off">
   <button type="submit" id="send-btn">Send</button>
@@ -261,7 +261,7 @@ function tickVoice(v) {
 
 async function startVoice() {
   if (voice) return;
-  if (ptt) { addMsg('Finish the recorded question first.', 'error'); return; }
+  if (talk) { addMsg('End the conversation first (tap End).', 'error'); return; }
   if (!voiceSupported()) {
     addMsg('Voice cannot use the microphone on this address, because it is not a secure (https) page. '
       + 'It works when this page is opened on the PC itself, or through an https address.', 'error');
@@ -478,8 +478,10 @@ async function handleDelegation(v, id) {
 }
 
 micBtn.addEventListener('click', () => { if (voice) endVoice(); else startVoice(); });
-endBtn.addEventListener('click', () => endVoice());
+// The voice bar's End / Mute serve whichever voice mode is running.
+endBtn.addEventListener('click', () => { if (talk) endTalk(); else endVoice(); });
 muteBtn.addEventListener('click', () => {
+  if (talk) { toggleTalkMute(); return; }
   const v = voice;
   if (!v || !v.mic) return;
   v.muted = !v.muted;
@@ -487,44 +489,53 @@ muteBtn.addEventListener('click', () => {
   muteBtn.textContent = v.muted ? 'Unmute' : 'Mute';
   setVoiceStatus(v.muted ? 'Muted' : 'Listening…');
 });
-window.addEventListener('pagehide', () => endVoice());
+window.addEventListener('pagehide', () => { endVoice(); endTalk(); });
 
 // ---------------------------------------------------------------------------
-// Push to talk (cheaper) - record one question, then speech-to-text -> the
-// same /api/ask (speak: true, answer in the owner's language) ->
-// text-to-speech, read out sentence by sentence. Billed only for the seconds
-// spoken and read out - nothing is open in between.
+// 🗣 Hands-free conversation - the cheaper alternative to GPT-Live (🎤), built
+// from speech-to-text + the same assistant + text-to-speech. Tap once and just
+// talk:
+//  - the phone itself listens and notices when you start and stop speaking -
+//    nothing is sent, or billed, while you are silent;
+//  - each stretch of speech goes to speech-to-text, then a tiny check that it
+//    was said TO the assistant (counter talk is ignored and doesn't use up the
+//    question limit), then the same /api/ask as a typed question (speak: true);
+//  - the answer is read out sentence by sentence; start talking to interrupt.
+// The running cost shown is OpenRouter's actual charge for each step.
 // ---------------------------------------------------------------------------
 const pttBtn = document.getElementById('ptt-btn');
-const PTT_MAX_SECONDS = 45;
-const PTT_RATE = 16000;            // speech-to-text needs no more than this
 const PTT_CHUNK_CHARS = 240;       // read out in pieces so the first starts sooner
 const PTT_FIRST_CHARS = 80;        // ...and the very first piece kept short
-const pttHistory = [];             // earlier Q&A, for follow-ups like "and last month?"
+const TALK_RATE = 16000;           // speech-to-text needs no more than this
+const TALK_PREROLL_MS = 700;       // sound kept from just before speech is noticed
+const TALK_START_MS = 200;         // this much loud sound = you started speaking
+const TALK_START_MS_OVER_ANSWER = 400;  // stricter while an answer plays (its own echo)
+const TALK_END_SILENCE_MS = 900;   // this much quiet = you finished
+const TALK_MIN_SPEECH_MS = 450;    // shorter blips (a cough, a click) are ignored
+const TALK_MAX_UTTERANCE_MS = 30000;   // a very long stretch is sent anyway
+const TALK_IDLE_END_MS = 3 * 60000;    // the conversation ends after 3 quiet minutes
+const TALK_COST_TRIES = 6;         // the voice's charge is only known a few seconds later
 const player = new Audio();
 player.setAttribute('playsinline', '');
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
-let ptt = null;  // { stage: 'recording' | 'working' | 'speaking', ... } or null
+let talk = null;  // the running conversation, or null
 
-function setPttButton(stage) {
-  const active = stage === 'recording' || stage === 'speaking';
+function setPttButton(active) {
   pttBtn.classList.toggle('live', active);
-  pttBtn.disabled = stage === 'working';
   pttBtn.textContent = active ? '■' : '🗣';
-  pttBtn.title = stage === 'recording' ? 'Stop and send' : stage === 'speaking' ? 'Stop speaking'
-    : stage === 'working' ? 'Working…' : 'Record a question';
+  pttBtn.title = active ? 'End conversation' : 'Talk (hands-free)';
 }
 
 // Phones only let a page play sound after a tap. Playing a silent clip
-// during the tap lets the answer play seconds later.
+// during the tap lets answers play later.
 function unlockPlayer() {
   try { player.src = SILENT_WAV; player.play().catch(() => {}); } catch (e) { /* best effort */ }
 }
 
-async function authPost(url, body, contentType) {
+async function authPost(url, body, contentType, extraHeaders) {
   const res = await fetch(url, {
     method: 'POST', body,
-    headers: { 'Content-Type': contentType, 'X-Session-Token': getToken() },
+    headers: { 'Content-Type': contentType, 'X-Session-Token': getToken(), ...(extraHeaders || {}) },
   });
   if (res.status === 401) {
     sessionStorage.removeItem(SESSION_TOKEN_KEY);
@@ -533,14 +544,14 @@ async function authPost(url, body, contentType) {
   return res;
 }
 
-async function authPostJson(url, body, contentType) {
-  const res = await authPost(url, body, contentType);
+async function authPostJson(url, body, contentType, extraHeaders) {
+  const res = await authPost(url, body, contentType, extraHeaders);
   const out = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(out.error || ('Server error ' + res.status));
   return out;
 }
 
-async function pttStart() {
+async function startTalk() {
   if (voice) { addMsg('End the live conversation first (tap End).', 'error'); return; }
   if (!voiceSupported()) {
     addMsg('Voice cannot use the microphone on this address, because it is not a secure (https) page. '
@@ -548,110 +559,252 @@ async function pttStart() {
     return;
   }
   unlockPlayer();
-  const p = ptt = { stage: 'working', stopped: false, onStop: null };
-  setPttButton('working');
+  const t = talk = {
+    ended: false, muted: false, started: Date.now(), lastActivity: Date.now(), ticks: 0, flashUntil: 0,
+    history: [], lastAnswer: '', qseq: 0, busy: 0, speaking: false, stopSpeaking: false, onStop: null,
+    utt: null, preroll: [], loudMs: 0, noise: 0.004, cost: 0, costIds: [], costTries: {}, costBusy: false,
+  };
+  setPttButton(true);
+  voiceBar.style.display = 'flex';
+  muteBtn.textContent = 'Mute';
+  setVoiceStatus('Starting…');
+  voiceMeta.textContent = '';
   try {
-    p.stream = await navigator.mediaDevices.getUserMedia({
+    t.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
   } catch (e) {
-    ptt = null;
-    setPttButton('idle');
-    addMsg(e && e.name === 'NotAllowedError'
+    endTalk(e && e.name === 'NotAllowedError'
       ? 'Microphone permission was refused. Allow the microphone for this page and try again.'
-      : 'Could not use the microphone: ' + ((e && e.message) || e), 'error');
+      : 'Could not use the microphone: ' + ((e && e.message) || e));
     return;
   }
-  try { p.ctx = new AudioContext({ sampleRate: PTT_RATE }); } catch (e) { p.ctx = new AudioContext(); }
-  p.src = p.ctx.createMediaStreamSource(p.stream);
-  p.proc = p.ctx.createScriptProcessor(4096, 1, 1);
-  p.chunks = [];
-  p.proc.onaudioprocess = (e) => p.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  p.src.connect(p.proc);
-  p.proc.connect(p.ctx.destination);  // outputs silence; needed for the processor to run
-  p.started = Date.now();
-  p.note = addMsg('Recording… tap ■ to send', 'pending');
-  p.tick = setInterval(() => { p.note.textContent = 'Recording ' + mmss(Date.now() - p.started) + ' … tap ■ to send'; }, 500);
-  p.limit = setTimeout(() => pttFinishRecording(), PTT_MAX_SECONDS * 1000);
-  p.stage = 'recording';
-  setPttButton('recording');
+  if (t.ended) { t.stream.getTracks().forEach(tr => tr.stop()); return; }
+  try { t.ctx = new AudioContext({ sampleRate: TALK_RATE }); } catch (e) { t.ctx = new AudioContext(); }
+  t.rate = t.ctx.sampleRate;
+  const size = t.rate > 24000 ? 4096 : 1024;   // ~64-85 ms of sound per check
+  t.frameMs = size / t.rate * 1000;
+  t.src = t.ctx.createMediaStreamSource(t.stream);
+  t.proc = t.ctx.createScriptProcessor(size, 1, 1);
+  t.proc.onaudioprocess = (e) => talkFrame(t, new Float32Array(e.inputBuffer.getChannelData(0)));
+  t.src.connect(t.proc);
+  t.proc.connect(t.ctx.destination);  // outputs silence; needed for the processor to run
+  t.timer = setInterval(() => talkTick(t), 1000);
+  setVoiceStatus('Listening - just talk');
+  addNote('Conversation on - ask, then pause. Talk over an answer to interrupt it. Tap End to stop.');
 }
 
-async function pttFinishRecording() {
-  const p = ptt;
-  if (!p || p.stage !== 'recording') return;
-  clearInterval(p.tick);
-  clearTimeout(p.limit);
-  p.stage = 'working';
-  setPttButton('working');
-  try { p.src.disconnect(); p.proc.disconnect(); } catch (e) { /* already disconnected */ }
-  p.stream.getTracks().forEach(t => t.stop());
-  const rate = p.ctx.sampleRate;
-  p.ctx.close().catch(() => {});
-  p.note.remove();
-  const samples = flattenChunks(p.chunks);
-  if (samples.length < rate * 0.5) {
-    addNote('That was too short - tap 🗣 and ask again.');
-    pttDone();
+function talkIdleStatus(t) {
+  return t.muted ? 'Muted' : t.busy ? 'Checking the reckoner…' : 'Listening - just talk';
+}
+
+function talkFlash(t, text) {
+  t.flashUntil = Date.now() + 2500;
+  setVoiceStatus(text);
+}
+
+// Runs on the phone for every ~64 ms of microphone sound: notices when you
+// start speaking (keeping a moment of sound from just before) and when you've
+// gone quiet, then sends that stretch.
+function talkFrame(t, frame) {
+  if (t.ended) return;
+  let sum = 0;
+  for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+  const rms = Math.sqrt(sum / frame.length);
+  if (t.muted) { t.preroll = []; t.loudMs = 0; return; }
+  const startLevel = Math.max(t.noise * 3, 0.012);
+  const endLevel = Math.max(t.noise * 2, 0.008);
+  if (!t.utt) {
+    if (rms < startLevel) t.noise = t.noise * 0.95 + rms * 0.05;  // learn the room's background level
+    t.preroll.push(frame);
+    while (t.preroll.length * t.frameMs > TALK_PREROLL_MS) t.preroll.shift();
+    t.loudMs = rms > startLevel ? t.loudMs + t.frameMs : 0;
+    if (t.loudMs >= (t.speaking ? TALK_START_MS_OVER_ANSWER : TALK_START_MS)) {
+      t.utt = { frames: t.preroll.slice(), voicedMs: t.loudMs, quietMs: 0, startedAt: Date.now() };
+      t.preroll = [];
+      t.loudMs = 0;
+      t.lastActivity = Date.now();
+      if (t.speaking) talkStopSpeaking(t);  // you talked over the answer
+      setVoiceStatus('Hearing you…');
+    }
     return;
   }
-  try {
-    await pttAnswer(encodeWav(resampleLinear(samples, rate, PTT_RATE), PTT_RATE), p);
-  } finally {
-    pttDone();
+  t.utt.frames.push(frame);
+  if (rms >= endLevel) { t.utt.quietMs = 0; t.utt.voicedMs += t.frameMs; } else { t.utt.quietMs += t.frameMs; }
+  if (t.utt.quietMs >= TALK_END_SILENCE_MS || Date.now() - t.utt.startedAt >= TALK_MAX_UTTERANCE_MS) {
+    const utt = t.utt;
+    t.utt = null;
+    t.lastActivity = Date.now();
+    if (utt.voicedMs < TALK_MIN_SPEECH_MS) { setVoiceStatus(talkIdleStatus(t)); return; }
+    talkAnswer(t, encodeWav(resampleLinear(flattenChunks(utt.frames), t.rate, TALK_RATE), TALK_RATE));
   }
 }
 
-async function pttAnswer(wav, p) {
-  let pending = addMsg('Listening to your question…', 'pending');
+async function talkAnswer(t, wav) {
+  t.busy += 1;
+  if (!t.speaking && !t.utt) setVoiceStatus('Understanding…');
+  let pending = null;
   try {
-    const heard = await authPostJson('/api/speech/transcribe', wav, 'audio/wav');
+    const heard = await authPostJson('/api/speech/transcribe?gate=1', wav, 'audio/wav',
+      { 'X-Voice-Context': encodeURIComponent(t.lastAnswer.slice(-400)) });
+    talkAddCost(t, heard.cost);
     const question = (heard.text || '').trim();
-    pending.remove();
-    if (!question) { addMsg("Couldn't hear anything clearly. Please try again.", 'error'); return; }
-    addMsg(question, 'voice-user');
-    pending = addMsg('Checking the reckoner…', 'pending');
-    const out = await authPostJson('/api/ask',
-      JSON.stringify({ question, history: pttHistory.slice(-VOICE_HISTORY_TURNS), speak: true }), 'application/json');
-    pending.remove();
-    const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
-    pttHistory.push({ question, answer });
-    addMsg(answer, 'assistant');
-    if (!p.stopped) await pttSpeak(answer, p);
-  } catch (e) {
-    pending.remove();
-    addMsg((e && e.message) || String(e), 'error');
-  }
-}
-
-// Read the answer aloud. Every piece is requested at once (each takes ~4-9s
-// to create), then played in order - so later pieces are ready by the time
-// the earlier ones finish, with no silent gap between sentences.
-async function pttSpeak(text, p) {
-  p.stage = 'speaking';
-  setPttButton('speaking');
-  const parts = speechChunks(text, PTT_CHUNK_CHARS);
-  const audio = parts.map((part) => { const req = fetchSpeech(part); req.catch(() => {}); return req; });
-  for (let i = 0; i < parts.length; i++) {
-    let blob;
-    try {
-      blob = await audio[i];
-    } catch (e) {
-      if (p.stopped) return;
-      addNote("The online voice didn't respond - using the phone's own voice.");
-      await speakWithBrowser(parts.slice(i).join(' '), p);
+    if (t.ended) return;
+    if (!question || heard.addressed === false) {
+      if (!t.speaking && !t.utt) talkFlash(t, question ? 'Ignored - not said to me' : "Didn't catch that");
       return;
     }
-    if (p.stopped) return;
-    await playBlob(blob, p);
-    if (p.stopped) return;
+    const qid = ++t.qseq;  // only the newest question is read out
+    addMsg(question, 'voice-user');
+    pending = addMsg('Checking the reckoner…', 'pending');
+    if (!t.speaking && !t.utt) setVoiceStatus('Checking the reckoner…');
+    const out = await authPostJson('/api/ask',
+      JSON.stringify({ question, history: t.history.slice(-VOICE_HISTORY_TURNS), speak: true }), 'application/json');
+    pending.remove();
+    pending = null;
+    talkAddCost(t, out.cost);
+    const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
+    t.history.push({ question, answer });
+    t.lastAnswer = answer;
+    addMsg(answer, 'assistant');
+    if (t.ended || qid !== t.qseq || t.utt) return;  // a newer question, or you're talking now
+    await talkSpeak(t, answer);
+  } catch (e) {
+    if (pending) pending.remove();
+    if (!t.ended) addMsg((e && e.message) || String(e), 'error');
+    if (/Session expired/.test(String(e && e.message))) endTalk();
+  } finally {
+    t.busy -= 1;
+    t.lastActivity = Date.now();
+    if (!t.ended && !t.speaking && !t.utt && Date.now() > t.flashUntil) setVoiceStatus(talkIdleStatus(t));
   }
+}
+
+// Read the answer aloud. Every piece is requested at once so later ones are
+// ready in time; each one's charge is recorded even if you interrupt it.
+async function talkSpeak(t, text) {
+  t.speaking = true;
+  t.stopSpeaking = false;
+  setVoiceStatus('Speaking… (talk to interrupt)');
+  const parts = speechChunks(text, PTT_CHUNK_CHARS);
+  const audio = parts.map((part) => {
+    const req = fetchSpeech(part);
+    req.then((r) => { if (r.genId) t.costIds.push(r.genId); }, () => {});
+    return req;
+  });
+  try {
+    for (let i = 0; i < parts.length; i++) {
+      let res;
+      try {
+        res = await audio[i];
+      } catch (e) {
+        if (t.stopSpeaking || t.ended) return;
+        addNote("The online voice didn't respond - using the phone's own voice.");
+        await speakWithBrowser(parts.slice(i).join(' '), t);
+        return;
+      }
+      if (t.stopSpeaking || t.ended) return;
+      await playBlob(res.blob, t);
+      if (t.stopSpeaking || t.ended) return;
+    }
+  } finally {
+    t.speaking = false;
+    t.onStop = null;
+    t.lastActivity = Date.now();
+  }
+}
+
+function talkStopSpeaking(t) {
+  t.stopSpeaking = true;
+  if (t.onStop) t.onStop();
 }
 
 async function fetchSpeech(text) {
   const res = await authPost('/api/speech/tts', JSON.stringify({ text }), 'application/json');
   if (!res.ok) throw new Error('speech failed');
-  return res.blob();
+  return { blob: await res.blob(), genId: res.headers.get('X-Generation-Id') || '' };
 }
+
+// --- Running cost: OpenRouter's actual charges ------------------------------
+function talkAddCost(t, usd) {
+  if (typeof usd === 'number' && isFinite(usd)) t.cost += usd;
+}
+
+function talkCostText(t) {
+  // 4 decimals while tiny, so the first few hundredths of a cent don't read as $0.000
+  return '$' + t.cost.toFixed(t.cost < 0.01 ? 4 : 3) + (t.costIds.length ? '+' : '');
+}
+
+async function talkSettleCosts(t) {
+  if (!t.costIds.length || t.costBusy) return;
+  t.costBusy = true;
+  const ids = t.costIds.splice(0, 20);
+  const retry = (id) => {
+    t.costTries[id] = (t.costTries[id] || 0) + 1;
+    if (t.costTries[id] < TALK_COST_TRIES) t.costIds.push(id);
+  };
+  try {
+    const out = await authPostJson('/api/speech/costs', JSON.stringify({ ids }), 'application/json');
+    for (const id of ids) {
+      const c = out.costs ? out.costs[id] : null;
+      if (typeof c === 'number') talkAddCost(t, c); else retry(id);
+    }
+  } catch (e) {
+    ids.forEach(retry);
+  } finally {
+    t.costBusy = false;
+  }
+}
+
+function talkTick(t) {
+  if (t.ended) return;
+  t.ticks += 1;
+  voiceMeta.textContent = mmss(Date.now() - t.started) + ' · ' + talkCostText(t);
+  if (t.flashUntil && Date.now() > t.flashUntil) {
+    t.flashUntil = 0;
+    if (!t.utt && !t.speaking) setVoiceStatus(talkIdleStatus(t));
+  }
+  if (t.ticks % 5 === 0) talkSettleCosts(t);
+  if (!t.utt && !t.busy && !t.speaking && Date.now() - t.lastActivity > TALK_IDLE_END_MS) {
+    endTalk(null, 'The conversation ended after 3 quiet minutes. Tap 🗣 to start again.');
+  }
+}
+
+function toggleTalkMute() {
+  const t = talk;
+  if (!t) return;
+  t.muted = !t.muted;
+  if (t.stream) t.stream.getAudioTracks().forEach(tr => { tr.enabled = !t.muted; });
+  if (t.muted) t.utt = null;
+  muteBtn.textContent = t.muted ? 'Unmute' : 'Mute';
+  setVoiceStatus(talkIdleStatus(t));
+}
+
+async function endTalk(errorMsg, noteMsg) {
+  const t = talk;
+  if (!t || t.ended) return;
+  t.ended = true;
+  talk = null;
+  clearInterval(t.timer);
+  talkStopSpeaking(t);
+  try { if (t.src) t.src.disconnect(); if (t.proc) t.proc.disconnect(); } catch (e) { /* already disconnected */ }
+  if (t.stream) t.stream.getTracks().forEach(tr => tr.stop());
+  if (t.ctx) t.ctx.close().catch(() => {});
+  voiceBar.style.display = 'none';
+  setPttButton(false);
+  if (errorMsg) addMsg(errorMsg, 'error');
+  if (noteMsg) addNote(noteMsg);
+  if (!t.ctx) return;  // never got going
+  const length = mmss(Date.now() - t.started);
+  const summary = addNote('Conversation ended · ' + length + ' · cost ' + talkCostText(t));
+  // The voice's charges arrive a few seconds late - settle them, then update.
+  for (let i = 0; i < TALK_COST_TRIES && t.costIds.length; i++) {
+    await new Promise(r => setTimeout(r, 4000));
+    await talkSettleCosts(t);
+    summary.textContent = 'Conversation ended · ' + length + ' · cost ' + talkCostText(t);
+  }
+}
+
+pttBtn.addEventListener('click', () => { if (talk) endTalk(); else startTalk(); });
 
 function playBlob(blob, p) {
   return new Promise((resolve) => {
@@ -683,11 +836,6 @@ function speakWithBrowser(text, p) {
     p.onStop = () => { speechSynthesis.cancel(); resolve(); };
     speechSynthesis.speak(u);
   });
-}
-
-function pttDone() {
-  ptt = null;
-  setPttButton('idle');
 }
 
 // Split into sentence-sized pieces, the first kept short so it plays sooner.
@@ -747,15 +895,6 @@ function encodeWav(samples, rate) {
   return new Blob([buf], { type: 'audio/wav' });
 }
 
-pttBtn.addEventListener('click', () => {
-  if (!ptt) pttStart();
-  else if (ptt.stage === 'recording') pttFinishRecording();
-  else if (ptt.stage === 'speaking') { ptt.stopped = true; if (ptt.onStop) ptt.onStop(); }
-});
-window.addEventListener('pagehide', () => {
-  if (ptt && ptt.stream) ptt.stream.getTracks().forEach(t => t.stop());
-  if (ptt) { ptt.stopped = true; if (ptt.onStop) ptt.onStop(); }
-});
 </script>
 </body>
 </html>

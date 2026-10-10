@@ -18,6 +18,8 @@ import secrets
 import threading
 import time
 import traceback
+import urllib.parse
+import urllib.request
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -633,15 +635,16 @@ def api_ask():
                for h in history[-ask_mod.MAX_HISTORY_TURNS:] if isinstance(h, dict)]
     voice = body.get('voice') is True
     speak = body.get('speak') is True  # push-to-talk: answer is read aloud as-is
+    cost = {}  # filled with OpenRouter's reported charge for this answer (USD)
     try:
-        answer = ask_mod.ask(question, history=history, voice=voice, speak=speak)
+        answer = ask_mod.ask(question, history=history, voice=voice, speak=speak, cost_out=cost)
     except Exception as e:
         # Missing/bad API key, no network, model provider error, etc. - not a
         # bug in this server, so log it quietly and hand the reason to the
         # page rather than a generic 500.
         logger.warning('Ask failed for "%s": %s: %s', question, type(e).__name__, e)
         return jsonify({'error': f'Could not reach the model ({type(e).__name__}: {e}).'}), 502
-    return jsonify({'answer': answer})
+    return jsonify({'answer': answer, 'cost': cost.get('usd')})
 
 
 # The assistant's slow shared rollups (next-month forecast ~80s, profit,
@@ -805,6 +808,34 @@ def _pcm_to_wav(pcm, rate):
     return buf.getvalue()
 
 
+# Hands-free mode hears everything said near the phone, so each utterance is
+# screened before it becomes a paid question (and before it counts against
+# ask_limits): one tiny call to the fast model, ~$0.00004 and ~1s (tested
+# 2026-10-10 on English/Kannada questions vs counter talk). It fails OPEN - if
+# the check itself errors, the utterance is treated as a question, because
+# ignoring the owner is worse than answering chatter once.
+SPEECH_GATE_PROMPT = """\
+You screen speech picked up by a pharmacy owner's hands-free voice assistant
+(named suubbiii, also called subbi) in a busy shop. Decide whether this
+utterance was said TO the assistant: a question or request about the pharmacy
+business (sales, stock, profit, purchases, orders, suppliers, staff, customers,
+forecasts), a follow-up to the assistant's last answer, or addressing it by
+name. Background chatter, talking to a customer or colleague, and noise are
+NOT for the assistant. Plain acknowledgements (okay, yes, haan, thank you) are
+NOT for the assistant unless its last answer asked the owner a question. If
+unsure, answer YES. Reply with exactly YES or NO."""
+
+
+def _speech_gate(text, last_answer):
+    model = os.environ.get('OPENROUTER_MODEL_FAST', 'google/gemini-3.1-flash-lite')
+    user = (f"The assistant's last answer was: {last_answer}\n\n" if last_answer else '') + f'Utterance: {text}'
+    resp = _openrouter_client().chat.completions.create(
+        model=model, max_tokens=20, temperature=0, extra_body={'usage': {'include': True}},
+        messages=[{'role': 'system', 'content': SPEECH_GATE_PROMPT}, {'role': 'user', 'content': user}])
+    verdict = (resp.choices[0].message.content or '').strip().upper()
+    return not verdict.startswith('NO'), ask_mod.usage_cost(resp.usage)
+
+
 @app.route('/api/speech/transcribe', methods=['POST'])
 @requires_auth
 def api_speech_transcribe():
@@ -822,7 +853,19 @@ def api_speech_transcribe():
     except Exception as e:
         logger.warning('Speech-to-text failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not transcribe ({type(e).__name__}).'}), 502
-    return jsonify({'text': (getattr(result, 'text', '') or '').strip()})
+    text = (getattr(result, 'text', '') or '').strip()
+    cost = ask_mod.usage_cost(getattr(result, 'usage', None))
+    addressed = True
+    if request.args.get('gate') == '1' and text:
+        # The page sends the assistant's last answer (URL-encoded, as headers
+        # can't carry Kannada) so a follow-up like "and last month?" passes.
+        last_answer = urllib.parse.unquote(request.headers.get('X-Voice-Context', ''))[:600]
+        try:
+            addressed, gate_cost = _speech_gate(text, last_answer)
+            cost += gate_cost
+        except Exception as e:
+            logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
+    return jsonify({'text': text, 'addressed': addressed, 'cost': cost})
 
 
 @app.route('/api/speech/tts', methods=['POST'])
@@ -841,12 +884,37 @@ def api_speech_tts():
         logger.warning('Text-to-speech failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not create speech ({type(e).__name__}).'}), 502
     audio = result.content
+    # The speech endpoint doesn't return its cost; OpenRouter's generation id
+    # lets the page look it up a few seconds later (/api/speech/costs).
+    headers = {'X-Generation-Id': result.response.headers.get('x-generation-id', '')}
     if fmt == 'mp3':
-        return Response(audio, mimetype='audio/mpeg')
+        return Response(audio, mimetype='audio/mpeg', headers=headers)
     # e.g. 'audio/pcm;rate=24000;channels=1'
     ctype = result.response.headers.get('content-type', '')
     rate = next((int(p.split('=', 1)[1]) for p in ctype.split(';') if p.strip().startswith('rate=')), 24000)
-    return Response(_pcm_to_wav(audio, rate), mimetype='audio/wav')
+    return Response(_pcm_to_wav(audio, rate), mimetype='audio/wav', headers=headers)
+
+
+@app.route('/api/speech/costs', methods=['POST'])
+@requires_auth
+def api_speech_costs():
+    """Actual charges (USD) for earlier text-to-speech calls, by OpenRouter
+    generation id. OpenRouter only has them a few seconds after the call, so
+    an id it doesn't know yet comes back as null and the page asks again."""
+    body = request.get_json(force=True, silent=True) or {}
+    ids = [str(i) for i in (body.get('ids') or []) if isinstance(i, str) and i.startswith('gen-')][:20]
+    key = os.environ.get('OPENROUTER_API_KEY', '')
+    costs = {}
+    for gen_id in ids:
+        try:
+            req = urllib.request.Request(
+                'https://openrouter.ai/api/v1/generation?' + urllib.parse.urlencode({'id': gen_id}),
+                headers={'Authorization': f'Bearer {key}'})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                costs[gen_id] = float(json.loads(r.read())['data'].get('total_cost') or 0)
+        except Exception:
+            costs[gen_id] = None
+    return jsonify({'costs': costs})
 
 
 @app.route('/')

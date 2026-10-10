@@ -91,14 +91,24 @@ For access away from your home network, this is designed to be used over
 The Ask page has two voice buttons. Both answer from the same Ask the
 Reckoner assistant as typed questions, with patient lookups switched off.
 
-### 🗣 Push to talk (cheaper)
+### 🗣 Hands-free conversation (the cheaper alternative to 🎤)
 
-Tap 🗣, ask, tap ■ to send. The recording goes to speech-to-text, the
-assistant answers in the language you spoke (Kannada or English), and a
-text-to-speech voice reads it out. Tap ■ while it speaks to stop it. You pay
-only for the seconds spoken and read out - about 1 to 2 US cents per answer
-for the voice parts (measured 2026-10-04: reading out a 15-21 second answer
-cost $0.008-0.022; transcribing the question ~$0.0003) - nothing while idle. Uses the existing `OPENROUTER_API_KEY`:
+Tap 🗣 once and just talk, like the live conversation: the phone itself
+notices when you start and stop speaking, and only that stretch of speech is
+sent. Each one goes to speech-to-text, then a tiny check that it was said TO
+the assistant (counter talk is ignored, and doesn't count against the
+question limit), then the assistant answers in the language you spoke (Kannada
+or English) and a text-to-speech voice reads it out. Start talking over an
+answer to interrupt it; tap End (or ■) to stop. The conversation ends by itself
+after 3 quiet minutes. The bar shows the running cost from OpenRouter's actual
+charges (the voice's charge is looked up a few seconds later, shown as "+").
+
+Cost: nothing while idle - only speech sent and answers read out. Measured
+2026-10-10: a 3-minute conversation with three answered questions and one
+ignored bit of chatter cost $0.068 in all (~2 US cents per question) vs $0.15
+for 3 minutes of GPT-Live. Reading an answer aloud is most of it ($0.008-0.022
+per answer); speech-to-text + the "said to me?" check is ~$0.0002 per
+utterance. Uses the existing `OPENROUTER_API_KEY`:
 
 - Speech-to-text: `microsoft/mai-transcribe-2` (fastest and best on mixed
   Kannada-English in a 2026-10-04 test).
@@ -109,11 +119,11 @@ cost $0.008-0.022; transcribing the question ~$0.0003) - nothing while idle. Use
   `.env`. This OpenRouter account has zero-data-retention on, which blocks
   some models (e.g. Gemini 3.8 TTS) - pick ones it allows.
 
-### 🎤 Live conversation (GPT-Live-1) - switched off
+### 🎤 Live conversation (GPT-Live-1) - optional, off by default
 
-Switched off on 2026-10-04 as too expensive; the 🎤 button is hidden and
-`/api/voice/session` refuses to start. The code is kept: add
-`VOICE_LIVE_ENABLED=1` to `.env` and restart the server to bring it back.
+Controlled by `VOICE_LIVE_ENABLED` in `.env` (`1` = show the 🎤 button,
+`0`/absent = hidden and `/api/voice/session` refuses); restart the server
+after changing it.
 
 Ask your question out loud and hear the answer.
 OpenAI's GPT-Live-1 does the talking; every business question it hears is
