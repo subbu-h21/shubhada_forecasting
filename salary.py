@@ -16,6 +16,11 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   costs a fixed amount that goes to admin savings, and it only ever comes
   out of the bonus parts, never the fixed part.
 
+  Half-day / contract staff (owner, 2026-10-10) are judged against the shift
+  the owner agreed with them, not their earliest days: late = first stamp
+  15+ min after their start, early = last stamp 15+ min before their end, and
+  no lunch is counted. Their base can be anything the owner enters.
+
   First 3 months are a trial: slips are calculated and shown, but nobody is
   paid less than their base.
 
@@ -108,6 +113,13 @@ SEED_ROLES = {
     'Dattatraya V Hegde': 'Back-office', 'Lohit Gowda': 'Fetcher', 'Harshita Suresh Naik': 'Both',
     'Nivedita M K': 'Both',
 }
+# Confirmed half-day / contract workers (owner, 2026-10-10). Shift times are
+# entered on Setup; until they are, no late/early is counted for them (judging
+# against their own usual time would call half their days late by definition).
+SEED_HALF_DAY = ['Deeksha Dinesh Naik', 'Fazil Unchalli', 'Renuka.D.H', 'Laxmi R Palankar', 'Tanuja R Naik',
+                 'Kiran Naik', 'Manish Shekhar Poojari']
+HALF_DAY_OTHER_SHIFT_MIN = 120  # arriving this long before their start = a different shift that day, not judged
+TIME_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
 NOT_STAFF = {'Nelemav Seva Sahakari Sangh'}  # Herur till login, not a person (owner, Round 2)
 
 # shubhadahealth Performance Chart rows -> item code. "Sales" itself is left
@@ -150,10 +162,13 @@ def load_settings():
     rules.update({k: v for k, v in s.get('rules', {}).items() if k in DEFAULT_RULES})
     roles = dict(SEED_ROLES)
     roles.update(s.get('roles', {}))
-    return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {})}
+    half = {n: {'start': '', 'end': ''} for n in SEED_HALF_DAY}
+    half.update(s.get('half_day', {}))
+    half = {n: v for n, v in half.items() if v is not None}
+    return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half}
 
 
-def update_settings(rules=None, roles=None, salaries=None):
+def update_settings(rules=None, roles=None, salaries=None, half_day=None):
     """Validates and merges; returns (settings, error)."""
     with _lock:
         s = _load(SETTINGS_PATH, {})
@@ -200,6 +215,22 @@ def update_settings(rules=None, roles=None, salaries=None):
                     return None, f'Salary for {name} looks wrong ({v:,.0f}).'
                 sal[str(name)[:120]] = round(v, 2)
             s['salaries'] = sal
+        if half_day:
+            # stored explicitly (None = not half-day) so un-ticking a seeded person sticks
+            hd = dict(s.get('half_day', {}))
+            for name, v in half_day.items():
+                name = str(name)[:120]
+                if not v or not v.get('on'):
+                    hd[name] = None
+                    continue
+                start, end = str(v.get('start') or ''), str(v.get('end') or '')
+                for t in (start, end):
+                    if t and not TIME_RE.match(t):
+                        return None, f'Shift time for {name} must look like 17:00.'
+                if start and end and start >= end:
+                    return None, f'Shift end for {name} must be after the start.'
+                hd[name] = {'start': start, 'end': end}
+            s['half_day'] = hd
         _save(SETTINGS_PATH, s)
     return load_settings(), None
 
@@ -380,9 +411,16 @@ def build_inputs(sales, employee_monthly, employee_scorecard, profit):
            else pd.Series(dtype=float))
     scored_months = sorted(cov[cov >= rk.SCORE_MIN_COVERAGE].index.tolist())
 
+    # Daily first/last stamp per person - half-day staff are judged per day
+    # against their agreed shift (the monthly counts assume a full day).
+    act = rk._employee_activity(sales)
+    daily, _ = rk._employee_shift_timing(act) if act is not None else (None, None)
+    if daily is not None:
+        daily = daily[['Employee', 'Day', 'Calendar_Month', 'Arrive_Min', 'Exit_Min']].copy()
+
     sc = employee_scorecard.set_index(['Employee', 'Calendar_Month']) if employee_scorecard is not None and not employee_scorecard.empty else None
     return {'monthly': employee_monthly.copy(), 'credit': credit, 'customers': cust, 'home_branch': home,
-            'branch_daily': br, 'scorecard': sc, 'scored_months': scored_months}
+            'branch_daily': br, 'scorecard': sc, 'scored_months': scored_months, 'daily': daily}
 
 
 def months_available(inputs):
@@ -474,9 +512,40 @@ ITEM_DEFS = [  # code, group, label, lower is better, how to show the raw value
 ]
 
 
+def _hhmm(minutes):
+    return f'{int(minutes) // 60:02d}:{int(minutes) % 60:02d}'
+
+
+def _to_min(t):
+    return int(t[:2]) * 60 + int(t[3:])
+
+
+def _half_day_discipline(inputs, emp, month, shift):
+    """(late, early, days_timed, start_min, end_min, owner_times) for a
+    half-day person, judged against the agreed shift; their usual (median)
+    times over this month and the two before stand in for a missing one."""
+    d = inputs.get('daily')
+    if d is None:
+        return None
+    mine = d[d['Employee'] == emp]
+    now = mine[mine['Calendar_Month'] == month]
+    if now.empty:
+        return None
+    p = pd.Period(month, 'M')
+    recent = mine[mine['Calendar_Month'].map(lambda m: p - 2 <= pd.Period(m, 'M') <= p)]
+    start = _to_min(shift['start']) if shift.get('start') else recent['Arrive_Min'].median()
+    end = _to_min(shift['end']) if shift.get('end') else recent['Exit_Min'].median()
+    judged = now[now['Arrive_Min'] > start - HALF_DAY_OTHER_SHIFT_MIN]
+    tol = rk.SHIFT_TOLERANCE_MIN
+    late = int((judged['Arrive_Min'] > start + tol).sum())
+    early = int((judged['Exit_Min'] < end - tol).sum())
+    return late, early, len(judged), len(now) - len(judged), start, end, bool(shift.get('start') and shift.get('end'))
+
+
 def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
+    half_day = settings['half_day']
     if not inputs or not MONTH_RE.match(str(month or '')):
         return {'slips': [], 'needs_role': []}
     pm = _person_metrics(inputs, rules)
@@ -612,10 +681,25 @@ def compute_slips(inputs, month):
         exit_w = rules['early_exit_weight']
         late, long_lunch, early = num(cur.get('Days_Late')), num(cur.get('Days_Long_Lunch')), num(cur.get('Days_Left_Early'))
         timed = not pd.isna(cur.get('Days_Timed')) and (cur.get('Days_Timed') or 0) > 0
+        shift_info = None
+        if emp in half_day:
+            hd = _half_day_discipline(inputs, emp, month, half_day[emp])
+            if hd:
+                late, early, n_judged, n_other, st, en, owner_times = hd
+                long_lunch = 0
+                shift_info = {'start': _hhmm(st), 'end': _hhmm(en), 'agreed': owner_times, 'other_shift_days': n_other}
+                if owner_times:
+                    timed = n_judged > 0
+                    notes.append(f'Half-day: judged against the agreed shift {_hhmm(st)}-{_hhmm(en)}; no lunch counted'
+                                 + (f'; {n_other} day{"s" if n_other != 1 else ""} on another shift not judged' if n_other else '') + '.')
+                else:
+                    late, early, timed = 0, 0, False
+                    notes.append(f'Half-day: no late/early counted until you enter their agreed shift in Setup '
+                                 f'(usually {_hhmm(st)}-{_hhmm(en)} from the bills).')
         incidents = late + long_lunch + early * exit_w
         charged = max(0.0, incidents - rules['free_incidents'])
         leave_days = count('unplanned_leave')
-        if not timed:
+        if not timed and not shift_info:
             notes.append('Not enough bill/fetch stamps to time their day - no late/lunch/exit deductions.')
 
         base = salaries.get(emp)
@@ -650,6 +734,7 @@ def compute_slips(inputs, month):
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
             'groups': groups, 'items': items, 'perf_score': None if perf is None else round(perf),
             'perf_paid_pct': round(perf_frac * 100), 'floor_hit': floor_hit, 'gate': gate,
+            'half_day': shift_info,
             'discipline': {'late': late, 'long_lunch': long_lunch, 'early_exit': early, 'incidents': incidents,
                            'free': rules['free_incidents'], 'charged': charged, 'leave_days': leave_days, 'timed': bool(timed)},
             'money': money, 'trial': in_trial, 'notes': notes,

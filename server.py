@@ -643,7 +643,7 @@ def _salary_payload(month=None):
         'month': month, 'months': months, 'slips': result['slips'], 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
         'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
-        'salaries': settings['salaries'], 'role_names': salary_mod.ROLES, 'group_weights': salary_mod.GROUP_WEIGHTS,
+        'salaries': settings['salaries'], 'half_day': settings['half_day'], 'role_names': salary_mod.ROLES, 'group_weights': salary_mod.GROUP_WEIGHTS,
         'groups': [{'code': c, 'name': n, 'kn': k} for c, n, k in salary_mod.GROUPS],
         'incident_types': salary_mod.INCIDENT_TYPES, 'rating_keys': salary_mod.RATING_KEYS,
         'incidents': sorted([r for r in salary_mod.load_incidents() if r.get('month') == month],
@@ -670,10 +670,11 @@ def _json_body():
 @requires_auth
 def api_salary_settings():
     b = _json_body()
-    _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'))
+    _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'),
+                                        half_day=b.get('half_day'))
     if err:
         return jsonify({'error': err}), 400
-    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries') if b.get(k)))
+    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day') if b.get(k)))
     return jsonify(_salary_payload(b.get('month')))
 
 

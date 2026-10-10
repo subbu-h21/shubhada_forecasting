@@ -97,6 +97,9 @@ trial month in Setup → Rules, nobody is paid below their base.
 
 Each month:
 1. **Setup** (once, then when pay changes): base salary and role per person.
+   Tick **Half-day** for half-day / contract staff and enter their agreed
+   shift - they're judged against it (no lunch counted); until it's entered
+   no late/early is counted for them.
 2. **Log**, on the day it happens: wrong item, cash short, near-expiry left
    on a rack, complaints, compliments, covering for a colleague, unplanned
    leave. Late arrival, lunch and exit are read from the bills automatically.
