@@ -1083,7 +1083,7 @@ let salMsg = null;   // {kind: 'ok'|'err', text}
 let salBusy = false;
 
 const SAL_VIEWS = [['slips', 'Slips', 'ಸಂಬಳ ಚೀಟಿ'], ['log', 'Log', 'ದಾಖಲೆ'], ['ratings', 'Ratings', 'ಅಂಕ'],
-  ['charts', 'Charts', 'ಚಾರ್ಟ್'], ['setup', 'Setup', 'ಹೊಂದಿಸು']];
+  ['charts', 'Charts', 'ಚಾರ್ಟ್'], ['commit', 'Commit', 'ಬದ್ಧತೆ'], ['setup', 'Setup', 'ಹೊಂದಿಸು']];
 const SAL_RULE_LABELS = {
   fixed_pct: 'Fixed part, % of salary', perf_pct: 'Performance part, %', disc_pct: 'Discipline part, %',
   full_at_pct: 'Full marks at this % of own best', item_cap_pct: 'Highest marks per item, %',
@@ -1095,6 +1095,7 @@ const SAL_RULE_LABELS = {
   marks_per_cover: 'Marks gained per day covering a colleague', returns_gate_pct: 'No performance pay if returns above, % of sales',
   trial_until: 'Trial until (month) — nobody paid below base', min_days_active: 'Fewest active days to score a month',
   min_role_lines: 'Lines needed for a role to count that month',
+  commit_bonus_pct: 'Commitment bonus, % of base (shared per target reached)',
 };
 
 function salToday() {
@@ -1151,6 +1152,7 @@ function renderSalary(container) {
   else if (salView === 'log') html += salLogHTML();
   else if (salView === 'ratings') html += salRatingsHTML();
   else if (salView === 'charts') html += salChartsHTML();
+  else if (salView === 'commit') html += salCommitHTML();
   else html += salSetupHTML();
   container.innerHTML = html;
   salBind(container);
@@ -1252,6 +1254,12 @@ function salDetailHTML(x) {
       <tr><td>Early exits (count ${r.early_exit_weight})</td><td class="n">${fmt(d.early_exit)}</td></tr>
       <tr><td colspan="2" class="raw">${fmt(d.free)} free, ${d.charged} charged × ${fmt(r.pct_per_incident)}% of ${m ? money(m.disc_max) : 'the discipline part'}${m ? ` = ${money(m.disc_deduction)} off` : ''}</td></tr>`;
   }
+  if (x.commitment) {
+    h += `<tr class="grp"><td>Commitment <span class="sal-kn">ಬದ್ಧತೆ</span> · approved ${escHtml(x.commitment.approved_at)}</td><td class="n">${x.commitment.met} of ${x.commitment.of}</td></tr>`;
+    for (const c of x.commitment.checks) {
+      h += `<tr><td>${escHtml(c.label)}<div class="raw">committed ${fmt(c.target)} · reached ${fmt(c.actual)}</div></td><td class="n" style="color:${c.met ? 'var(--ok)' : 'var(--danger)'}">${c.met ? 'met' : 'not met'}</td></tr>`;
+    }
+  }
   if (d.leave_days) h += `<tr><td>Unplanned leave days</td><td class="n">${fmt(d.leave_days)}${m ? ' · ' + money(m.admin_savings) : ''}</td></tr>`;
   if (m) {
     h += `<tr class="grp"><td>Salary <span class="sal-kn">ಸಂಬಳ</span> (base ${money(m.base)})</td><td class="n"></td></tr>
@@ -1259,6 +1267,7 @@ function salDetailHTML(x) {
       <tr><td>Performance (out of ${money(m.perf_max)})</td><td class="n">${money(m.perf_pay)}</td></tr>
       <tr><td>Discipline (out of ${money(m.disc_max)})</td><td class="n">${money(m.disc_pay)}</td></tr>
       ${m.admin_savings ? `<tr><td>Unplanned leave → admin savings</td><td class="n">−${money(m.admin_savings)}</td></tr>` : ''}
+      ${x.commitment ? `<tr><td>Commitment bonus (${x.commitment.met} of ${x.commitment.of} targets)</td><td class="n">${money(m.commit_bonus)}</td></tr>` : ''}
       <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
       ${x.trial ? `<tr><td>To pay (trial: never below base)</td><td class="n"><b>${money(m.payable)}</b></td></tr>` : ''}`;
   } else {
@@ -1329,6 +1338,90 @@ function salChartsHTML() {
   return html + `<div class="card-list">` + Object.entries(ch).sort().map(([e, c]) =>
     `<div class="card" style="--card-stripe:var(--accent)"><div class="row1"><div class="name">${escHtml(e)}<div class="meta">${escHtml(c.original_name || c.file)} · uploaded ${escHtml(c.uploaded_at || '')}</div></div>
       <button class="sal-link" style="padding:0;color:var(--danger)" data-salchartdel="${escAttr(e)}">Remove</button></div></div>`).join('') + `</div>`;
+}
+
+function salWaText(p, url) {
+  const first = p.split(/[ .]/)[0];
+  return `Namaskara ${first}, please fill in your commitment for Shubhada Health — your timings and the targets you will chase. Your usual times and your best month are already filled in; keep them or change them, then sign.\nನಮಸ್ಕಾರ ${first}, ದಯವಿಟ್ಟು ನಿಮ್ಮ ಬದ್ಧತೆ ಫಾರ್ಮ್ ತುಂಬಿ ಸಹಿ ಮಾಡಿ:\n${url}`;
+}
+
+function salCommitHTML() {
+  const c = SAL.commit;
+  const tLabel = Object.fromEntries(c.targets.map(t => [t.code, t.label]));
+  const tShow = (t) => Object.entries(t || {}).map(([k, v]) => `${escHtml(tLabel[k] || k)} <b>${fmt(v)}</b>`).join(' · ') || 'no targets';
+  let html = `<div class="sal-note">Each person fills in their own timings and targets on a Google Form from a link you send on WhatsApp. Their usual times and best month are filled in; they keep or change them and sign. <b>Nothing counts until you approve it here.</b> Reaching what they committed earns up to ${fmt(SAL.rules.commit_bonus_pct)}% of base, shared per target reached.
+    <span class="kn">ಪ್ರತಿಯೊಬ್ಬರೂ ತಮ್ಮ ಸಮಯ ಮತ್ತು ಗುರಿ ತುಂಬಿ ಸಹಿ ಮಾಡುತ್ತಾರೆ; ನೀವು ಒಪ್ಪಿದ ನಂತರ ಮಾತ್ರ ಲೆಕ್ಕಕ್ಕೆ.</span></div>`;
+
+  // Step 1: the form's template link
+  html += `<div class="section-title">1 · The form</div>`;
+  if (!c.template) {
+    html += `<div class="sal-form"><div class="sal-note" style="margin:0">Run <b>google/commitment_form.gs</b> once in script.google.com (steps are at the top of that file). Paste the <b>TEMPLATE LINK</b> it prints here.</div>
+      <label>Template link<input type="url" id="sal-tpl" placeholder="https://docs.google.com/forms/d/e/…/viewform?usp=pp_url&…"></label>
+      <button class="sal-btn" id="sal-tpl-save">Save template link</button></div>`;
+  } else {
+    html += `<div class="sal-msg ok" style="font-weight:500">Form linked. <button class="sal-link" style="padding:0" id="sal-tpl-change">Change the link</button></div>
+      <div class="sal-form" id="sal-tpl-box" hidden style="display:none"><label>New template link<input type="url" id="sal-tpl" value="${escAttr(c.template)}"></label>
+      <button class="sal-btn" id="sal-tpl-save">Save template link</button></div>`;
+  }
+
+  // Step 3 first if answers are waiting - that's the thing to act on
+  if (c.pending.length) {
+    html += `<div class="section-title">Waiting for your approval (${c.pending.length})</div><div class="card-list">`;
+    for (const r of c.pending) {
+      const cur = SAL.shifts[r.employee] || {};
+      const best = (c.links[r.employee] || {}).best || {};
+      const warn = [];
+      if (!r.employee) warn.push(`"${escHtml(r.raw_name)}" doesn't match a staff name — choose who it is.`);
+      if (r.answers > 1) warn.push(`Filled in ${r.answers} times — the latest is shown.`);
+      if (r.signed && r.employee && r.signed.replace(/[^a-z]/gi, '').toLowerCase() !== r.employee.replace(/[^a-z]/gi, '').toLowerCase()) warn.push(`Signed as "${escHtml(r.signed)}".`);
+      if (r.promises < 4) warn.push(`Ticked ${r.promises} of 4 promises.`);
+      const times = r.half ? `${r.start}–${r.end} (half day)` : `${r.start}–${r.end}${r.break_out ? `, break ${r.break_out}–${r.break_in}` : ', no break'}`;
+      const before = cur.start ? `${cur.start}–${cur.end}${cur.break_out ? `, break ${cur.break_out}–${cur.break_in}` : ''}` : 'none set';
+      const targets = Object.entries(r.targets).map(([k, v]) => `${escHtml(tLabel[k] || k)} <b>${fmt(v)}</b>${best[k] ? ` <span class="sal-kn">(best ${fmt(best[k])})</span>` : ''}`).join('<br>') || 'no targets';
+      html += `<div class="card" style="--card-stripe:${warn.length ? 'var(--warn)' : 'var(--accent)'}">
+        <div class="name">${escHtml(r.employee || r.raw_name)}<div class="meta">answered ${escHtml(r.submitted)} · off day ${escHtml(r.off_day || '—')}</div></div>
+        ${r.employee ? '' : `<label class="sal-form" style="margin:8px 0;padding:8px">Whose answer is this?<select data-salcommitemp="${escAttr(r.id)}">${salStaffOptions('')}</select></label>`}
+        <div class="meta" style="margin-top:6px">Timings: <b>${escHtml(times)}</b> <span class="sal-kn">(now: ${escHtml(before)})</span></div>
+        <div class="meta" style="margin-top:4px">${targets}</div>
+        ${warn.length ? `<div class="meta" style="margin-top:6px;color:var(--warn)">${warn.join('<br>')}</div>` : ''}
+        <div style="display:flex;gap:8px;margin-top:10px"><button class="sal-btn" data-salapprove="${escAttr(r.id)}">Approve</button>
+          <button class="sal-btn ghost" data-salreject="${escAttr(r.id)}">Reject</button></div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Step 2: links
+  html += `<div class="section-title">2 · Send each person their link</div>`;
+  if (!c.template) {
+    html += `<div class="empty">Links appear here once the template link is saved.</div>`;
+  } else {
+    html += `<div class="sal-note">Tap <b>WhatsApp</b>, choose the person, send. During the trial they can fill it in again any time; afterwards, send a new link only when their timings change.</div><div class="card-list">`;
+    for (const [p, l] of Object.entries(c.links)) {
+      const ok = c.approved[p], waiting = c.pending.some(r => r.employee === p);
+      const [col, label] = ok ? ['var(--ok)', `approved ${ok.approved_at.slice(0, 10)}`] : waiting ? ['var(--warn)', 'answered — approve above'] : ['var(--line-strong)', 'not answered yet'];
+      html += `<div class="card" style="--card-stripe:${col}"><div class="row1"><div class="name">${escHtml(p)}<div class="meta">${escHtml(SAL.roles[p] || '')} · ${label}</div>
+        <div class="meta">Pre-filled best: ${tShow(l.best)}</div></div></div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <a class="sal-btn" style="text-decoration:none;background:#1F8F4E" href="https://wa.me/?text=${encodeURIComponent(salWaText(p, l.url))}" target="_blank" rel="noopener">WhatsApp</a>
+          <button class="sal-btn ghost" data-salcopy="${escAttr(l.url)}">Copy link</button></div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Step 3: import
+  html += `<div class="section-title">3 · Bring the answers in</div>
+    <form class="sal-form" id="sal-commit-import">
+      <div class="sal-note" style="margin:0">Open the answers sheet in Google Sheets → File → Download → Microsoft Excel (.xlsx), then choose that file here. Each person's latest answer waits above for your approval.</div>
+      <label>Answers sheet (.xlsx)<input type="file" id="sal-commit-file" accept=".xlsx,.csv" required></label>
+      <button type="submit" class="sal-btn">Import answers</button></form>`;
+
+  const approved = Object.entries(c.approved);
+  if (approved.length) {
+    html += `<div class="section-title">Approved commitments (${approved.length})</div><div class="card-list">` +
+      approved.sort().map(([p, a]) => `<div class="card" style="--card-stripe:var(--ok)"><div class="name">${escHtml(p)}<div class="meta">${a.half ? 'Half day ' : ''}${escHtml(a.start)}–${escHtml(a.end)}${a.break_out ? `, break ${escHtml(a.break_out)}–${escHtml(a.break_in)}` : ''} · off ${escHtml(a.off_day || '—')} · signed "${escHtml(a.signed)}" · approved ${escHtml(a.approved_at)}</div>
+        <div class="meta">${tShow(a.targets)}</div></div></div>`).join('') + `</div>`;
+  }
+  return html;
 }
 
 function salSetupHTML() {
@@ -1435,6 +1528,42 @@ function salBind(container) {
     const brk = container.querySelector(`[data-salbreak="${CSS.escape(cb.dataset.salhalf)}"]`);
     brk.hidden = cb.checked;
     brk.style.display = cb.checked ? 'none' : 'contents';
+  }));
+  const tplSave = container.querySelector('#sal-tpl-save');
+  if (tplSave) tplSave.addEventListener('click', () => {
+    const url = container.querySelector('#sal-tpl').value.trim();
+    if (!url) { salMsg = { kind: 'err', text: 'Paste the template link first.' }; renderSalary(container); return; }
+    salPost('/api/salary/commit/template', { url }, 'Template link saved — everyone\'s personal link is ready below.');
+  });
+  const tplChange = container.querySelector('#sal-tpl-change');
+  if (tplChange) tplChange.addEventListener('click', () => {
+    const box = container.querySelector('#sal-tpl-box'); box.hidden = false; box.style.display = '';
+  });
+  container.querySelectorAll('[data-salcopy]').forEach(b => b.addEventListener('click', async () => {
+    const url = b.dataset.salcopy;
+    try { await navigator.clipboard.writeText(url); b.textContent = 'Copied'; }
+    catch (e) {
+      // the dashboard is plain http on the shop network, where browsers often refuse clipboard access
+      const box = document.createElement('input'); box.value = url; box.readOnly = true; box.style.cssText = 'width:100%;margin-top:6px;font-size:12px';
+      b.closest('.card').appendChild(box); box.focus(); box.select(); b.textContent = 'Select and copy below';
+    }
+  }));
+  const commitImport = container.querySelector('#sal-commit-import');
+  if (commitImport) commitImport.addEventListener('submit', e => {
+    e.preventDefault();
+    const f = container.querySelector('#sal-commit-file').files[0];
+    if (!f) { salMsg = { kind: 'err', text: 'Choose the answers sheet first.' }; renderSalary(container); return; }
+    const fd = new FormData(); fd.append('file', f); fd.append('month', salMonth);
+    salPost('/api/salary/commit/import', fd, 'Answers imported — approve each one above.');
+  });
+  container.querySelectorAll('[data-salapprove]').forEach(b => b.addEventListener('click', () => {
+    const sel = container.querySelector(`[data-salcommitemp="${CSS.escape(b.dataset.salapprove)}"]`);
+    salPost('/api/salary/commit/decide', { id: b.dataset.salapprove, action: 'approve', employee: sel ? sel.value : '' },
+      'Approved — these are now their agreed timings and targets.');
+  }));
+  container.querySelectorAll('[data-salreject]').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to reject'; return; }
+    salPost('/api/salary/commit/decide', { id: b.dataset.salreject, action: 'reject' }, 'Answer rejected.');
   }));
   const savePeople = container.querySelector('#sal-save-people');
   if (savePeople) savePeople.addEventListener('click', () => {

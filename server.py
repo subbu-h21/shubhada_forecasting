@@ -650,6 +650,13 @@ def _salary_payload(month=None):
                             key=lambda r: (r['date'], r['logged_at']), reverse=True),
         'ratings': salary_mod.load_ratings().get(month, {}) if month else {},
         'charts': {e: {k: v for k, v in c.items() if k != 'rows'} for e, c in charts.items()},
+        'commit': {
+            'template': settings['commit_template'],
+            'links': salary_mod.commit_links(inputs, month) if month else {},
+            'pending': salary_mod.load_pending(),
+            'approved': settings['commitments'],
+            'targets': [{'code': c, 'label': l} for c, _, l, _ in salary_mod.COMMIT_TARGETS],
+        },
     }
 
 
@@ -699,6 +706,46 @@ def api_salary_rating():
     err = salary_mod.save_rating(b.get('month'), b.get('employee'), b.get('ratings'))
     if err:
         return jsonify({'error': err}), 400
+    return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/commit/template', methods=['POST'])
+@requires_auth
+def api_salary_commit_template():
+    b = _json_body()
+    err = salary_mod.set_commit_template(b.get('url'))
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Commitment form template link saved')
+    return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/commit/import', methods=['POST'])
+@requires_auth
+def api_salary_commit_import():
+    f = request.files.get('file')
+    if not f or not f.filename.lower().endswith(('.xlsx', '.csv')):
+        return jsonify({'error': 'Choose the answers sheet you downloaded (.xlsx).'}), 400
+    data = f.read()
+    if len(data) > 5 * 1024 * 1024:
+        return jsonify({'error': 'That file is too big for the answers sheet.'}), 400
+    res, err = salary_mod.import_commitments(data, f.filename)
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Commitment answers imported: %s', res)
+    out = _salary_payload(request.form.get('month'))
+    out['import_result'] = res
+    return jsonify(out)
+
+
+@app.route('/api/salary/commit/decide', methods=['POST'])
+@requires_auth
+def api_salary_commit_decide():
+    b = _json_body()
+    err = salary_mod.decide_commitment(str(b.get('id')), b.get('action'), b.get('employee') or None)
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Commitment %s: %s', b.get('action'), b.get('employee') or b.get('id'))
     return jsonify(_salary_payload(b.get('month')))
 
 

@@ -27,6 +27,12 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   anything the owner enters. Full-day staff without timings keep the
   Scorecard's own-routine timing until theirs are entered.
 
+  Staff commit to their own timings and targets in a Google Form, opened from
+  a personal WhatsApp link pre-filled with their usual times and their best
+  month as the target (google/commitment_form.gs). Nothing counts until the
+  owner approves it here. Reaching the targets they committed to earns up to
+  5% of base, in proportion to how many they reach (owner, 2026-10-10).
+
   First 3 months are a trial: slips are calculated and shown, but nobody is
   paid less than their base.
 
@@ -68,6 +74,7 @@ DEFAULT_RULES = {
     'marks_per_compliment': 5, 'marks_per_cover': 5,
     'returns_gate_pct': 3,      # chart Sales-Return / Sales above this -> no performance pay
     'trial_until': '2026-12',
+    'commit_bonus_pct': 5,      # % of base for reaching every committed target, shared per target reached
     'min_days_active': 10,      # fewer active days -> month too short to score volumes
     'min_role_lines': 100,      # a role counts only if it was really their work that month
 }
@@ -77,7 +84,8 @@ RULE_LIMITS.update({'full_at_pct': (50, 100), 'item_cap_pct': (100, 200), 'perf_
                     'early_exit_weight': (0, 1), 'unplanned_leave_rs': (0, 20000),
                     'marks_per_mistake': (0, 100), 'marks_per_complaint': (0, 100),
                     'marks_per_compliment': (0, 100), 'marks_per_cover': (0, 100),
-                    'returns_gate_pct': (0, 100), 'min_days_active': (1, 31), 'min_role_lines': (0, 10000)})
+                    'returns_gate_pct': (0, 100), 'min_days_active': (1, 31), 'min_role_lines': (0, 10000),
+                    'commit_bonus_pct': (0, 50)})
 
 ROLES = ['Biller', 'Fetcher', 'Back-office', 'Both']
 # Owner-approved (Round 2, scaled so each role adds up to 100).
@@ -175,7 +183,8 @@ def load_settings():
     for n, v in stored_half.items():   # times saved before shifts had their own place
         if v and (v.get('start') or v.get('end')) and n not in shifts:
             shifts[n] = {'start': v.get('start', ''), 'end': v.get('end', '')}
-    return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half, 'shifts': shifts}
+    return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half, 'shifts': shifts,
+            'commit_template': s.get('commit_template', ''), 'commitments': s.get('commitments', {})}
 
 
 def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None):
@@ -582,6 +591,7 @@ def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
     half_day, shifts = set(settings['half_day']), settings['shifts']
+    commitments = settings['commitments']
     if not inputs or not MONTH_RE.match(str(month or '')):
         return {'slips': [], 'needs_role': []}
     pm = _person_metrics(inputs, rules)
@@ -749,6 +759,23 @@ def compute_slips(inputs, month):
         if not timed and not (is_half and not agreed):
             notes.append('Not enough bill/fetch stamps to time their day - no late/lunch/exit deductions.')
 
+        # Commitment bonus: share of the targets they committed to and reached
+        commit, commit_info = commitments.get(emp), None
+        if commit and commit.get('targets'):
+            checks = []
+            for code, _, label, _ in COMMIT_TARGETS:
+                t = commit['targets'].get(code)
+                if not t:
+                    continue
+                actual = cur.get(code)
+                actual = 0.0 if actual is None or pd.isna(actual) else float(actual)
+                checks.append({'code': code, 'label': label, 'target': t, 'actual': round(actual, 1), 'met': actual >= t})
+            if checks:
+                commit_info = {'checks': checks, 'met': sum(c['met'] for c in checks), 'of': len(checks),
+                               'approved_at': commit.get('approved_at', ''), 'counted': not short_month}
+                if short_month:
+                    notes.append('Commitment targets are checked from 10 active days - no commitment bonus this month.')
+
         base = salaries.get(emp)
         floor_hit = perf is not None and perf < rules['floor_pct']
         gate_hit = bool(gate and gate['failed'])
@@ -769,11 +796,14 @@ def compute_slips(inputs, month):
             disc_pay -= from_disc
             perf_pay -= from_perf
             leave_taken = from_disc + from_perf
-            calculated = fixed + perf_pay + disc_pay
+            commit_max = base * rules['commit_bonus_pct'] / 100 if commit_info else 0
+            commit_bonus = commit_max * commit_info['met'] / commit_info['of'] if commit_info and commit_info['counted'] else 0
+            calculated = fixed + perf_pay + disc_pay + commit_bonus
             payable = max(calculated, base) if in_trial else calculated
             money = {k: round(v) for k, v in dict(
                 base=base, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
                 disc_deduction=disc_ded, disc_pay=disc_pay, leave_due=leave_due, admin_savings=leave_taken,
+                commit_bonus=commit_bonus, commit_max=commit_max,
                 calculated=calculated, payable=payable, vs_base=calculated - base).items()}
             if leave_due > leave_taken:
                 notes.append(f'Leave penalty capped at the bonus parts: ₹{leave_due - leave_taken:,.0f} not taken (fixed pay is never cut).')
@@ -781,7 +811,7 @@ def compute_slips(inputs, month):
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
             'groups': groups, 'items': items, 'perf_score': None if perf is None else round(perf),
             'perf_paid_pct': round(perf_frac * 100), 'floor_hit': floor_hit, 'gate': gate,
-            'shift': shift_info,
+            'shift': shift_info, 'commitment': commit_info,
             'discipline': {'late': late, 'long_lunch': long_lunch, 'early_exit': early, 'incidents': incidents,
                            'free': rules['free_incidents'], 'charged': charged, 'leave_days': leave_days, 'timed': bool(timed)},
             'money': money, 'trial': in_trial, 'notes': notes,
@@ -789,6 +819,218 @@ def compute_slips(inputs, month):
         })
     slips.sort(key=lambda x: x['employee'])
     return {'slips': slips, 'needs_role': sorted(needs_role)}
+
+
+# ------------------------------------------------------------ commitments --
+PENDING_PATH = SALARY_DIR / 'commitments_pending.json'
+# code, placeholder in the form's template link, label, roles it's offered to
+COMMIT_TARGETS = [
+    ('S1', '90001', 'Sales per day (₹)', ('Biller', 'Both')),
+    ('S2', '90002', 'Bills per day', ('Biller', 'Both')),
+    ('F1', '90003', 'Items fetched per day', ('Fetcher', 'Both')),
+    ('F3', '90004', 'Different products fetched in a month', ('Fetcher', 'Both')),
+    ('B1', '90005', 'Purchase lines entered per day', ('Back-office',)),
+]
+PLACEHOLDER_TIMES = {'01:01': 'start', '02:02': 'break_out', '03:03': 'break_in', '04:04': 'end'}
+FULL_DAY, HALF_DAY = 'Full day / ಪೂರ್ಣ ದಿನ', 'Half day / ಅರ್ಧ ದಿನ'
+# answers-sheet column -> field, matched on how the form's question title starts
+FORM_COLUMNS = [('timestamp', 'timestamp'), ('name', 'your name'), ('shift', 'your shift'), ('start', 'start time'),
+                ('break_out', 'break starts'), ('break_in', 'back from break'), ('end', 'end time'),
+                ('off_day', 'weekly off day'), ('S1', 'sales per day'), ('S2', 'bills per day'),
+                ('F1', 'items fetched per day'), ('F3', 'different products fetched'),
+                ('B1', 'purchase lines entered'), ('promises', 'i promise'), ('signed', 'type your full name')]
+
+
+def _parse_template(url):
+    """The form's template link -> (base url, {field: 'entry.N'}), or raises
+    ValueError with a message for the owner."""
+    from urllib.parse import urlsplit, parse_qsl
+    u = urlsplit(str(url or '').strip())
+    if u.netloc != 'docs.google.com' or '/forms/' not in u.path or not u.path.endswith('/viewform'):
+        raise ValueError('Paste the TEMPLATE LINK the script printed - it starts with https://docs.google.com/forms/ .')
+    fields = {}
+    by_value = {'__NAME__': 'name', **PLACEHOLDER_TIMES, **{ph: code for code, ph, _, _ in COMMIT_TARGETS}}
+    for k, v in parse_qsl(u.query, keep_blank_values=True):
+        if not k.startswith('entry.'):
+            continue
+        if v in by_value:
+            fields[by_value[v]] = k
+        elif v.startswith('Full day'):
+            fields['shift'] = k
+    if not {'name', 'start', 'end'} <= set(fields):
+        raise ValueError('That is not the template link from the script - the name and time placeholders are missing.')
+    return f'{u.scheme}://{u.netloc}{u.path}', fields
+
+
+def set_commit_template(url):
+    try:
+        _parse_template(url)
+    except ValueError as e:
+        return str(e)
+    with _lock:
+        st = _load(SETTINGS_PATH, {})
+        st['commit_template'] = str(url).strip()
+        _save(SETTINGS_PATH, st)
+    return None
+
+
+def commit_links(inputs, month):
+    """Each staff member's own pre-filled form link: their name, agreed (or
+    usual) timings, and their best month so far for every target their role
+    is offered. {} until a template link is saved."""
+    from urllib.parse import urlencode
+    st = load_settings()
+    if not st['commit_template'] or not inputs or not month:
+        return {}
+    base, fields = _parse_template(st['commit_template'])
+    pm = _person_metrics(inputs, st['rules'])
+    hist = pm[pm['Calendar_Month'] <= month]
+    half_day = set(st['half_day'])
+    out = {}
+    for emp, role in sorted(st['roles'].items()):
+        if role not in GROUP_WEIGHTS or emp in NOT_STAFF:
+            continue
+        half = emp in half_day
+        sh = st['shifts'].get(emp) or {}
+        # back-office work happens away from the till, so their bill stamps aren't their hours
+        usual = (_usual_times(inputs, emp, month) or {}) if role != 'Back-office' else {}
+        vals = {'name': emp, 'shift': HALF_DAY if half else FULL_DAY}
+        for k in SHIFT_KEYS:
+            vals[k] = '' if (half and k.startswith('break')) else (sh.get(k) or usual.get(k) or '')
+        mine = hist[hist['Employee'] == emp]
+        best = {}
+        for code, _, label, roles_for in COMMIT_TARGETS:
+            if role in roles_for and code in mine and mine[code].notna().any() and mine[code].max() > 0:
+                b = float(mine[code].max())
+                best[code] = int(round(b, -2)) if code == 'S1' else int(round(b))
+                vals[code] = str(best[code])
+        params = [('usp', 'pp_url')] + [(fields[k], v) for k, v in vals.items() if k in fields and v != '']
+        out[emp] = {'url': base + '?' + urlencode(params), 'best': best}
+    return out
+
+
+def _cell_time(v):
+    """Sheets turns 09:30 into a time; read it back as HH:MM whatever form it's in."""
+    import datetime as dt
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v == '':
+        return ''
+    if isinstance(v, (dt.time, dt.datetime, pd.Timestamp)):
+        return f'{v.hour:02d}:{v.minute:02d}'
+    if isinstance(v, (int, float)) and 0 <= v < 1:      # fraction of a day
+        m = int(round(v * 1440))
+        return f'{m // 60:02d}:{m % 60:02d}'
+    t = str(v).strip()
+    m = re.match(r'^(\d{1,2}):(\d{2})', t)
+    return f'{int(m.group(1)):02d}:{m.group(2)}' if m else ''
+
+
+def _match_name(raw, known):
+    if not raw:
+        return ''
+    norm = rk._norm_name(pd.Series([str(raw)])).iloc[0]
+    if norm in known:
+        return norm
+    letters = lambda x: re.sub(r'[^a-z]', '', str(x).lower())
+    hit = [k for k in known if letters(k) == letters(raw)]
+    return hit[0] if len(hit) == 1 else ''
+
+
+def import_commitments(file_bytes, filename):
+    """Read the downloaded answers sheet; keep each person's LATEST answer as
+    pending (replacing an older pending one). Returns (summary, error)."""
+    import io
+    try:
+        if str(filename).lower().endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(file_bytes))
+        else:
+            df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception:
+        return None, 'Could not open that file. In the answers sheet use File > Download > Microsoft Excel (.xlsx).'
+    cols = {}
+    for field, prefix in FORM_COLUMNS:
+        hit = [c for c in df.columns if str(c).strip().lower().startswith(prefix)]
+        if hit:
+            cols[field] = hit[0]
+    if not {'name', 'start', 'end', 'signed'} <= set(cols):
+        return None, 'This does not look like the commitment answers sheet - the name and time columns are missing.'
+    known = set(load_settings()['roles'])
+    rows = []
+    for _, r in df.iterrows():
+        get = lambda f: r[cols[f]] if f in cols else None
+        raw = '' if pd.isna(get('name')) else str(get('name')).strip()
+        if not raw:
+            continue
+        ts = get('timestamp')
+        targets = {}
+        for code, _, _, _ in COMMIT_TARGETS:
+            v = pd.to_numeric(get(code), errors='coerce')
+            if pd.notna(v) and v > 0:
+                targets[code] = float(v)
+        promises = get('promises')
+        rows.append({
+            'id': uuid.uuid4().hex[:12], 'raw_name': raw[:120], 'employee': _match_name(raw, known),
+            'submitted': '' if ts is None or pd.isna(ts) else str(ts)[:16],
+            'half': str(get('shift') or '').lower().startswith('half'),
+            **{k: _cell_time(get(k)) for k in SHIFT_KEYS},
+            'off_day': '' if pd.isna(get('off_day')) else str(get('off_day') or ''),
+            'targets': targets,
+            'promises': 0 if promises is None or pd.isna(promises) else len([x for x in str(promises).split(',') if x.strip()]),
+            'signed': '' if pd.isna(get('signed')) else str(get('signed') or '')[:120],
+        })
+    if not rows:
+        return None, 'The sheet has no answers yet.'
+    latest, counts = {}, {}
+    for row in sorted(rows, key=lambda x: x['submitted']):
+        key = row['employee'] or 'raw:' + row['raw_name'].lower()
+        counts[key] = counts.get(key, 0) + 1
+        latest[key] = row
+    for key, row in latest.items():
+        row['answers'] = counts[key]
+    with _lock:
+        pending = {(p['employee'] or 'raw:' + p['raw_name'].lower()): p for p in _load(PENDING_PATH, [])}
+        approved = load_settings()['commitments']
+        added = 0
+        for key, row in latest.items():
+            done = approved.get(row['employee'])
+            if done and done.get('submitted') == row['submitted']:
+                continue          # this exact answer was already approved
+            pending[key] = row
+            added += 1
+        _save(PENDING_PATH, sorted(pending.values(), key=lambda x: x['raw_name']))
+    return {'rows': len(rows), 'pending': added}, None
+
+
+def load_pending():
+    return _load(PENDING_PATH, [])
+
+
+def decide_commitment(rec_id, action, employee=None):
+    """Approve (make it their agreed timings + committed targets) or reject a
+    pending answer. Returns an error message or None."""
+    with _lock:
+        pending = _load(PENDING_PATH, [])
+    rec = next((p for p in pending if p['id'] == rec_id), None)
+    if rec is None:
+        return 'That answer was already dealt with.'
+    if action == 'approve':
+        emp = employee or rec['employee']
+        if not emp or emp not in load_settings()['roles']:
+            return 'Choose which staff member this answer belongs to.'
+        times = {k: ('' if rec['half'] and k.startswith('break') else rec[k]) for k in SHIFT_KEYS}
+        _, err = update_settings(half_day={emp: rec['half']}, shifts={emp: times})
+        if err:
+            return f"Can't approve as it is: {err} Ask them to fill the form again."
+        with _lock:
+            st = _load(SETTINGS_PATH, {})
+            st.setdefault('commitments', {})[emp] = {
+                **{k: rec[k] for k in ('submitted', 'half', 'off_day', 'targets', 'promises', 'signed', 'raw_name')},
+                **times, 'approved_at': time.strftime('%Y-%m-%d %H:%M')}
+            _save(SETTINGS_PATH, st)
+    elif action != 'reject':
+        return 'Unknown action.'
+    with _lock:
+        _save(PENDING_PATH, [p for p in _load(PENDING_PATH, []) if p['id'] != rec_id])
+    return None
 
 
 def summary(result):
@@ -801,4 +1043,5 @@ def summary(result):
         'admin_savings': sum(s['money']['admin_savings'] for s in sl),
         'below_floor': sum(1 for s in result['slips'] if s['floor_hit']),
         'not_rated': sum(1 for s in result['slips'] if not s['rated']),
+        'commit_bonus': sum(s['money'].get('commit_bonus', 0) for s in sl),
     }

@@ -107,7 +107,15 @@ Each month:
 3. **Charts**, after the month ends: upload each back-office person's
    Performance Chart from shubhadahealth.com.
 4. **Ratings**: 1-5 on the four O1-O4 points.
-5. **Slips**: tap a person to see how every rupee was worked out.
+5. **Commit** (once, then when someone's timings change): staff commit to
+   their own timings and targets on a Google Form. Run
+   `google/commitment_form.gs` once at script.google.com (steps at the top of
+   that file) and paste the TEMPLATE LINK it prints. Each person then gets a
+   WhatsApp link pre-filled with their usual times and best month. Download
+   the answers sheet as .xlsx, import it, and approve each answer - only
+   approved answers count. Reaching committed targets earns up to 5% of base,
+   shared per target reached.
+6. **Slips**: tap a person to see how every rupee was worked out.
 
 What you enter is kept in `data/processed/salary/`, so it's included in the
 normal backups.
