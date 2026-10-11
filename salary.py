@@ -27,11 +27,12 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   anything the owner enters. Full-day staff without timings keep the
   Scorecard's own-routine timing until theirs are entered.
 
-  Staff commit to their own timings and targets in a Google Form, opened from
-  a personal WhatsApp link pre-filled with their usual times and their best
-  month as the target (google/commitment_form.gs). Nothing counts until the
-  owner approves it here. Reaching the targets they committed to earns up to
-  5% of base, in proportion to how many they reach (owner, 2026-10-10).
+  Every person has bonus targets for their role: by default their own best
+  month before the slip month, and the owner can type over any of them on the
+  Setup screen (owner, 2026-10-11: "make it very simple"). Reaching them earns
+  up to 5% of base, in proportion to how many they reach. Optionally staff can
+  commit to their own timings and targets in a Google Form from a personal
+  WhatsApp link (google/commitment_form.gs); an approved answer sets them.
 
   First 3 months are a trial: slips are calculated and shown, but nobody is
   paid less than their base.
@@ -184,10 +185,11 @@ def load_settings():
         if v and (v.get('start') or v.get('end')) and n not in shifts:
             shifts[n] = {'start': v.get('start', ''), 'end': v.get('end', '')}
     return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half, 'shifts': shifts,
-            'commit_template': s.get('commit_template', ''), 'commitments': s.get('commitments', {})}
+            'commit_template': s.get('commit_template', ''), 'commitments': s.get('commitments', {}),
+            'targets': s.get('targets', {})}
 
 
-def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None):
+def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None, targets=None):
     """Validates and merges; returns (settings, error)."""
     with _lock:
         s = _load(SETTINGS_PATH, {})
@@ -258,6 +260,27 @@ def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts
                     return None, f'The break for {name} must fall between their start and end.'
                 sh[name] = v if any(v.values()) else None
             s['shifts'] = {n: v for n, v in sh.items() if v}
+        if targets:
+            codes = {c for c, _, _, _ in COMMIT_TARGETS}
+            tg = dict(s.get('targets', {}))
+            for name, vals in targets.items():
+                name = str(name)[:120]
+                mine = dict(tg.get(name, {}))
+                for code, v in (vals or {}).items():
+                    if code not in codes:
+                        return None, f'Unknown target "{code}".'
+                    if v in ('', None):
+                        mine.pop(code, None)      # blank = back to their own best
+                        continue
+                    try:
+                        v = float(v)
+                    except (TypeError, ValueError):
+                        return None, f'Targets for {name} must be numbers.'
+                    if not 0 < v < 10_000_000:
+                        return None, f'A target for {name} looks wrong ({v:,.0f}).'
+                    mine[code] = v
+                tg[name] = mine
+            s['targets'] = {n: v for n, v in tg.items() if v}
         _save(SETTINGS_PATH, s)
     return load_settings(), None
 
@@ -591,7 +614,7 @@ def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
     half_day, shifts = set(settings['half_day']), settings['shifts']
-    commitments = settings['commitments']
+    set_targets = settings['targets']
     if not inputs or not MONTH_RE.match(str(month or '')):
         return {'slips': [], 'needs_role': []}
     pm = _person_metrics(inputs, rules)
@@ -759,22 +782,29 @@ def compute_slips(inputs, month):
         if not timed and not (is_half and not agreed):
             notes.append('Not enough bill/fetch stamps to time their day - no late/lunch/exit deductions.')
 
-        # Commitment bonus: share of the targets they committed to and reached
-        commit, commit_info = commitments.get(emp), None
-        if commit and commit.get('targets'):
-            checks = []
-            for code, _, label, _ in COMMIT_TARGETS:
-                t = commit['targets'].get(code)
-                if not t:
+        # Target bonus: share of their targets reached - the owner's figure where
+        # one is set, otherwise their own best month before this one.
+        commit_info = None
+        prior = hist[hist['Calendar_Month'] < month]
+        checks = []
+        for code, _, label, roles_for in COMMIT_TARGETS:
+            if role not in roles_for:
+                continue
+            t, source = set_targets.get(emp, {}).get(code), 'set by you'
+            if not t:
+                past = prior[code].dropna() if code in prior else pd.Series(dtype=float)
+                if past.empty or past.max() <= 0:
                     continue
-                actual = cur.get(code)
-                actual = 0.0 if actual is None or pd.isna(actual) else float(actual)
-                checks.append({'code': code, 'label': label, 'target': t, 'actual': round(actual, 1), 'met': actual >= t})
-            if checks:
-                commit_info = {'checks': checks, 'met': sum(c['met'] for c in checks), 'of': len(checks),
-                               'approved_at': commit.get('approved_at', ''), 'counted': not short_month}
-                if short_month:
-                    notes.append('Commitment targets are checked from 10 active days - no commitment bonus this month.')
+                t, source = _round_target(code, past.max()), 'own best so far'
+            actual = cur.get(code)
+            actual = 0.0 if actual is None or pd.isna(actual) else float(actual)
+            checks.append({'code': code, 'label': label, 'target': t, 'actual': round(actual, 1),
+                           'met': actual >= t, 'source': source})
+        if checks:
+            commit_info = {'checks': checks, 'met': sum(c['met'] for c in checks), 'of': len(checks),
+                           'counted': not short_month}
+            if short_month:
+                notes.append('Targets are checked from 10 active days - no target bonus this month.')
 
         base = salaries.get(emp)
         floor_hit = perf is not None and perf < rules['floor_pct']
@@ -839,6 +869,29 @@ FORM_COLUMNS = [('timestamp', 'timestamp'), ('name', 'your name'), ('shift', 'yo
                 ('off_day', 'weekly off day'), ('S1', 'sales per day'), ('S2', 'bills per day'),
                 ('F1', 'items fetched per day'), ('F3', 'different products fetched'),
                 ('B1', 'purchase lines entered'), ('promises', 'i promise'), ('signed', 'type your full name')]
+
+
+def _round_target(code, v):
+    return int(round(v, -2)) if code == 'S1' else int(round(v))
+
+
+def auto_targets(inputs):
+    """Each person's own best so far for every target their role is offered -
+    what the Setup screen shows as the automatic target."""
+    if not inputs:
+        return {}
+    st = load_settings()
+    pm = _person_metrics(inputs, st['rules'])
+    out = {}
+    for emp, role in st['roles'].items():
+        mine = pm[pm['Employee'] == emp]
+        best = {}
+        for code, _, _, roles_for in COMMIT_TARGETS:
+            if role in roles_for and code in mine and mine[code].notna().any() and mine[code].max() > 0:
+                best[code] = _round_target(code, float(mine[code].max()))
+        if best:
+            out[emp] = best
+    return out
 
 
 def _parse_template(url):
@@ -1022,6 +1075,8 @@ def decide_commitment(rec_id, action, employee=None):
             return f"Can't approve as it is: {err} Ask them to fill the form again."
         with _lock:
             st = _load(SETTINGS_PATH, {})
+            if rec['targets']:
+                st.setdefault('targets', {})[emp] = dict(rec['targets'])
             st.setdefault('commitments', {})[emp] = {
                 **{k: rec[k] for k in ('submitted', 'half', 'off_day', 'targets', 'promises', 'signed', 'raw_name')},
                 **times, 'approved_at': time.strftime('%Y-%m-%d %H:%M')}

@@ -212,6 +212,23 @@
   .sal-half label { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
   .sal-half input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
   .sal-half input[type=time] { width: 104px; padding: 5px 6px; font-size: 13px; margin-left: 4px; }
+  .sal-edit .name { font-size: 14.5px; }
+  .sal-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+  .sal-edit-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .sal-edit-grid label { display: grid; gap: 3px; font-size: 11px; color: var(--ink-soft); font-weight: 600; min-width: 0; }
+  .sal-edit-grid input, .sal-edit-grid select { font-family: inherit; font-size: 14px; padding: 7px 8px; border: 1px solid var(--line-strong);
+    border-radius: 8px; background: var(--paper); color: var(--ink); width: 100%; min-width: 0; }
+  .sal-edit-grid input[type=time] { padding: 6px 4px; font-size: 13px; }
+  .sal-sub { margin-top: 10px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .04em;
+    display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+  .sal-sub .sal-kn { text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .sal-chk { display: inline-flex; align-items: center; gap: 5px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+  .sal-chk input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .sal-savebar { position: sticky; bottom: calc(58px + env(safe-area-inset-bottom)); z-index: 5; display: flex; align-items: center; justify-content: flex-end;
+    gap: 10px; padding: 10px 0; background: var(--paper); border-top: 1px solid var(--line); margin-top: 10px; }
+  .sal-optional { margin-top: 18px; }
+  .sal-optional summary { cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 600; padding: 8px 0; }
+  @media (max-width: 360px) { .sal-edit-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .sal-rate { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 6px; }
   .sal-rate label { font-size: 10px; color: var(--ink-faint); display: grid; gap: 2px; text-transform: uppercase; letter-spacing: .03em; }
   .sal-msg { font-size: 12.5px; margin: 0 0 10px; padding: 8px 11px; border-radius: 8px; }
@@ -1083,7 +1100,7 @@ let salMsg = null;   // {kind: 'ok'|'err', text}
 let salBusy = false;
 
 const SAL_VIEWS = [['slips', 'Slips', 'ಸಂಬಳ ಚೀಟಿ'], ['log', 'Log', 'ದಾಖಲೆ'], ['ratings', 'Ratings', 'ಅಂಕ'],
-  ['charts', 'Charts', 'ಚಾರ್ಟ್'], ['commit', 'Commit', 'ಬದ್ಧತೆ'], ['setup', 'Setup', 'ಹೊಂದಿಸು']];
+  ['charts', 'Charts', 'ಚಾರ್ಟ್'], ['setup', 'Edit', 'ಬದಲಿಸಿ']];
 const SAL_RULE_LABELS = {
   fixed_pct: 'Fixed part, % of salary', perf_pct: 'Performance part, %', disc_pct: 'Discipline part, %',
   full_at_pct: 'Full marks at this % of own best', item_cap_pct: 'Highest marks per item, %',
@@ -1095,7 +1112,7 @@ const SAL_RULE_LABELS = {
   marks_per_cover: 'Marks gained per day covering a colleague', returns_gate_pct: 'No performance pay if returns above, % of sales',
   trial_until: 'Trial until (month) — nobody paid below base', min_days_active: 'Fewest active days to score a month',
   min_role_lines: 'Lines needed for a role to count that month',
-  commit_bonus_pct: 'Commitment bonus, % of base (shared per target reached)',
+  commit_bonus_pct: 'Target bonus, % of base (shared per target reached)',
 };
 
 function salToday() {
@@ -1255,9 +1272,9 @@ function salDetailHTML(x) {
       <tr><td colspan="2" class="raw">${fmt(d.free)} free, ${d.charged} charged × ${fmt(r.pct_per_incident)}% of ${m ? money(m.disc_max) : 'the discipline part'}${m ? ` = ${money(m.disc_deduction)} off` : ''}</td></tr>`;
   }
   if (x.commitment) {
-    h += `<tr class="grp"><td>Commitment <span class="sal-kn">ಬದ್ಧತೆ</span> · approved ${escHtml(x.commitment.approved_at)}</td><td class="n">${x.commitment.met} of ${x.commitment.of}</td></tr>`;
+    h += `<tr class="grp"><td>Targets <span class="sal-kn">ಗುರಿ</span> · bonus up to ${fmt(SAL.rules.commit_bonus_pct)}% of base</td><td class="n">${x.commitment.met} of ${x.commitment.of}</td></tr>`;
     for (const c of x.commitment.checks) {
-      h += `<tr><td>${escHtml(c.label)}<div class="raw">committed ${fmt(c.target)} · reached ${fmt(c.actual)}</div></td><td class="n" style="color:${c.met ? 'var(--ok)' : 'var(--danger)'}">${c.met ? 'met' : 'not met'}</td></tr>`;
+      h += `<tr><td>${escHtml(c.label)}<div class="raw">target ${fmt(c.target)} (${escHtml(c.source)}) · reached ${fmt(c.actual)}</div></td><td class="n" style="color:${c.met ? 'var(--ok)' : 'var(--danger)'}">${c.met ? 'met' : 'not met'}</td></tr>`;
     }
   }
   if (d.leave_days) h += `<tr><td>Unplanned leave days</td><td class="n">${fmt(d.leave_days)}${m ? ' · ' + money(m.admin_savings) : ''}</td></tr>`;
@@ -1267,7 +1284,7 @@ function salDetailHTML(x) {
       <tr><td>Performance (out of ${money(m.perf_max)})</td><td class="n">${money(m.perf_pay)}</td></tr>
       <tr><td>Discipline (out of ${money(m.disc_max)})</td><td class="n">${money(m.disc_pay)}</td></tr>
       ${m.admin_savings ? `<tr><td>Unplanned leave → admin savings</td><td class="n">−${money(m.admin_savings)}</td></tr>` : ''}
-      ${x.commitment ? `<tr><td>Commitment bonus (${x.commitment.met} of ${x.commitment.of} targets)</td><td class="n">${money(m.commit_bonus)}</td></tr>` : ''}
+      ${x.commitment ? `<tr><td>Target bonus (${x.commitment.met} of ${x.commitment.of} targets)</td><td class="n">${money(m.commit_bonus)}</td></tr>` : ''}
       <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
       ${x.trial ? `<tr><td>To pay (trial: never below base)</td><td class="n"><b>${money(m.payable)}</b></td></tr>` : ''}`;
   } else {
@@ -1427,41 +1444,50 @@ function salCommitHTML() {
 function salSetupHTML() {
   const roles = SAL.role_names.concat(['Not staff']);
   const people = [...new Set(SAL.staff.concat(Object.keys(SAL.salaries)))].sort();
-  let html = `<div class="sal-note">Enter the timings you agreed with each person — start, break out, break back, end. Late, long break and early exit are judged against them (15 minutes' grace). The grey "usually" times come from their bills, as a guide.
-    Tick <b>Half-day</b> for half-day or contract staff: start and end only, no break counted, and nothing is counted until their shift is entered.
-    <span class="kn">ಪ್ರತಿಯೊಬ್ಬರ ಒಪ್ಪಿದ ಸಮಯ ನಮೂದಿಸಿ — ಬರುವುದು, ವಿರಾಮ, ಮರಳುವುದು, ಹೋಗುವುದು.</span></div>
-    <div class="sal-note">Base salary is what you pay today for a full month. The calculator splits it into the fixed, performance and discipline parts.
-    <span class="kn">ಇಂದಿನ ಪೂರ್ಣ ತಿಂಗಳ ಸಂಬಳ ನಮೂದಿಸಿ.</span></div>
-    <div class="sal-form" style="gap:0"><div class="sal-row" style="font-size:11px;color:var(--ink-faint);font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding-top:0">
-      <div>Person</div><div>Role</div><div class="sal-sal">Base ₹</div></div>` +
-    people.map((p, i) => `<div class="sal-row"><div>${escHtml(p)}</div>
-      <select data-salrole="${escAttr(p)}" id="sal-role-${i}" aria-label="Role for ${escAttr(p)}">${roles.map(r => `<option${(SAL.roles[p] || '') === r ? ' selected' : ''}>${r}</option>`).join('')}${SAL.roles[p] ? '' : '<option selected value="">Choose…</option>'}</select>
-      <input class="sal-sal" type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="₹" aria-label="Base salary for ${escAttr(p)}">
-      ${salHalfDayHTML(p, i)}</div>`).join('') +
-    `<div style="padding-top:10px"><button class="sal-btn" id="sal-save-people">Save salaries and roles</button></div></div>
+  let html = `<div class="sal-note">Everything for each person in one place. Change anything, then press <b>Save all changes</b> at the bottom. You can come back and edit any time.
+    <b>Targets</b> start as each person's own best month (shown in grey) — type a number to set your own, or clear it to go back to their best.
+    <span class="kn">ಯಾವುದನ್ನಾದರೂ ಬದಲಿಸಿ, ಕೆಳಗಿನ "Save all changes" ಒತ್ತಿ. ಗುರಿ = ಅವರ ಉತ್ತಮ ತಿಂಗಳು; ಬೇಕಾದರೆ ನೀವೇ ಬದಲಿಸಿ.</span></div>
+    <div class="search-bar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="text" id="search-saledit" placeholder="Find a person…"></div>
+    <div class="card-list" id="sal-edit-list">` + people.map((p, i) => salEditCard(p, i, roles)).join('') + `</div>
+    <div class="sal-savebar"><span id="sal-dirty" class="sal-kn"></span><button class="sal-btn" id="sal-save-people">Save all changes</button></div>
+    <div class="section-title">Rules</div>
+    <div class="sal-form"><div class="sal-rules">` +
+    Object.keys(SAL.default_rules).map(k => `<label for="sal-rule-${k}" style="font-size:12.5px;color:var(--ink);font-weight:500">${escHtml(SAL_RULE_LABELS[k] || k)}${SAL.rules[k] != SAL.default_rules[k] ? ` <span class="sal-kn">(agreed: ${escHtml(String(SAL.default_rules[k]))})</span>` : ''}</label>
+      <input id="sal-rule-${k}" data-salrule="${k}" ${k === 'trial_until' ? 'type="month"' : 'type="number" step="any"'} value="${escAttr(String(SAL.rules[k] ?? ''))}">`).join('') +
+    `</div><button class="sal-btn ghost" id="sal-save-rules">Save rules</button></div>
     <div class="section-title">Role weights (agreed in review round 2)</div>
     <div class="chart-card" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums">
       <thead><tr><th style="text-align:left;padding:4px">Group</th>${SAL.role_names.map(r => `<th style="text-align:right;padding:4px">${r}</th>`).join('')}</tr></thead><tbody>` +
     SAL.groups.map(g => `<tr><td style="padding:4px;border-top:1px solid var(--line)">${escHtml(g.name)} <span class="sal-kn">${escHtml(g.kn)}</span></td>${SAL.role_names.map(r =>
       `<td style="text-align:right;padding:4px;border-top:1px solid var(--line)">${SAL.group_weights[r][g.code] || '–'}</td>`).join('')}</tr>`).join('') +
     `</tbody></table></div>
-    <div class="section-title">Rules</div>
-    <div class="sal-form"><div class="sal-rules">` +
-    Object.keys(SAL.default_rules).map(k => `<label for="sal-rule-${k}" style="font-size:12.5px;color:var(--ink);font-weight:500">${escHtml(SAL_RULE_LABELS[k] || k)}${SAL.rules[k] != SAL.default_rules[k] ? ` <span class="sal-kn">(agreed: ${escHtml(String(SAL.default_rules[k]))})</span>` : ''}</label>
-      <input id="sal-rule-${k}" data-salrule="${k}" ${k === 'trial_until' ? 'type="month"' : 'type="number" step="any"'} value="${escAttr(String(SAL.rules[k] ?? ''))}">`).join('') +
-    `</div><button class="sal-btn ghost" id="sal-save-rules">Save rules</button></div>`;
+    <details class="sal-optional"><summary>Optional: let staff fill in their own timings and targets (Google Form)</summary>${salCommitHTML()}</details>`;
   return html;
 }
 
-function salHalfDayHTML(p, i) {
+function salEditCard(p, i, roles) {
+  const role = SAL.roles[p] || '';
   const half = SAL.half_day.includes(p);
   const t = SAL.shifts[p] || {};
   const slip = SAL.slips.find(x => x.employee === p);
   const u = slip && slip.shift && slip.shift.usual;
-  const usual = u ? `<span class="sal-kn">usually ${u.start}–${u.end}${u.break_out ? `, break ${u.break_out}–${u.break_in}` : ''}</span>` : '';
-  const box = (k, label) => `<label style="font-weight:500">${label}<input type="time" id="sal-t-${k}-${i}" data-salt="${k}" data-salp="${escAttr(p)}" value="${escAttr(t[k] || '')}" aria-label="${label} for ${escAttr(p)}"></label>`;
-  return `<div class="sal-half"><label><input type="checkbox" id="sal-half-${i}" data-salhalf="${escAttr(p)}"${half ? ' checked' : ''}> Half-day</label> ${usual}</div>
-    <div class="sal-half">${box('start', 'Start')}<span data-salbreak="${escAttr(p)}" style="display:${half ? 'none' : 'contents'}">${box('break_out', 'Break')}${box('break_in', 'Back')}</span>${box('end', 'End')}</div>`;
+  const usual = u ? `usually ${u.start}–${u.end}${u.break_out ? `, break ${u.break_out}–${u.break_in}` : ''}` : '';
+  const box = (k, label) => `<label>${label}<input type="time" id="sal-t-${k}-${i}" data-salt="${k}" data-salp="${escAttr(p)}" value="${escAttr(t[k] || '')}"></label>`;
+  const offered = (SAL.targets.offered[role] || []);
+  const auto = SAL.targets.auto[p] || {}, set = SAL.targets.set[p] || {};
+  const targets = offered.map(c => `<label>${escHtml(SAL.targets.labels[c])}<input type="number" inputmode="numeric" min="0" id="sal-tg-${c}-${i}" data-saltg="${c}" data-salp="${escAttr(p)}"
+      value="${set[c] != null ? set[c] : ''}" placeholder="${auto[c] != null ? 'best ' + Number(auto[c]).toLocaleString('en-IN') : 'no data yet'}"></label>`).join('');
+  return `<div class="card sal-edit" data-saledit="${escAttr(p.toLowerCase())}">
+    <div class="name">${escHtml(p)}</div>
+    <div class="sal-edit-grid">
+      <label>Role<select data-salrole="${escAttr(p)}" id="sal-role-${i}">${roles.map(r => `<option${role === r ? ' selected' : ''}>${r}</option>`).join('')}${role ? '' : '<option selected value="">Choose…</option>'}</select></label>
+      <label>Base salary ₹<input type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="not set"></label>
+    </div>
+    <div class="sal-sub">Timings <label class="sal-chk"><input type="checkbox" id="sal-half-${i}" data-salhalf="${escAttr(p)}"${half ? ' checked' : ''}> Half-day</label>${usual ? ` <span class="sal-kn">${usual}</span>` : ''}</div>
+    <div class="sal-edit-grid four">${box('start', 'Start')}<span data-salbreak="${escAttr(p)}" style="display:${half ? 'none' : 'contents'}">${box('break_out', 'Break')}${box('break_in', 'Back')}</span>${box('end', 'End')}</div>
+    ${offered.length ? `<div class="sal-sub">Targets for the bonus <span class="sal-kn">blank = own best</span></div><div class="sal-edit-grid">${targets}</div>` : ''}
+  </div>`;
 }
 
 function salBind(container) {
@@ -1565,9 +1591,23 @@ function salBind(container) {
     if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to reject'; return; }
     salPost('/api/salary/commit/decide', { id: b.dataset.salreject, action: 'reject' }, 'Answer rejected.');
   }));
+  const editSearch = container.querySelector('#search-saledit');
+  if (editSearch) editSearch.addEventListener('input', () => {
+    const q = editSearch.value.trim().toLowerCase();
+    container.querySelectorAll('[data-saledit]').forEach(c => { c.style.display = !q || c.dataset.saledit.includes(q) ? '' : 'none'; });
+  });
+  const editList = container.querySelector('#sal-edit-list');
+  if (editList) editList.addEventListener('input', () => {
+    container.querySelector('#sal-dirty').textContent = 'Unsaved changes';
+  });
   const savePeople = container.querySelector('#sal-save-people');
   if (savePeople) savePeople.addEventListener('click', () => {
-    const roles = {}, salaries = {}, half_day = {}, shifts = {};
+    const roles = {}, salaries = {}, half_day = {}, shifts = {}, targets = {};
+    container.querySelectorAll('[data-saltg]').forEach(inp => {
+      const p = inp.dataset.salp;
+      targets[p] = targets[p] || {};
+      targets[p][inp.dataset.saltg] = inp.value === '' ? null : Number(inp.value);
+    });
     container.querySelectorAll('[data-salhalf]').forEach(cb => { half_day[cb.dataset.salhalf] = cb.checked; });
     container.querySelectorAll('[data-salt]').forEach(inp => {
       const p = inp.dataset.salp;
@@ -1578,7 +1618,7 @@ function salBind(container) {
     container.querySelectorAll('[data-salrole]').forEach(s2 => { if (s2.value) roles[s2.dataset.salrole] = s2.value; });
     container.querySelectorAll('[data-salbase]').forEach(i => { salaries[i.dataset.salbase] = i.value === '' ? null : Number(i.value); });
     savePeople.disabled = true;
-    salPost('/api/salary/settings', { roles, salaries, half_day, shifts }, 'Salaries, roles and timings saved.');
+    salPost('/api/salary/settings', { roles, salaries, half_day, shifts, targets }, 'Saved — every slip has been recalculated.');
   });
   const saveRules = container.querySelector('#sal-save-rules');
   if (saveRules) saveRules.addEventListener('click', () => {

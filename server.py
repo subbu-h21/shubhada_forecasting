@@ -657,6 +657,12 @@ def _salary_payload(month=None):
             'approved': settings['commitments'],
             'targets': [{'code': c, 'label': l} for c, _, l, _ in salary_mod.COMMIT_TARGETS],
         },
+        'targets': {
+            'auto': salary_mod.auto_targets(inputs),
+            'set': settings['targets'],
+            'offered': {r: [c for c, _, _, rs in salary_mod.COMMIT_TARGETS if r in rs] for r in salary_mod.ROLES},
+            'labels': {c: l for c, _, l, _ in salary_mod.COMMIT_TARGETS},
+        },
     }
 
 
@@ -678,10 +684,10 @@ def _json_body():
 def api_salary_settings():
     b = _json_body()
     _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'),
-                                        half_day=b.get('half_day'), shifts=b.get('shifts'))
+                                        half_day=b.get('half_day'), shifts=b.get('shifts'), targets=b.get('targets'))
     if err:
         return jsonify({'error': err}), 400
-    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts') if b.get(k)))
+    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts', 'targets') if b.get(k)))
     return jsonify(_salary_payload(b.get('month')))
 
 
