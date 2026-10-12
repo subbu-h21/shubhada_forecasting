@@ -192,9 +192,15 @@ def fetch(month, creds, profile_dir, log, want_attendance=True, want_charts=True
                 if not creds:
                     raise RuntimeError('Not logged in, and no shubhadahealth login is saved in the vault (Salary > Edit).')
                 log('Logging in with the login from the vault')
+                page.wait_for_selector('input[name="user"]', timeout=20000)
                 page.fill('input[name="user"]', creds['username'])
                 page.fill('input[name="pass"]', creds['password'])
-                page.click('button[type="submit"]')
+                page.keyboard.press('Tab')
+                # The Login button has NO type attribute in the page's HTML (the
+                # browser only reports .type == "submit" by default), so it is
+                # found by its text. It stays disabled until both boxes are
+                # filled; click() waits for it to become enabled.
+                page.locator('form button', has_text='Login').first.click(timeout=20000)
                 deadline = time.time() + 30
                 while time.time() < deadline and ('/login' in page.url or page.locator('input[name="pass"]').count()):
                     page.wait_for_timeout(1000)
