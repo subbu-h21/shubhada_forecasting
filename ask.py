@@ -186,6 +186,14 @@ Rules:
   person's OWN best - it shows whether they are at their best, not who is
   better - and mention Months_Scored when it is 1 or 2. For WHY a score
   moved, follow up with get_employee_monthly for the underlying numbers.
+- If a question asks about SALARY, salary slips, pay-related performance,
+  discipline cuts, late arrivals against agreed timings, the salary targets
+  or bonus, who is below the 60% floor, or how someone can earn more next
+  month, use get_salary_slips (with their name for one person). It carries
+  NO rupee amounts, by the owner's choice: never estimate or invent a pay
+  figure - say the amounts are on the dashboard (People > Salary) and answer
+  in percentages, marks and counts. For "how to earn more", point to their
+  weakest items, missed targets and discipline.
 - If a question asks which customers are due/overdue for a refill, or about
   repeat-purchase/reorder patterns for a product, use get_refill_due.
   Customers there are pseudonymous codes, same privacy rule as
@@ -635,6 +643,8 @@ def selftest():
         ('get_employee_monthly', {'name': 'Keerthana'}),
         ('get_employee_scorecard', {}),
         ('get_employee_scorecard', {'name': 'Keerthana'}),
+        ('get_salary_slips', {}),
+        ('get_salary_slips', {'name': 'Keerthana'}),
         ('get_employee_targets', {}),
         ('get_employee_attendance', {}),
         ('get_top_customers', {'n': 5, 'by': 'spend'}),

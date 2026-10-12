@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 import run_reckoner as rk
+import salary as salary_mod
 
 # Column names that must never appear in anything handed to the model.
 PII_COLUMNS = {
@@ -793,6 +794,149 @@ def get_employee_scorecard(name=None, month=None, n=15):
 
 
 # ---------------------------------------------------------------------------
+# Salary slips WITHOUT any rupee amount (owner's choice 2026-10-12, "plan b").
+# The answer is written by an outside AI service, so pay figures - base, each
+# part, calculated, to be paid, bonus, cuts in rupees - never leave this
+# machine; the owner sees those on the dashboard. _guard_no_money refuses to
+# return anything that still carries a rupee sign or a pay key.
+# ---------------------------------------------------------------------------
+_MONEY_KEYS = {'money', 'base', 'fixed', 'perf_pay', 'perf_max', 'disc_pay', 'disc_max', 'disc_deduction',
+               'calculated', 'payable', 'vs_base', 'commit_bonus', 'commit_max', 'admin_savings', 'leave_due',
+               'salary', 'salaries', 'share', 'plan', 'rs'}
+# items whose shown value is a rupee figure; their marks are kept, the value is not
+_RUPEE_ITEMS = {'S1', 'S4', 'S6', 'S5', 'T1'}
+
+
+def _guard_no_money(payload):
+    text = json.dumps(payload, default=str, ensure_ascii=False)
+
+    def keys(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from keys(v)
+    bad = _MONEY_KEYS.intersection(keys(payload))
+    if bad or '₹' in text:
+        raise ValueError(f'money guard tripped - salary tool tried to return pay figures {sorted(bad)}')
+    return payload
+
+
+def _salary_inputs():
+    if 'salary_inputs' not in _cache:
+        s, p = _load()
+        lines, _ = rk.compute_distributor_lines(p)
+        if 'employee_monthly' not in _cache:
+            _cache['employee_monthly'] = rk.build_employee_monthly(s, p, lines)
+        if 'employee_scorecard' not in _cache:
+            _cache['employee_scorecard'] = rk.build_employee_scorecard(s, p, lines, _cache['employee_monthly'][0])
+        _cache['salary_inputs'] = salary_mod.build_inputs(s, _cache['employee_monthly'][0],
+                                                          _cache['employee_scorecard'], _profit()[0])
+    return _cache['salary_inputs']
+
+
+def get_salary_slips(name=None, month=None, n=40):
+    """Monthly SALARY SLIPS - how each employee did against the salary rules,
+    WITHOUT any rupee amount. Pay amounts (base salary, each part, calculated,
+    to be paid, bonus, cuts in rupees) are never available here, by the
+    owner's choice: if asked for a rupee figure, say it is on the dashboard
+    (People > Salary) and give the percentages instead.
+
+    The rules: salary = Fixed 35% + Performance 45% + Discipline 20% of each
+    person's base. Performance (perf_score, 0-120%) is a role-weighted
+    average of groups (Sales, Fetching, Back-office, Accuracy, Customer,
+    Team, Owner's rating); every measured item is scored against the
+    person's OWN best month, and 90% of that best already earns full marks
+    (100). Under 60% (floor_hit) there is no performance pay. Discipline
+    loses discipline_cut_pct of its part: 5% per late arrival / long break
+    after 3 free incidents a month (an early exit counts half), judged
+    against the timings the owner agreed with that person (agreed_timings),
+    or their own usual pattern if none are set. Targets earn a bonus share
+    each when reached. A month under 10 active days is not scored. Until
+    trial_until, nobody is paid below their base. discipline_cut_pct is the
+    share of the DISCIPLINE part lost (never the performance part).
+
+    Use weak_items, missed targets and discipline to advise how someone can
+    earn more next month (lowest marks with the biggest group weight first).
+    Measured against each person's OWN best: it shows whether they are at
+    their best, not who is better than whom.
+
+    With `name` (contains-match): that person's slip for the month (latest
+    month when no month is given). With `month` ('YYYY-MM'): everyone that
+    month. Neither: the latest payable month. month_complete false means
+    the month is still running - say so, its figures cover part of it."""
+    inputs = _salary_inputs()
+    months = salary_mod.months_available(inputs)
+    if not months:
+        return _guard_no_money({'available': False, 'reason': 'no month carries the employee columns yet'})
+    mo = (month or '').strip() or months[-1]
+    if mo not in months:
+        return _guard_no_money({'available': True, 'months': months, 'rows': [],
+                                'note': f'{mo} has no slips - payable months are listed'})
+    rules = salary_mod.load_settings()['rules']
+    slips = salary_mod.compute_slips(inputs, mo)['slips']
+    if name:
+        slips = [x for x in slips if name.strip().lower() in x['employee'].lower()]
+    rows = []
+    for x in slips[:int(n)]:
+        d, sh, c = x['discipline'], x.get('shift') or {}, x.get('commitment')
+        items = []
+        for i in x['items']:
+            if i['score'] is None:
+                continue
+            # names like "Sales per day (₹)" are labels, not pay - written with "Rs" so the guard stays strict
+            row = {'item': i['label'].replace('₹', 'Rs '), 'group': i['group'], 'marks': i['score']}
+            if i['code'] not in _RUPEE_ITEMS and '₹' not in str(i['raw']):
+                row['value'] = i['raw']
+            items.append(row)
+        weak = sorted([i for i in items if i['marks'] < 95], key=lambda i: i['marks'])[:5]
+        charged = d['charged']
+        rows.append({
+            'employee': x['employee'], 'role': x['role'], 'month': mo, 'days_active': x['days_active'],
+            'perf_score': x['perf_score'], 'perf_paid_pct': x['perf_paid_pct'], 'floor_hit': x['floor_hit'],
+            'returns_gate': x['gate'],
+            'groups': [{'group': g['name'], 'marks': g['score'], 'weight_pct': g['share_pct']} for g in x['groups']],
+            # one person: every item; everyone: the weakest few, to keep each answer light
+            'items': items if name else None, 'weak_items': weak if name else weak[:3],
+            'discipline': {'late_arrivals': d['late'], 'long_breaks': d['long_lunch'], 'early_exits': d['early_exit'],
+                           'incidents': d['incidents'], 'free': d['free'], 'charged': charged,
+                           'discipline_cut_pct': min(100, charged * rules['pct_per_incident']),
+                           'timed': d['timed'], 'unplanned_leave_days': d['leave_days']},
+            'agreed_timings': ({k: sh.get(k) for k in ('start', 'break_out', 'break_in', 'end') if sh.get(k)}
+                               if sh.get('agreed') else None),
+            'half_day': bool(sh.get('half')),
+            'targets': ({'reached': c['met'], 'of': c['of'], 'counted': c['counted'],
+                         'checks': [{'target': t['label'].replace('₹', 'Rs'), 'target_value': t['target'], 'achieved': t['actual'],
+                                     'reached': t['met'], 'set_by': t['source']} for t in c['checks']]}
+                        if c else None),
+            'rated_by_owner': x['rated'], 'mistakes_logged': x['log_count'],
+            'trial': x['trial'],
+        })
+    if not name:
+        rows.sort(key=lambda r: (r['perf_score'] is None, -(r['perf_score'] or 0)))
+        for r in rows:   # everyone at once: just enough to compare and pick who to look at
+            r['groups'] = {g['group']: g['marks'] for g in r['groups']}
+            if r['targets']:
+                r['targets'] = {k: r['targets'][k] for k in ('reached', 'of', 'counted')}
+            d = r['discipline']
+            r['discipline'] = {k: d[k] for k in ('late_arrivals', 'long_breaks', 'early_exits', 'discipline_cut_pct',
+                                                  'unplanned_leave_days')}
+            for k in [k for k, v in r.items() if v in (None, False, [], {})]:
+                del r[k]
+    return _guard_no_money({
+        'available': True, 'month': mo, 'months': months, 'trial_until': rules['trial_until'],
+        'month_complete': mo < datetime.now().strftime('%Y-%m'),
+        'rules': {'full_marks_at_pct_of_own_best': rules['full_at_pct'], 'floor_pct': rules['floor_pct'],
+                  'cut_pct_per_incident': rules['pct_per_incident'], 'free_incidents': rules['free_incidents'],
+                  'min_days_to_score': rules['min_days_active']},
+        'note': 'Rupee amounts are deliberately not available here - they are on the dashboard (People > Salary).',
+        'rows': rows,
+    })
+
+
+# ---------------------------------------------------------------------------
 # On-demand employee KPI/target report from the SEPARATE shubhadahealth.com
 # system - not part of the reckoner's own data, and never fetched live: that
 # site needs a login, and no credential for it is stored anywhere in this
@@ -1275,6 +1419,9 @@ TOOLS = [
      'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_employee_scorecard', 'fn': get_employee_scorecard,
      'description': get_employee_scorecard.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
+    {'name': 'get_salary_slips', 'fn': get_salary_slips,
+     'description': get_salary_slips.__doc__,
      'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,
