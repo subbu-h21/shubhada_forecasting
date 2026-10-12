@@ -509,7 +509,8 @@ const PTT_FIRST_CHARS = 80;        // ...and the very first piece kept short
 const TALK_RATE = 16000;           // speech-to-text needs no more than this
 const TALK_PREROLL_MS = 700;       // sound kept from just before speech is noticed
 const TALK_START_MS = 200;         // this much loud sound = you started speaking
-const TALK_START_MS_OVER_ANSWER = 400;  // stricter while an answer plays (its own echo)
+const TALK_START_MS_OVER_ANSWER = 800;  // stricter while an answer plays: its own voice from the
+                                         // speaker must not count as you interrupting (was 400)
 const TALK_END_SILENCE_MS = 900;   // this much quiet = you finished
 const TALK_MIN_SPEECH_MS = 450;    // shorter blips (a cough, a click) are ignored
 const TALK_MAX_UTTERANCE_MS = 30000;   // a very long stretch is sent anyway

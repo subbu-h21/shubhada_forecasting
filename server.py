@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -1212,6 +1213,13 @@ def api_voice_session():
 # back word-perfect. Both are allowed by this account's OpenRouter
 # zero-data-retention setting (Gemini 3.8 TTS is not). Override in .env.
 SPEECH_STT_MODEL = os.environ.get('SPEECH_STT_MODEL', 'microsoft/mai-transcribe-2')
+# 2026-10-12: MAI-Transcribe-2's reply time was measured swinging between 1 s and
+# 29 s on the same 2-second clip, minutes apart - a provider-side stall, not this
+# PC's network (connect < 0.1 s). So it gets this many seconds, then the same clip
+# goes to the fallback, which answered in 0.7-2 s every time and reads Kannada
+# nearly as well. Empty fallback model = wait for the first one however long.
+SPEECH_STT_TIMEOUT_S = float(os.environ.get('SPEECH_STT_TIMEOUT_S', '8'))
+SPEECH_STT_FALLBACK_MODEL = os.environ.get('SPEECH_STT_FALLBACK_MODEL', 'openai/gpt-4o-mini-transcribe')
 SPEECH_TTS_MODEL = os.environ.get('SPEECH_TTS_MODEL', 'google/gemini-3.1-flash-tts-preview')
 SPEECH_TTS_VOICE = os.environ.get('SPEECH_TTS_VOICE', 'Kore')
 SPEECH_MAX_AUDIO_BYTES = 4_000_000  # ~2 minutes of 16 kHz mono WAV
@@ -1252,8 +1260,10 @@ business (sales, stock, profit, purchases, orders, suppliers, staff, customers,
 forecasts), a follow-up to the assistant's last answer, or addressing it by
 name. Background chatter, talking to a customer or colleague, and noise are
 NOT for the assistant. Plain acknowledgements (okay, yes, haan, thank you) are
-NOT for the assistant unless its last answer asked the owner a question. If
-unsure, answer YES. Reply with exactly YES or NO."""
+NOT for the assistant unless its last answer asked the owner a question. An
+utterance that mostly repeats the assistant's own last answer is the phone
+hearing itself through the speaker - NOT for the assistant. If unsure, answer
+YES. Reply with exactly YES or NO."""
 
 
 def _speech_gate(text, last_answer):
@@ -1264,6 +1274,47 @@ def _speech_gate(text, last_answer):
         messages=[{'role': 'system', 'content': SPEECH_GATE_PROMPT}, {'role': 'user', 'content': user}])
     verdict = (resp.choices[0].message.content or '').strip().upper()
     return not verdict.startswith('NO'), ask_mod.usage_cost(resp.usage)
+
+
+def _words(text):
+    """Lower-cased words with punctuation stripped. Split on spaces only, so a
+    Kannada word (base letters + vowel signs) stays one word."""
+    return [w for w in (t.strip('.,?!।:;"\'()[]').lower() for t in text.split()) if w]
+
+
+def _echo_of_last_answer(text, last_answer, min_words=5, min_overlap=0.85):
+    """True when the utterance is the assistant's own last answer coming back in
+    through the microphone (speakerphone, a phone held near the ear). Measured
+    2026-10-12: an echo re-uses 100% of the answer's words even when the mic
+    garbles it; a genuine follow-up re-uses at most two thirds ("and last
+    month?") and is short, a new question almost none."""
+    words = _words(text)
+    if len(words) < min_words or not last_answer:
+        return False
+    answer_words = set(_words(last_answer))
+    return sum(w in answer_words for w in words) / len(words) >= min_overlap
+
+
+def _transcribe(audio):
+    """-> (text, cost_usd, model_used). Tries SPEECH_STT_MODEL for at most
+    SPEECH_STT_TIMEOUT_S, then hands the same clip to SPEECH_STT_FALLBACK_MODEL.
+    Raises only when both fail (or when there is no fallback)."""
+    client = _openrouter_client()
+    clip = ('question.wav', audio, 'audio/wav')
+    try:
+        # max_retries=0: the SDK would otherwise retry a timed-out call twice,
+        # turning an 8-second limit into 24 seconds.
+        result = client.with_options(timeout=SPEECH_STT_TIMEOUT_S, max_retries=0) \
+            .audio.transcriptions.create(model=SPEECH_STT_MODEL, file=clip)
+        return (getattr(result, 'text', '') or '').strip(), ask_mod.usage_cost(getattr(result, 'usage', None)), SPEECH_STT_MODEL
+    except Exception as e:
+        if not SPEECH_STT_FALLBACK_MODEL or SPEECH_STT_FALLBACK_MODEL == SPEECH_STT_MODEL:
+            raise
+        logger.warning('Speech-to-text: %s gave %s within %.0fs - using %s',
+                       SPEECH_STT_MODEL, type(e).__name__, SPEECH_STT_TIMEOUT_S, SPEECH_STT_FALLBACK_MODEL)
+    result = client.with_options(timeout=20, max_retries=0) \
+        .audio.transcriptions.create(model=SPEECH_STT_FALLBACK_MODEL, file=clip)
+    return (getattr(result, 'text', '') or '').strip(), ask_mod.usage_cost(getattr(result, 'usage', None)), SPEECH_STT_FALLBACK_MODEL
 
 
 @app.route('/api/speech/transcribe', methods=['POST'])
@@ -1278,24 +1329,27 @@ def api_speech_transcribe():
     # the question that follows doesn't wait on them.
     warm_ask_cache_in_background()
     try:
-        result = _openrouter_client().audio.transcriptions.create(
-            model=SPEECH_STT_MODEL, file=('question.wav', audio, 'audio/wav'))
+        text, cost, _model = _transcribe(audio)
     except Exception as e:
         logger.warning('Speech-to-text failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not transcribe ({type(e).__name__}).'}), 502
-    text = (getattr(result, 'text', '') or '').strip()
-    cost = ask_mod.usage_cost(getattr(result, 'usage', None))
-    addressed = True
+    addressed, echo = True, False
     if request.args.get('gate') == '1' and text:
         # The page sends the assistant's last answer (URL-encoded, as headers
         # can't carry Kannada) so a follow-up like "and last month?" passes.
         last_answer = urllib.parse.unquote(request.headers.get('X-Voice-Context', ''))[:600]
-        try:
-            addressed, gate_cost = _speech_gate(text, last_answer)
-            cost += gate_cost
-        except Exception as e:
-            logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
-    return jsonify({'text': text, 'addressed': addressed, 'cost': cost})
+        if _echo_of_last_answer(text, last_answer):
+            # The phone heard its own answer: not a question, and not worth a
+            # paid check - without this the gate waved the echo through and the
+            # assistant answered itself.
+            addressed, echo = False, True
+        else:
+            try:
+                addressed, gate_cost = _speech_gate(text, last_answer)
+                cost += gate_cost
+            except Exception as e:
+                logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
+    return jsonify({'text': text, 'addressed': addressed, 'echo': echo, 'cost': cost})
 
 
 @app.route('/api/speech/tts', methods=['POST'])

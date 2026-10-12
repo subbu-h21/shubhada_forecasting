@@ -478,6 +478,12 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     # "stop", no refusal, just nothing - a provider/model-side issue, not a
     # bug here). google/gemini-2.5-pro (GA, stable) handles the identical
     # payload correctly, so it's the default until 3.1 pro leaves preview.
+    # Same finding again on 2026-10-12 for google/gemini-3.7-flash (set in .env
+    # at the time): on the final-answer call, which follows a tool turn in the
+    # history, it returned empty content on 9 of 10 calls, so every answer was
+    # really the fast model's retry below, 2-13 s late. google/gemini-2.5-flash
+    # answered 3 of 3 in 1.5-7 s on the identical payload - that is what .env
+    # should point at. tool_choice='none' does not cure the empty replies.
     reasoning_model = os.environ.get('OPENROUTER_MODEL_REASONING', 'google/gemini-2.5-pro')
 
     client = OpenAI(
@@ -538,9 +544,16 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     # Final answer: the reasoning model synthesizes the actual response from
     # whatever the fast model already gathered above - no tools needed here,
     # the data's already in hand. Also the fallback if MAX_STEPS ran out.
+    #
+    # Spoken answers are the exception: SPEAK_PROMPT already caps them at
+    # about four plain sentences, and the owner is standing there listening,
+    # so the fast model writes them directly. Measured 2026-10-12: the
+    # reasoning step added 5-10 s per spoken question (plus an empty reply and
+    # a retry with the model .env had at the time) for no audible gain.
+    final_model = fast_model if speak else reasoning_model
     if verbose:
-        print(f'  → answering with [{reasoning_model}]')
-    resp = complete(reasoning_model, with_tools=False)
+        print(f'  → answering with [{final_model}]')
+    resp = complete(final_model, with_tools=False)
     answer = resp.choices[0].message.content
     if answer:
         return answer
@@ -550,7 +563,7 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     # answer)" response, fall back to the fast model for one attempt, which
     # has already proven able to answer directly when it skips tool calls.
     if verbose:
-        print(f'  → [{reasoning_model}] returned empty, retrying with [{fast_model}]')
+        print(f'  → [{final_model}] returned empty, retrying with [{fast_model}]')
     resp = complete(fast_model, with_tools=False)
     answer = resp.choices[0].message.content
     return answer or "Sorry, I couldn't generate an answer for that - try rephrasing the question."
