@@ -8,7 +8,7 @@ dashboard so reports can be checked from a phone.
 
 ## Setup
 
-1. Install dependencies: `pip install pandas openpyxl flask waitress numpy`
+1. Install dependencies: `pip install pandas openpyxl flask waitress numpy playwright==1.61.0` (Playwright is only for sending salary slips by WhatsApp; it uses the installed Google Chrome)
 2. Drop your first month's Sale and Purchase `.xlsx` files into `data/raw/`
 3. Run `python run_reckoner.py` — this ingests the files, builds
    `data/processed/*.csv` (permanent history) and writes
@@ -35,7 +35,7 @@ from the *full* history to date.
 
 3. **Install the Python packages:**
    ```bash
-   pip install pandas openpyxl flask waitress numpy
+   pip install pandas openpyxl flask waitress numpy playwright==1.61.0
    ```
 
 4. **Bring your data over.** `data/raw/` and `data/processed/` are
@@ -121,6 +121,14 @@ Each month:
    pay) - check it and press Send yourself. Save each person's number on the
    Edit screen so it opens their chat directly; without one you pick the chat.
    The shop's margin and branch sales figures are left out of the message.
+   **Send automatically** (top of Slips) sends every slip not yet sent this
+   month from WhatsApp on this PC, with no Send button to press. It uses its
+   own Chrome profile (`.whatsapp_profile/`, gitignored - it holds the linked
+   WhatsApp session); the first run shows a QR code to scan with your phone
+   (WhatsApp > Linked devices > Link a device). Each message is read back
+   before sending and confirmed in the chat afterwards, using the order
+   automation project's WhatsApp driver (copied as `salary_whatsapp.py`).
+   Anyone already sent is skipped. Try **Send a test to my own number** first.
 
 What you enter is kept in `data/processed/salary/`, so it's included in the
 normal backups.

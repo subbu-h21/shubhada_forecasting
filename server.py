@@ -644,6 +644,7 @@ def _salary_payload(month=None):
                        'text': salary_mod.slip_message(sl, settings['rules'])}
     return {
         'month': month, 'months': months, 'slips': result['slips'],
+        'sends': salary_mod.load_sends().get(month, {}) if month else {},
         'phones': settings['phones'], 'shares': salary_mod.load_shares().get(month, {}) if month else {}, 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
         'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
@@ -769,6 +770,163 @@ def api_salary_shared():
         return jsonify({'error': err}), 400
     logger.info('Salary slip opened in WhatsApp: %s %s', b.get('month'), b.get('employee'))
     return jsonify({'ok': True, 'shares': salary_mod.load_shares().get(b.get('month'), {})})
+
+
+# --- Send slips by WhatsApp automatically -----------------------------------
+# Drives WhatsApp Web in the reckoner's OWN Chrome profile (linked once by a QR
+# scan), with the order automation project's proven driver (salary_whatsapp.py):
+# the typed message is read back and must match before Send is pressed, and a
+# send is confirmed from the conversation itself. One run at a time; a person
+# already sent this month is skipped unless the owner asks to send again.
+WA_PROFILE_DIR = ROOT / '.whatsapp_profile'
+WA_QR_WAIT_SECONDS = 180
+_wa_lock = threading.Lock()
+_wa_state = {'running': False, 'stage': '', 'log': [], 'results': [], 'month': None, 'test': False}
+
+
+def _wa_log(message):
+    with _wa_lock:
+        _wa_state['log'] = (_wa_state['log'] + [f"{time.strftime('%H:%M:%S')} {message}"])[-60:]
+    logger.info('[whatsapp] %s', message)
+
+
+def _wa_stage(stage):
+    with _wa_lock:
+        _wa_state['stage'] = stage
+
+
+class _WaUnlinked(Exception):
+    """Raised past the per-person handler: once WhatsApp is unlinked, nothing
+    more can go out, so the run stops instead of failing everyone left."""
+
+
+def _wa_wait_linked(page, wa):
+    """WhatsApp Web shows its QR code only after a while, and before that its
+    page reads like a linked one - so watch for the QR for a good 40 seconds
+    before trusting the link, then give the owner time to scan it."""
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        page.wait_for_timeout(2000)
+        if not wa.is_linked(page):
+            _wa_stage('scan the QR code')
+            _wa_log('Scan the QR code in the Chrome window: on your phone, WhatsApp > Linked devices > '
+                    f'Link a device. Waiting up to {max(1, WA_QR_WAIT_SECONDS // 60)} minute'
+                    + ('s.' if WA_QR_WAIT_SECONDS >= 120 else '.'))
+            qr_deadline = time.time() + WA_QR_WAIT_SECONDS
+            while time.time() < qr_deadline and not wa.is_linked(page):
+                page.wait_for_timeout(2000)
+            if not wa.is_linked(page):
+                raise RuntimeError('WhatsApp was not linked - the QR code was not scanned in time.')
+            _wa_log('Linked. Waiting for WhatsApp to finish loading.')
+            page.wait_for_timeout(15000)
+            return
+    _wa_log('WhatsApp is linked.')
+
+
+def _run_wa_send(month, jobs, test):
+    """jobs: [(employee, number, text)]. Every person is tried on their own -
+    one chat that won't open must not cost the others."""
+    import salary_whatsapp as wa
+    from playwright.sync_api import sync_playwright
+    results = []
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(WA_PROFILE_DIR), channel='chrome', headless=False,
+                args=['--start-maximized'], no_viewport=True)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                _wa_stage('opening WhatsApp')
+                page.goto(wa.WEB_URL, wait_until='domcontentloaded', timeout=90000)
+                _wa_wait_linked(page, wa)
+                for i, (emp, number, text) in enumerate(jobs, 1):
+                    _wa_stage(f'sending {i} of {len(jobs)}: {emp}')
+                    try:
+                        if not wa.open_chat(page, number, '', on_progress=_wa_log):
+                            if not wa.is_linked(page):
+                                # stop rather than fail everyone left: nothing more can go out
+                                for left_emp, _, _ in jobs[i - 1:]:
+                                    results.append({'employee': left_emp, 'sent': False,
+                                                    'reason': 'not attempted - WhatsApp got unlinked'})
+                                raise _WaUnlinked('WhatsApp got unlinked part-way - scan the QR again and send the rest.')
+                            sent, reason = False, 'chat did not open (number not on WhatsApp?)'
+                        else:
+                            out = wa.send_message(page, text, dry_run=False, on_progress=_wa_log)
+                            sent, reason = bool(out.get('sent')), out.get('reason') or ''
+                    except _WaUnlinked:
+                        raise
+                    except Exception as exc:
+                        logger.error('WhatsApp send to %s failed:\n%s', emp, traceback.format_exc())
+                        sent, reason = False, str(exc)[:160]
+                    results.append({'employee': emp, 'sent': sent, 'reason': reason})
+                    if not test:
+                        salary_mod.record_send(month, emp, sent, reason)
+                    with _wa_lock:
+                        _wa_state['results'] = list(results)
+                done = sum(r['sent'] for r in results)
+                _wa_stage(f'finished: sent {done} of {len(jobs)}')
+                _wa_log(f'Finished: sent {done} of {len(jobs)}.')
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.error('WhatsApp sending stopped:\n%s', traceback.format_exc())
+        _wa_stage('stopped')
+        _wa_log(f'Stopped: {exc}')
+        with _wa_lock:
+            _wa_state['results'] = results
+    finally:
+        with _wa_lock:
+            _wa_state['running'] = False
+
+
+@app.route('/api/salary/whatsapp/send', methods=['POST'])
+@requires_auth
+def api_salary_whatsapp_send():
+    b = _json_body()
+    payload = _salary_payload(b.get('month'))
+    month = payload['month']
+    by_name = {s['employee']: s for s in payload['slips']}
+    wanted = [e for e in (b.get('employees') or []) if e in by_name]
+    if not wanted:
+        return jsonify({'error': 'Choose whose slips to send.'}), 400
+    test_number = salary_mod.normalise_phone(b.get('test_number') or '')
+    test = bool(b.get('test_number'))
+    if test and not 11 <= len(test_number) <= 15:
+        return jsonify({'error': 'Type your own 10-digit WhatsApp number for the test.'}), 400
+    sends = payload['sends']
+    jobs, skipped = [], []
+    for emp in wanted:
+        sl = by_name[emp]
+        if test:
+            jobs.append((emp, test_number, 'TEST - not sent to the employee\n\n' + sl['share']['text']))
+            break                                  # a test sends one slip, to the owner's own number
+        if not sl['share']['phone']:
+            skipped.append({'employee': emp, 'reason': 'no WhatsApp number saved'})
+        elif sends.get(emp, {}).get('sent') and not b.get('resend'):
+            skipped.append({'employee': emp, 'reason': 'already sent this month'})
+        else:
+            jobs.append((emp, sl['share']['phone'], sl['share']['text']))
+    if not jobs:
+        return jsonify({'error': 'Nothing to send - ' + '; '.join(f"{s['employee']}: {s['reason']}" for s in skipped[:5])}), 400
+    with _wa_lock:
+        if _wa_state['running']:
+            return jsonify({'error': 'Already sending - wait for it to finish.'}), 409
+        _wa_state.update(running=True, stage='starting', log=[], results=[], month=month, test=test)
+    logger.info('WhatsApp salary send started: %s %s people%s', month, len(jobs), ' (test)' if test else '')
+    threading.Thread(target=_run_wa_send, args=(month, jobs, test), daemon=True).start()
+    return jsonify({'started': True, 'count': len(jobs), 'skipped': skipped, 'test': test})
+
+
+@app.route('/api/salary/whatsapp/status')
+@requires_auth
+def api_salary_whatsapp_status():
+    with _wa_lock:
+        st = {k: (list(v) if isinstance(v, list) else v) for k, v in _wa_state.items()}
+    st['sends'] = salary_mod.load_sends().get(request.args.get('month') or st.get('month') or '', {})
+    return jsonify(st)
 
 
 @app.route('/api/salary/chart', methods=['POST'])

@@ -1133,18 +1133,24 @@ def slip_message(x, rules):
     Follows order automation's WhatsApp rules (_share_message there): short
     flush-left lines, *bold* for structure, and NO list syntax at the start of
     a line - no "1. ", "- " or "* " - because WhatsApp's composer turns those
-    into real lists and rewrites the text as it goes. The owner presses Send."""
+    into real lists and rewrites the text as it goes.
+
+    Wording is the owner's own (2026-10-12, edited by hand on a real message
+    and confirmed): "Shubhada Pharma", questions go to ADMIN, and the base
+    salary itself is not shown to staff."""
     mon = f"{_MONTHS[int(x['month'][5:7]) - 1]} {x['month'][:4]}"
     m, d, sh = x['money'], x['discipline'], x.get('shift') or {}
-    L = [f'*Shubhada Health - Salary slip, {mon}*', f"*{x['employee']}* ({x['role']})",
+    short = x['days_active'] < rules['min_days_active']
+    days = f"{x['days_active']} day{'s' if x['days_active'] != 1 else ''}"
+    L = [f'*Shubhada Pharma - Salary slip, {mon}*', f"*{x['employee']}* ({x['role']})",
          f"Days worked: {x['days_active']}"]
     if x['trial']:
         L.append('Trial month: you are paid at least your base salary. / ಪ್ರಯೋಗ ತಿಂಗಳು')
 
     if m:
-        L += ['', '*Salary / ಸಂಬಳ*', f"Base salary: {_rs(m['base'])}",
+        L += ['', '*Salary / ಸಂಬಳ*',
               f"Fixed ({rules['fixed_pct']:g}%): {_rs(m['fixed'])}",
-              f"Performance: {_rs(m['perf_pay'])} of {_rs(m['perf_max'])}",
+              f"Performance: {_rs(m['perf_pay'])} (full marks = {_rs(m['perf_max'])})",
               f"Discipline: {_rs(m['disc_pay'])} of {_rs(m['disc_max'])}"]
         if m.get('commit_max'):
             L.append(f"Target bonus: {_rs(m['commit_bonus'])} of {_rs(m['commit_max'])}")
@@ -1156,12 +1162,17 @@ def slip_message(x, rules):
 
     perf = x['perf_score']
     L += ['', f"*Performance / ಸಾಧನೆ: {'not scored' if perf is None else f'{perf}%'}*"]
-    if x['floor_hit']:
+    if short:
+        # a part month: listing marks under "not scored" only confuses
+        L.append(f"Only {days} worked - performance is scored from {rules['min_days_active']:g} days, "
+                 f"so there is no performance pay this month.")
+    elif x['floor_hit']:
         L.append(f"Below {rules['floor_pct']:g}%, so no performance pay this month.")
     elif x.get('gate') and x['gate']['failed']:
         L.append(f"Returns were {x['gate']['returns_pct']}% of sales (limit {x['gate']['limit']}%), so no performance pay.")
-    L.append(f"{rules['full_at_pct']:g}% of your own best month = full marks (100).")
-    for g in x['groups']:
+    if not short:
+        L.append(f"{rules['full_at_pct']:g}% of your own best month = full marks (100).")
+    for g in ([] if short else x['groups']):
         L += ['', f"_{g['name']}_: {g['score']} marks (counts {g['share_pct']}%)"]
         for i in x['items']:
             if i['group'] != g['code'] or i['score'] is None:
@@ -1186,15 +1197,16 @@ def slip_message(x, rules):
         L.append(f"Unplanned leave days: {d['leave_days']}")
 
     c = x.get('commitment')
-    if c:
+    if c and not c['counted']:
+        L += ['', '*Targets / ಗುರಿ: not counted this month*',
+              f"Only {days} worked - targets are checked from {rules['min_days_active']:g} days."]
+    elif c:
         L += ['', f"*Targets / ಗುರಿ: {c['met']} of {c['of']} reached*"]
         for t in c['checks']:
             L.append(f"{t['label']}: target {t['target']:,.0f}, you did {t['actual']:,.0f} - "
                      + ('reached' if t['met'] else 'not reached'))
-        if not c['counted']:
-            L.append('Too few days worked to count targets this month.')
 
-    L += ['', 'Questions? Please talk to the owner. / ಪ್ರಶ್ನೆಗಳಿದ್ದರೆ ಮಾಲೀಕರನ್ನು ಸಂಪರ್ಕಿಸಿ.']
+    L += ['', 'Questions? Please talk to ADMIN. / ಪ್ರಶ್ನೆಗಳಿದ್ದರೆ ADMIN ಸಂಪರ್ಕಿಸಿ.']
     return '\n'.join(L)
 
 
@@ -1212,6 +1224,24 @@ def record_share(month, employee):
         sh.setdefault(month, {})[str(employee)[:120]] = time.strftime('%Y-%m-%d %H:%M')
         _save(SHARES_PATH, sh)
     return None
+
+
+SENDS_PATH = SALARY_DIR / 'sends.json'
+
+
+def load_sends():
+    return _load(SENDS_PATH, {})
+
+
+def record_send(month, employee, sent, reason=''):
+    """What the automatic sender did for one person this month - kept so a
+    second run never messages someone twice (a slip already sent is skipped
+    unless the owner asks to send again)."""
+    with _lock:
+        sd = load_sends()
+        sd.setdefault(month, {})[str(employee)[:120]] = {
+            'at': time.strftime('%Y-%m-%d %H:%M'), 'sent': bool(sent), 'reason': str(reason or '')[:200]}
+        _save(SENDS_PATH, sd)
 
 
 def summary(result):

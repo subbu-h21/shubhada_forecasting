@@ -40,6 +40,10 @@ reports/**/*.xlsx
 # copied. Not a substitute for an off-site backup (see README).
 backups/
 
+# The reckoner's own Chrome profile for WhatsApp Web - holds the linked
+# WhatsApp session (anyone with it can read and send the owner's messages).
+.whatsapp_profile/
+
 # --- Logs ---
 server.log
 *.log

@@ -1209,6 +1209,7 @@ function salSlipsHTML() {
   const shared = SAL.slips.filter(x => (SAL.shares || {})[x.employee]).length;
   html += `<div class="sal-note"><b>Share on WhatsApp</b> on each card opens WhatsApp with that person's full slip already typed — check it and press Send. Opened ${shared} of ${SAL.slips.length} this month.
     <span class="kn">ಪ್ರತಿ ಕಾರ್ಡ್‌ನ "Share on WhatsApp" ಒತ್ತಿ — ಸಂದೇಶ ಸಿದ್ಧ, ನೀವು Send ಒತ್ತಿ.</span></div>`;
+  html += salAutoSendHTML();
   if (s.not_rated) html += `<div class="sal-note">${s.not_rated} not rated for ${monthAbbr(SAL.month)} yet — their rating part is left out until you rate them in <b>Ratings</b>.</div>`;
   html += `<div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -1243,7 +1244,7 @@ function salSlipCard(x) {
     const w = v => (v / tot * 100).toFixed(1) + '%';
     bar = `<div class="sal-bar" role="img" aria-label="Fixed ${money(m.fixed)}, performance ${money(m.perf_pay)}, discipline ${money(m.disc_pay)}">
       <i style="width:${w(m.fixed)};background:var(--ink-faint)"></i><i style="width:${w(m.perf_pay)};background:var(--accent)"></i><i style="width:${w(m.disc_pay)};background:var(--ok)"></i></div>
-      <div class="meta" style="margin-top:4px">Fixed ${money(m.fixed)} · Performance ${money(m.perf_pay)} of ${money(m.perf_max)} · Discipline ${money(m.disc_pay)} of ${money(m.disc_max)}</div>`;
+      <div class="meta" style="margin-top:4px">Fixed ${money(m.fixed)} · Performance ${money(m.perf_pay)} (full marks ${money(m.perf_max)}) · Discipline ${money(m.disc_pay)} of ${money(m.disc_max)}</div>`;
   }
   const open = salOpen[x.employee];
   return `<div class="card" style="--card-stripe:${color}">
@@ -1260,7 +1261,106 @@ function salShareRow(x) {
   const href = `https://wa.me/${sh.phone || ''}?text=${encodeURIComponent(sh.text || '')}`;
   return `<div class="sal-share">
     <a class="sal-btn sal-wa" href="${escAttr(href)}" target="_blank" rel="noopener" data-salshare="${escAttr(x.employee)}">Share on WhatsApp</a>
+    ${salSentChip(x.employee)}
     <span class="meta">${done ? `Opened in WhatsApp ${Number(done.slice(8, 10))} ${monthAbbr(done.slice(0, 7))} ${escHtml(done.slice(11, 16))}` : ''}${sh.phone ? '' : `${done ? ' · ' : ''}No number saved — you'll pick the chat. Add it in <b>Edit</b>.`}</span></div>`;
+}
+
+function salSentChip(emp) {
+  const r = (SAL.sends || {})[emp];
+  if (!r) return '';
+  const when = `${Number(r.at.slice(8, 10))} ${monthAbbr(r.at.slice(0, 7))} ${escHtml(r.at.slice(11, 16))}`;
+  return r.sent ? `<span class="pill" style="color:var(--ok);background:var(--ok-soft)">Sent ${when}</span>`
+    : `<span class="pill" style="color:var(--danger);background:var(--danger-soft)" title="${escAttr(r.reason)}">Not sent ${when}</span>`;
+}
+
+let salWa = null;          // last /whatsapp/status
+let salWaTimer = null;
+let salWaConfirm = false;
+
+function salAutoSendHTML() {
+  const withNo = SAL.slips.filter(x => x.share && x.share.phone);
+  const sent = withNo.filter(x => (SAL.sends || {})[x.employee] && SAL.sends[x.employee].sent);
+  const todo = withNo.filter(x => !sent.includes(x));
+  const running = salWa && salWa.running;
+  let h = `<div class="sal-form sal-auto"><div class="name">Send automatically <span class="sal-kn">ತಾನಾಗಿಯೇ ಕಳುಹಿಸಿ</span></div>
+    <div class="sal-note" style="margin:0">Sends each slip from WhatsApp on this PC — no Send button to press. ${withNo.length} of ${SAL.slips.length} have a number; ${sent.length} already sent for ${monthAbbr(SAL.month)}.
+    A Chrome window opens; the first time, scan its QR code with your phone (WhatsApp → Linked devices → Link a device). Anyone already sent is skipped, so nobody gets it twice.</div>`;
+  if (running) {
+    h += `<div class="sal-msg ok" style="margin:0">Sending… ${escHtml(salWa.stage || '')}</div>`;
+  } else if (!salWaConfirm) {
+    h += `<div style="display:flex;flex-wrap:wrap;gap:8px"><button class="sal-btn" id="sal-wa-all" ${todo.length ? '' : 'disabled'}>Send to ${todo.length} ${todo.length === 1 ? 'person' : 'people'} not sent yet</button></div>
+      <details><summary class="sal-link" style="padding:0">Send a test to my own number first</summary>
+        <div class="sal-edit-grid" style="margin-top:6px"><label>My WhatsApp number<input type="tel" id="sal-wa-testno" placeholder="10-digit mobile"></label>
+        <label>Whose slip<select id="sal-wa-testemp">${SAL.slips.map(x => `<option>${escHtml(x.employee)}</option>`).join('')}</select></label></div>
+        <button class="sal-btn ghost" id="sal-wa-test" style="margin-top:8px">Send test to me</button></details>`;
+  } else {
+    h += `<div class="sal-msg err" style="margin:0;font-weight:500">Send ${todo.length} salary slip${todo.length === 1 ? '' : 's'} by WhatsApp now? These are real messages to your staff and cannot be taken back.</div>
+      <div style="display:flex;gap:8px"><button class="sal-btn" id="sal-wa-yes">Yes, send ${todo.length}</button><button class="sal-btn ghost" id="sal-wa-no">Cancel</button></div>`;
+  }
+  if (salWa && (salWa.results || []).length) {
+    h += `<div class="meta">${salWa.test ? 'Test: ' : ''}` + salWa.results.map(r => `${r.sent ? '✓' : '✗'} ${escHtml(r.employee)}${r.sent ? '' : ` — ${escHtml(r.reason)}`}`).join('<br>') + `</div>`;
+  }
+  if (salWa && (salWa.log || []).length) {
+    h += `<details${running ? ' open' : ''}><summary class="sal-link" style="padding:0">What it's doing</summary><div class="meta" style="white-space:pre-wrap">${escHtml(salWa.log.slice(-8).join('\n'))}</div></details>`;
+  }
+  return h + `</div>`;
+}
+
+async function salWaPoll(container) {
+  clearTimeout(salWaTimer);
+  try {
+    const res = await authFetch('/api/salary/whatsapp/status?month=' + encodeURIComponent(salMonth));
+    salWa = await res.json();
+    if (salWa.sends) SAL.sends = salWa.sends;
+  } catch (e) { return; }
+  if (currentPeopleSub === 'salary' && salView === 'slips') {
+    const box = container.querySelector('.sal-auto');
+    if (box) {
+      // redraw just this panel and the sent chips, so a search or open card isn't lost
+      box.outerHTML = salAutoSendHTML();
+      salBindAuto(container);
+      container.querySelectorAll('.sal-share').forEach(row => {
+        const emp = row.querySelector('[data-salshare]').dataset.salshare;
+        row.querySelectorAll('.pill').forEach(pl => pl.remove());
+        row.querySelector('[data-salshare]').insertAdjacentHTML('afterend', salSentChip(emp));
+      });
+    }
+  }
+  if (salWa.running) salWaTimer = setTimeout(() => salWaPoll(container), 3000);
+}
+
+async function salWaStart(container, body) {
+  try {
+    const res = await authFetch('/api/salary/whatsapp/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ month: salMonth }, body)) });
+    const out = await res.json();
+    salWaConfirm = false;
+    if (!res.ok) { salMsg = { kind: 'err', text: out.error || 'Could not start sending.' }; renderSalary(container); return; }
+    const skip = (out.skipped || []).length;
+    salMsg = { kind: 'ok', text: out.test ? 'Sending a test to your number — watch the Chrome window.'
+      : `Sending ${out.count} slip${out.count === 1 ? '' : 's'}${skip ? ` (${skip} skipped)` : ''} — watch the Chrome window.` };
+    salWa = { running: true, stage: 'starting', results: [], log: [] };
+    renderSalary(container);
+  } catch (e) { if (e.message !== 'unauthorized') { salMsg = { kind: 'err', text: 'Could not reach the server.' }; renderSalary(container); } }
+}
+
+function salBindAuto(container) {
+  const all = container.querySelector('#sal-wa-all');
+  if (all) all.addEventListener('click', () => { salWaConfirm = true; renderSalary(container); });
+  const no = container.querySelector('#sal-wa-no');
+  if (no) no.addEventListener('click', () => { salWaConfirm = false; renderSalary(container); });
+  const yes = container.querySelector('#sal-wa-yes');
+  if (yes) yes.addEventListener('click', () => {
+    yes.disabled = true;
+    const todo = SAL.slips.filter(x => x.share && x.share.phone && !((SAL.sends || {})[x.employee] || {}).sent).map(x => x.employee);
+    salWaStart(container, { employees: todo });
+  });
+  const test = container.querySelector('#sal-wa-test');
+  if (test) test.addEventListener('click', () => {
+    test.disabled = true;
+    salWaStart(container, { employees: [container.querySelector('#sal-wa-testemp').value],
+      test_number: container.querySelector('#sal-wa-testno').value });
+  });
 }
 
 function salDetailHTML(x) {
@@ -1522,6 +1622,8 @@ function salBind(container) {
   container.querySelectorAll('[data-salmonth]').forEach(b => b.addEventListener('click', () => { salMonth = b.dataset.salmonth; renderSalary(container); }));
   container.querySelectorAll('[data-salview]').forEach(b => b.addEventListener('click', () => { salView = b.dataset.salview; renderSalary(container); }));
   if (salView === 'slips') {
+    salBindAuto(container);
+    salWaPoll(container);
     container.querySelector('#list-sal').addEventListener('click', e => {
       const a = e.target.closest('[data-salshare]');
       if (!a) return;
