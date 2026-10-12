@@ -639,8 +639,12 @@ def _salary_payload(month=None):
     staff = sorted({s['employee'] for s in result['slips']} | set(result['needs_role'])
                    | {n for n, r in settings['roles'].items() if r != 'Not staff'})
     charts = salary_mod.load_charts().get(month, {}) if month else {}
+    for sl in result['slips']:
+        sl['share'] = {'phone': settings['phones'].get(sl['employee'], ''),
+                       'text': salary_mod.slip_message(sl, settings['rules'])}
     return {
-        'month': month, 'months': months, 'slips': result['slips'], 'needs_role': result['needs_role'],
+        'month': month, 'months': months, 'slips': result['slips'],
+        'phones': settings['phones'], 'shares': salary_mod.load_shares().get(month, {}) if month else {}, 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
         'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
         'salaries': settings['salaries'], 'half_day': settings['half_day'], 'shifts': settings['shifts'], 'role_names': salary_mod.ROLES, 'group_weights': salary_mod.GROUP_WEIGHTS,
@@ -684,10 +688,11 @@ def _json_body():
 def api_salary_settings():
     b = _json_body()
     _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'),
-                                        half_day=b.get('half_day'), shifts=b.get('shifts'), targets=b.get('targets'))
+                                        half_day=b.get('half_day'), shifts=b.get('shifts'), targets=b.get('targets'),
+                                        phones=b.get('phones'))
     if err:
         return jsonify({'error': err}), 400
-    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts', 'targets') if b.get(k)))
+    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts', 'targets', 'phones') if b.get(k)))
     return jsonify(_salary_payload(b.get('month')))
 
 
@@ -753,6 +758,17 @@ def api_salary_commit_decide():
         return jsonify({'error': err}), 400
     logger.info('Commitment %s: %s', b.get('action'), b.get('employee') or b.get('id'))
     return jsonify(_salary_payload(b.get('month')))
+
+
+@app.route('/api/salary/shared', methods=['POST'])
+@requires_auth
+def api_salary_shared():
+    b = _json_body()
+    err = salary_mod.record_share(b.get('month'), b.get('employee'))
+    if err:
+        return jsonify({'error': err}), 400
+    logger.info('Salary slip opened in WhatsApp: %s %s', b.get('month'), b.get('employee'))
+    return jsonify({'ok': True, 'shares': salary_mod.load_shares().get(b.get('month'), {})})
 
 
 @app.route('/api/salary/chart', methods=['POST'])

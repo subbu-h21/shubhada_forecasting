@@ -17,7 +17,7 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   costs a fixed amount that goes to admin savings, and it only ever comes
   out of the bonus parts, never the fixed part.
 
-  Everyone can have agreed timings in Setup (start, break out, break back,
+  Everyone can have agreed timings on the Edit screen (start, break out, break back,
   end; owner, 2026-10-10) and is then judged against them, not against their
   own earliest days - which called ordinary days late (Parashuram: usual
   10:30 vs a 08:48 target). Late = first stamp 15+ min after the start, early
@@ -186,10 +186,10 @@ def load_settings():
             shifts[n] = {'start': v.get('start', ''), 'end': v.get('end', '')}
     return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half, 'shifts': shifts,
             'commit_template': s.get('commit_template', ''), 'commitments': s.get('commitments', {}),
-            'targets': s.get('targets', {})}
+            'targets': s.get('targets', {}), 'phones': s.get('phones', {})}
 
 
-def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None, targets=None):
+def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None, targets=None, phones=None):
     """Validates and merges; returns (settings, error)."""
     with _lock:
         s = _load(SETTINGS_PATH, {})
@@ -260,6 +260,18 @@ def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts
                     return None, f'The break for {name} must fall between their start and end.'
                 sh[name] = v if any(v.values()) else None
             s['shifts'] = {n: v for n, v in sh.items() if v}
+        if phones:
+            ph = dict(s.get('phones', {}))
+            for name, number in phones.items():
+                name = str(name)[:120]
+                if not number:
+                    ph.pop(name, None)
+                    continue
+                n = normalise_phone(number)
+                if not 11 <= len(n) <= 15:
+                    return None, f'The WhatsApp number for {name} looks wrong - type the 10-digit mobile number.'
+                ph[name] = n
+            s['phones'] = ph
         if targets:
             codes = {c for c, _, _, _ in COMMIT_TARGETS}
             tg = dict(s.get('targets', {}))
@@ -771,11 +783,11 @@ def compute_slips(inputs, month):
                              + (f'; {n_other} day{"s" if n_other != 1 else ""} on another shift not judged' if n_other else '') + '.')
         elif is_half:
             late, early, long_lunch, timed = 0, 0, 0, False
-            notes.append('Half-day: no late/early counted until you enter their agreed shift in Setup'
+            notes.append('Half-day: no late/early counted until you enter their agreed shift in Edit'
                          + (f" (usually {times(usual)} from the bills)." if usual else '.'))
         elif timed:
             notes.append('No agreed timings yet - judged against their own earliest routine days, which can call ordinary '
-                         'days late. Enter their timings in Setup' + (f" (usually {times(usual)})." if usual else '.'))
+                         'days late. Enter their timings in Edit' + (f" (usually {times(usual)})." if usual else '.'))
         incidents = late + long_lunch + early * exit_w
         charged = max(0.0, incidents - rules['free_incidents'])
         leave_days = count('unplanned_leave')
@@ -1085,6 +1097,120 @@ def decide_commitment(rec_id, action, employee=None):
         return 'Unknown action.'
     with _lock:
         _save(PENDING_PATH, [p for p in _load(PENDING_PATH, []) if p['id'] != rec_id])
+    return None
+
+
+# ---------------------------------------------------------- share on WhatsApp --
+SHARES_PATH = SALARY_DIR / 'shares.json'
+_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+# Raw values that are the shop's business figures, not the person's own work -
+# the message shows only their marks for these (the slip goes to their phone).
+_PRIVATE_RAW = {'S5', 'T1'}
+_MESSAGE_LABELS = {'S5': 'Margin on what you sold', 'O1-4': "Owner's rating (1-5)",
+                   'Q2-4': 'Mistakes logged (wrong item, cash short, near-expiry)'}
+
+
+def normalise_phone(number):
+    """Digits only, with India's country code added to a 10-digit number - the
+    same rule as order automation's whatsapp_contacts._normalise, so a number
+    typed as written on a card ("9876543210") opens the right chat."""
+    digits = re.sub(r'[^0-9]', '', str(number or ''))
+    if len(digits) == 11 and digits.startswith('0'):
+        digits = digits[1:]
+    if len(digits) == 10:
+        digits = '91' + digits
+    return digits
+
+
+def _rs(v):
+    return f'₹{v:,.0f}'
+
+
+def slip_message(x, rules):
+    """One person's slip as a WhatsApp message, covering every parameter that
+    went into it.
+
+    Follows order automation's WhatsApp rules (_share_message there): short
+    flush-left lines, *bold* for structure, and NO list syntax at the start of
+    a line - no "1. ", "- " or "* " - because WhatsApp's composer turns those
+    into real lists and rewrites the text as it goes. The owner presses Send."""
+    mon = f"{_MONTHS[int(x['month'][5:7]) - 1]} {x['month'][:4]}"
+    m, d, sh = x['money'], x['discipline'], x.get('shift') or {}
+    L = [f'*Shubhada Health - Salary slip, {mon}*', f"*{x['employee']}* ({x['role']})",
+         f"Days worked: {x['days_active']}"]
+    if x['trial']:
+        L.append('Trial month: you are paid at least your base salary. / ಪ್ರಯೋಗ ತಿಂಗಳು')
+
+    if m:
+        L += ['', '*Salary / ಸಂಬಳ*', f"Base salary: {_rs(m['base'])}",
+              f"Fixed ({rules['fixed_pct']:g}%): {_rs(m['fixed'])}",
+              f"Performance: {_rs(m['perf_pay'])} of {_rs(m['perf_max'])}",
+              f"Discipline: {_rs(m['disc_pay'])} of {_rs(m['disc_max'])}"]
+        if m.get('commit_max'):
+            L.append(f"Target bonus: {_rs(m['commit_bonus'])} of {_rs(m['commit_max'])}")
+        if m.get('admin_savings'):
+            L.append(f"Unplanned leave: minus {_rs(m['admin_savings'])}")
+        L.append(f"*Calculated: {_rs(m['calculated'])}*")
+        if x['trial']:
+            L.append(f"*To be paid: {_rs(m['payable'])}*")
+
+    perf = x['perf_score']
+    L += ['', f"*Performance / ಸಾಧನೆ: {'not scored' if perf is None else f'{perf}%'}*"]
+    if x['floor_hit']:
+        L.append(f"Below {rules['floor_pct']:g}%, so no performance pay this month.")
+    elif x.get('gate') and x['gate']['failed']:
+        L.append(f"Returns were {x['gate']['returns_pct']}% of sales (limit {x['gate']['limit']}%), so no performance pay.")
+    L.append(f"{rules['full_at_pct']:g}% of your own best month = full marks (100).")
+    for g in x['groups']:
+        L += ['', f"_{g['name']}_: {g['score']} marks (counts {g['share_pct']}%)"]
+        for i in x['items']:
+            if i['group'] != g['code'] or i['score'] is None:
+                continue
+            raw = '' if i['code'] in _PRIVATE_RAW else f"{i['raw']}, "
+            L.append(f"{_MESSAGE_LABELS.get(i['code'], i['label'])}: {raw}{i['score']} marks")
+
+    L += ['', '*Discipline / ಶಿಸ್ತು*']
+    if sh.get('agreed'):
+        brk = f", break {sh['break_out']}-{sh['break_in']}" if sh.get('break_out') and not sh.get('half') else ''
+        L.append(f"Your timings: {sh['start']}-{sh['end']}{brk}")
+    if d['timed']:
+        L.append(f"Late arrivals: {d['late']}")
+        if not sh.get('half'):
+            L.append(f"Long breaks: {d['long_lunch']}")
+        L.append(f"Early exits: {d['early_exit']} (each counts {rules['early_exit_weight']:g})")
+        L.append(f"Incidents: {d['incidents']:g}, free {d['free']:g}, charged {d['charged']:g}"
+                 + (f" x {rules['pct_per_incident']:g}% = minus {_rs(m['disc_deduction'])}" if m else ''))
+    else:
+        L.append('No late / break / exit counted this month.')
+    if d['leave_days']:
+        L.append(f"Unplanned leave days: {d['leave_days']}")
+
+    c = x.get('commitment')
+    if c:
+        L += ['', f"*Targets / ಗುರಿ: {c['met']} of {c['of']} reached*"]
+        for t in c['checks']:
+            L.append(f"{t['label']}: target {t['target']:,.0f}, you did {t['actual']:,.0f} - "
+                     + ('reached' if t['met'] else 'not reached'))
+        if not c['counted']:
+            L.append('Too few days worked to count targets this month.')
+
+    L += ['', 'Questions? Please talk to the owner. / ಪ್ರಶ್ನೆಗಳಿದ್ದರೆ ಮಾಲೀಕರನ್ನು ಸಂಪರ್ಕಿಸಿ.']
+    return '\n'.join(L)
+
+
+def load_shares():
+    return _load(SHARES_PATH, {})
+
+
+def record_share(month, employee):
+    """Remembers that this month's slip was opened in WhatsApp for this
+    person - opened, not sent: the owner presses Send in WhatsApp itself."""
+    if not MONTH_RE.match(str(month or '')) or not employee:
+        return 'Bad request.'
+    with _lock:
+        sh = load_shares()
+        sh.setdefault(month, {})[str(employee)[:120]] = time.strftime('%Y-%m-%d %H:%M')
+        _save(SHARES_PATH, sh)
     return None
 
 

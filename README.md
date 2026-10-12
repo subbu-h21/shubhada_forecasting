@@ -116,6 +116,11 @@ Each month:
    approved answers count. Reaching committed targets earns up to 5% of base,
    shared per target reached.
 6. **Slips**: tap a person to see how every rupee was worked out.
+   **Share on WhatsApp** on each slip opens WhatsApp with that person's full
+   slip already typed (every parameter, their marks, discipline, targets and
+   pay) - check it and press Send yourself. Save each person's number on the
+   Edit screen so it opens their chat directly; without one you pick the chat.
+   The shop's margin and branch sales figures are left out of the message.
 
 What you enter is kept in `data/processed/salary/`, so it's included in the
 normal backups.

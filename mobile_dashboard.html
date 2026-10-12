@@ -227,6 +227,9 @@
   .sal-savebar { position: sticky; bottom: calc(58px + env(safe-area-inset-bottom)); z-index: 5; display: flex; align-items: center; justify-content: flex-end;
     gap: 10px; padding: 10px 0; background: var(--paper); border-top: 1px solid var(--line); margin-top: 10px; }
   .sal-optional { margin-top: 18px; }
+  .sal-share { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; }
+  .sal-wa { background: #1F8F4E; text-decoration: none; padding: 8px 14px; font-size: 13px; }
+  .sal-edit-grid label:has(> [data-salphone]) { grid-column: 1 / -1; }
   .sal-optional summary { cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 600; padding: 8px 0; }
   @media (max-width: 360px) { .sal-edit-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .sal-rate { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 6px; }
@@ -1194,15 +1197,18 @@ function salSlipsHTML() {
   stats.push(['var(--warn)', money(s.admin_savings), 'To admin savings (unplanned leave)']);
   let html = `<div class="sal-note">Salary = Fixed ${fmt(r.fixed_pct)}% + Performance ${fmt(r.perf_pct)}% + Discipline ${fmt(r.disc_pct)}%.
     Performance is against each person's <b>own best</b>; ${fmt(r.full_at_pct)}% of their best already earns full marks.
-    Discipline loses ${fmt(r.pct_per_incident)}% of its part per late arrival or long break after ${fmt(r.free_incidents)} free ones (an early exit counts half), judged against the timings you agreed in Setup.
+    Discipline loses ${fmt(r.pct_per_incident)}% of its part per late arrival or long break after ${fmt(r.free_incidents)} free ones (an early exit counts half), judged against the timings you agreed in Edit.
     <span class="kn">ಸ್ವಂತ ಉತ್ತಮ ತಿಂಗಳ ${fmt(r.full_at_pct)}% ಮಾಡಿದರೆ ಪೂರ್ಣ ಅಂಕ.</span></div>`;
   const trial = salTrialText();
   if (trial) html += `<div class="sal-msg ok" style="font-weight:500">${trial}</div>`;
   html += `<div class="stat-grid">` + stats.map(([c, n, l]) =>
     `<div class="stat-card" style="--stripe:${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('') + `</div>`;
   const missing = SAL.slips.filter(x => !x.money).length;
-  if (missing) html += `<div class="sal-msg err">${missing} of ${SAL.slips.length} people have no base salary yet, so their slips show marks but no rupees. Add them in <b>Setup</b>.</div>`;
-  if (SAL.needs_role.length) html += `<div class="sal-msg err">New name${SAL.needs_role.length > 1 ? 's' : ''} without a role: ${SAL.needs_role.map(escHtml).join(', ')}. Set ${SAL.needs_role.length > 1 ? 'them' : 'it'} in <b>Setup</b>.</div>`;
+  if (missing) html += `<div class="sal-msg err">${missing} of ${SAL.slips.length} people have no base salary yet, so their slips show marks but no rupees. Add them in <b>Edit</b>.</div>`;
+  if (SAL.needs_role.length) html += `<div class="sal-msg err">New name${SAL.needs_role.length > 1 ? 's' : ''} without a role: ${SAL.needs_role.map(escHtml).join(', ')}. Set ${SAL.needs_role.length > 1 ? 'them' : 'it'} in <b>Edit</b>.</div>`;
+  const shared = SAL.slips.filter(x => (SAL.shares || {})[x.employee]).length;
+  html += `<div class="sal-note"><b>Share on WhatsApp</b> on each card opens WhatsApp with that person's full slip already typed — check it and press Send. Opened ${shared} of ${SAL.slips.length} this month.
+    <span class="kn">ಪ್ರತಿ ಕಾರ್ಡ್‌ನ "Share on WhatsApp" ಒತ್ತಿ — ಸಂದೇಶ ಸಿದ್ಧ, ನೀವು Send ಒತ್ತಿ.</span></div>`;
   if (s.not_rated) html += `<div class="sal-note">${s.not_rated} not rated for ${monthAbbr(SAL.month)} yet — their rating part is left out until you rate them in <b>Ratings</b>.</div>`;
   html += `<div class="search-bar">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -1244,8 +1250,17 @@ function salSlipCard(x) {
     <div class="row1"><div class="name">${escHtml(x.employee)}<div class="meta">${flags.map(escHtml).join(' · ')}</div></div>
       <span class="pill" style="color:${color};background:${bg};font-size:13px">${pill}</span></div>
     <div class="metrics">${metrics}</div>${bar}
+    ${salShareRow(x)}
     <button class="sal-link" data-salopen="${escAttr(x.employee)}" aria-expanded="${open ? 'true' : 'false'}">${open ? 'Hide details' : 'Show how this was worked out'}</button>
     ${open ? salDetailHTML(x) : ''}</div>`;
+}
+
+function salShareRow(x) {
+  const sh = x.share || {}, done = (SAL.shares || {})[x.employee];
+  const href = `https://wa.me/${sh.phone || ''}?text=${encodeURIComponent(sh.text || '')}`;
+  return `<div class="sal-share">
+    <a class="sal-btn sal-wa" href="${escAttr(href)}" target="_blank" rel="noopener" data-salshare="${escAttr(x.employee)}">Share on WhatsApp</a>
+    <span class="meta">${done ? `Opened in WhatsApp ${Number(done.slice(8, 10))} ${monthAbbr(done.slice(0, 7))} ${escHtml(done.slice(11, 16))}` : ''}${sh.phone ? '' : `${done ? ' · ' : ''}No number saved — you'll pick the chat. Add it in <b>Edit</b>.`}</span></div>`;
 }
 
 function salDetailHTML(x) {
@@ -1288,7 +1303,7 @@ function salDetailHTML(x) {
       <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
       ${x.trial ? `<tr><td>To pay (trial: never below base)</td><td class="n"><b>${money(m.payable)}</b></td></tr>` : ''}`;
   } else {
-    h += `<tr><td colspan="2" class="raw">Add a base salary in Setup to see rupees.</td></tr>`;
+    h += `<tr><td colspan="2" class="raw">Add a base salary in Edit to see rupees.</td></tr>`;
   }
   h += `</tbody></table>`;
   if (x.notes.length) h += `<div class="raw" style="margin-top:8px">${x.notes.map(n => '• ' + escHtml(n)).join('<br>')}</div>`;
@@ -1466,6 +1481,18 @@ function salSetupHTML() {
   return html;
 }
 
+function salPhoneShow(n) { return n && n.startsWith('91') && n.length === 12 ? n.slice(2) : (n || ''); }
+
+// A base far above everyone else's is usually a typing slip (an extra 0) -
+// worth a look before the slip goes out on WhatsApp. A warning, never a block.
+function salBaseWarning(p) {
+  const v = SAL.salaries[p];
+  const all = Object.values(SAL.salaries).filter(x => x > 0).sort((a, b) => a - b);
+  if (!v || all.length < 5) return '';
+  const median = all[Math.floor(all.length / 2)];
+  return v > median * 4 ? `<div class="sal-msg err" style="margin:8px 0 0">Check this: ${money(v)} is over 4 times the usual base (${money(median)}). An extra 0?</div>` : '';
+}
+
 function salEditCard(p, i, roles) {
   const role = SAL.roles[p] || '';
   const half = SAL.half_day.includes(p);
@@ -1483,7 +1510,8 @@ function salEditCard(p, i, roles) {
     <div class="sal-edit-grid">
       <label>Role<select data-salrole="${escAttr(p)}" id="sal-role-${i}">${roles.map(r => `<option${role === r ? ' selected' : ''}>${r}</option>`).join('')}${role ? '' : '<option selected value="">Choose…</option>'}</select></label>
       <label>Base salary ₹<input type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="not set"></label>
-    </div>
+      <label>WhatsApp number<input type="tel" inputmode="tel" id="sal-phone-${i}" data-salphone="${escAttr(p)}" value="${escAttr(salPhoneShow((SAL.phones || {})[p]))}" placeholder="10-digit mobile"></label>
+    </div>${salBaseWarning(p)}
     <div class="sal-sub">Timings <label class="sal-chk"><input type="checkbox" id="sal-half-${i}" data-salhalf="${escAttr(p)}"${half ? ' checked' : ''}> Half-day</label>${usual ? ` <span class="sal-kn">${usual}</span>` : ''}</div>
     <div class="sal-edit-grid four">${box('start', 'Start')}<span data-salbreak="${escAttr(p)}" style="display:${half ? 'none' : 'contents'}">${box('break_out', 'Break')}${box('break_in', 'Back')}</span>${box('end', 'End')}</div>
     ${offered.length ? `<div class="sal-sub">Targets for the bonus <span class="sal-kn">blank = own best</span></div><div class="sal-edit-grid">${targets}</div>` : ''}
@@ -1494,6 +1522,18 @@ function salBind(container) {
   container.querySelectorAll('[data-salmonth]').forEach(b => b.addEventListener('click', () => { salMonth = b.dataset.salmonth; renderSalary(container); }));
   container.querySelectorAll('[data-salview]').forEach(b => b.addEventListener('click', () => { salView = b.dataset.salview; renderSalary(container); }));
   if (salView === 'slips') {
+    container.querySelector('#list-sal').addEventListener('click', e => {
+      const a = e.target.closest('[data-salshare]');
+      if (!a) return;
+      authFetch('/api/salary/shared', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month: salMonth, employee: a.dataset.salshare }) })
+        .then(r => r.json()).then(o => {
+          if (!o.shares) return;
+          SAL.shares = o.shares;
+          const meta = a.closest('.sal-share').querySelector('.meta');
+          if (meta && !meta.textContent.startsWith('Opened')) meta.textContent = 'Opened in WhatsApp just now' + (meta.textContent ? ' · ' + meta.textContent : '');
+        }).catch(() => {});
+    });
     setupSearch('search-sal', 'list-sal', 'rc-sal', SAL.slips, (x, q) => x.employee.toLowerCase().includes(q), salSlipCard, 'No matching employees.');
     container.querySelector('#list-sal').addEventListener('click', e => {
       const b = e.target.closest('[data-salopen]');
@@ -1602,7 +1642,8 @@ function salBind(container) {
   });
   const savePeople = container.querySelector('#sal-save-people');
   if (savePeople) savePeople.addEventListener('click', () => {
-    const roles = {}, salaries = {}, half_day = {}, shifts = {}, targets = {};
+    const roles = {}, salaries = {}, half_day = {}, shifts = {}, targets = {}, phones = {};
+    container.querySelectorAll('[data-salphone]').forEach(inp => { phones[inp.dataset.salphone] = inp.value.trim(); });
     container.querySelectorAll('[data-saltg]').forEach(inp => {
       const p = inp.dataset.salp;
       targets[p] = targets[p] || {};
@@ -1618,7 +1659,7 @@ function salBind(container) {
     container.querySelectorAll('[data-salrole]').forEach(s2 => { if (s2.value) roles[s2.dataset.salrole] = s2.value; });
     container.querySelectorAll('[data-salbase]').forEach(i => { salaries[i.dataset.salbase] = i.value === '' ? null : Number(i.value); });
     savePeople.disabled = true;
-    salPost('/api/salary/settings', { roles, salaries, half_day, shifts, targets }, 'Saved — every slip has been recalculated.');
+    salPost('/api/salary/settings', { roles, salaries, half_day, shifts, targets, phones }, 'Saved — every slip has been recalculated.');
   });
   const saveRules = container.querySelector('#sal-save-rules');
   if (saveRules) saveRules.addEventListener('click', () => {
