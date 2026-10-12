@@ -1309,19 +1309,25 @@ def _transcribe(audio):
     Raises only when both fail (or when there is no fallback)."""
     client = _openrouter_client()
     clip = ('question.wav', audio, 'audio/wav')
+    # Successes are logged too (model + seconds), so the log shows how often the
+    # primary actually answers, not only when it fails.
+    t0 = time.time()
     try:
         # max_retries=0: the SDK would otherwise retry a timed-out call twice,
         # turning an 8-second limit into 24 seconds.
         result = client.with_options(timeout=SPEECH_STT_TIMEOUT_S, max_retries=0) \
             .audio.transcriptions.create(model=SPEECH_STT_MODEL, file=clip)
+        logger.info('Speech-to-text: %s in %.1fs', SPEECH_STT_MODEL, time.time() - t0)
         return (getattr(result, 'text', '') or '').strip(), ask_mod.usage_cost(getattr(result, 'usage', None)), SPEECH_STT_MODEL
     except Exception as e:
         if not SPEECH_STT_FALLBACK_MODEL or SPEECH_STT_FALLBACK_MODEL == SPEECH_STT_MODEL:
             raise
         logger.warning('Speech-to-text: %s gave %s within %.0fs - using %s',
                        SPEECH_STT_MODEL, type(e).__name__, SPEECH_STT_TIMEOUT_S, SPEECH_STT_FALLBACK_MODEL)
+    t0 = time.time()
     result = client.with_options(timeout=20, max_retries=0) \
         .audio.transcriptions.create(model=SPEECH_STT_FALLBACK_MODEL, file=clip)
+    logger.info('Speech-to-text: %s (fallback) in %.1fs', SPEECH_STT_FALLBACK_MODEL, time.time() - t0)
     return (getattr(result, 'text', '') or '').strip(), ask_mod.usage_cost(getattr(result, 'usage', None)), SPEECH_STT_FALLBACK_MODEL
 
 
@@ -1369,9 +1375,11 @@ def _synthesize(text):
     def one(model, timeout):
         # Gemini TTS only returns raw PCM; other providers can return MP3.
         fmt = 'pcm' if 'gemini' in model else 'mp3'
+        t0 = time.time()
         # max_retries=0: the SDK would otherwise retry a timed-out call twice.
         result = client.with_options(timeout=timeout, max_retries=0).audio.speech.create(
             model=model, voice=SPEECH_TTS_VOICE, input=text, response_format=fmt)
+        logger.info('Text-to-speech: %s in %.1fs for %d chars', model, time.time() - t0, len(text))
         return (result.content, fmt, result.response.headers.get('content-type', ''),
                 result.response.headers.get('x-generation-id', ''), model)
 
