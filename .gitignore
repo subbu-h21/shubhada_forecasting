@@ -40,6 +40,11 @@ reports/**/*.xlsx
 # copied. Not a substitute for an off-site backup (see README).
 backups/
 
+# The login vault (vault.py) - encrypted, but its key is in .env on this same
+# PC, so the file must never leave it.
+.credentials.enc
+.credentials.tmp
+
 # The reckoner's own Chrome profile for WhatsApp Web - holds the linked
 # WhatsApp session (anyone with it can read and send the owner's messages).
 .whatsapp_profile/

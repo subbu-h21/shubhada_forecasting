@@ -1581,6 +1581,8 @@ function salSetupHTML() {
     SAL.groups.map(g => `<tr><td style="padding:4px;border-top:1px solid var(--line)">${escHtml(g.name)} <span class="sal-kn">${escHtml(g.kn)}</span></td>${SAL.role_names.map(r =>
       `<td style="text-align:right;padding:4px;border-top:1px solid var(--line)">${SAL.group_weights[r][g.code] || '–'}</td>`).join('')}</tr>`).join('') +
     `</tbody></table></div>
+    <div class="section-title">Logins vault <span class="sal-kn">ಲಾಗಿನ್ ಭದ್ರತಾ ಪೆಟ್ಟಿಗೆ</span></div>
+    ${salVaultHTML()}
     <details class="sal-optional"><summary>Optional: let staff fill in their own timings and targets (Google Form)</summary>${salCommitHTML()}</details>`;
   return html;
 }
@@ -1595,6 +1597,19 @@ function salBaseWarning(p) {
   if (!v || all.length < 5) return '';
   const median = all[Math.floor(all.length / 2)];
   return v > median * 4 ? `<div class="sal-msg err" style="margin:8px 0 0">Check this: ${money(v)} is over 4 times the usual base (${money(median)}). An extra 0?</div>` : '';
+}
+
+function salVaultHTML() {
+  return Object.entries(SAL.vault || {}).map(([key, v]) => `<div class="sal-form" data-vault="${escAttr(key)}">
+    <div class="name">${escHtml(v.label)}</div>
+    <div class="sal-note" style="margin:0">${v.configured ? `Login saved for <b>${escHtml(v.username_masked)}</b>. Type a new one below to replace it.` : 'No login saved yet.'}
+      Stored encrypted on this PC only; the password is never shown again, not even here. Save it from the shop PC - from a phone it crosses your shop WiFi.</div>
+    <div class="sal-edit-grid">
+      <label>Username<input type="text" id="vault-user-${escAttr(key)}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>Password<input type="password" id="vault-pass-${escAttr(key)}" autocomplete="new-password"></label>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="sal-btn" data-vaultsave="${escAttr(key)}">Save login</button>
+      ${v.configured ? `<button class="sal-btn ghost" data-vaultclear="${escAttr(key)}">Remove login</button>` : ''}</div></div>`).join('');
 }
 
 function salEditCard(p, i, roles) {
@@ -1769,6 +1784,31 @@ function salBind(container) {
     savePeople.disabled = true;
     salPost('/api/salary/settings', { roles, salaries, half_day, shifts, targets, phones }, 'Saved — every slip has been recalculated.');
   });
+  container.querySelectorAll('[data-vaultsave]').forEach(b => b.addEventListener('click', async () => {
+    const key = b.dataset.vaultsave;
+    const user = container.querySelector(`#vault-user-${CSS.escape(key)}`), pass = container.querySelector(`#vault-pass-${CSS.escape(key)}`);
+    if (!user.value.trim() || !pass.value) { salMsg = { kind: 'err', text: 'Enter both the username and the password.' }; renderSalary(container); return; }
+    b.disabled = true;
+    try {
+      const res = await authFetch('/api/vault', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: key, username: user.value.trim(), password: pass.value }) });
+      const out = await res.json();
+      pass.value = ''; user.value = '';           // nothing secret stays on the page
+      if (!res.ok) salMsg = { kind: 'err', text: out.error || 'Could not save the login.' };
+      else { SAL.vault = out.vault; salMsg = { kind: 'ok', text: 'Login saved in the vault.' }; }
+    } catch (e) { if (e.message !== 'unauthorized') salMsg = { kind: 'err', text: 'Could not reach the server - nothing was saved.' }; }
+    renderSalary(container);
+  }));
+  container.querySelectorAll('[data-vaultclear]').forEach(b => b.addEventListener('click', async () => {
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to remove'; return; }
+    try {
+      const res = await authFetch('/api/vault', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: b.dataset.vaultclear, clear: true }) });
+      const out = await res.json();
+      if (res.ok) { SAL.vault = out.vault; salMsg = { kind: 'ok', text: 'Login removed from the vault.' }; }
+    } catch (e) {}
+    renderSalary(container);
+  }));
   const saveRules = container.querySelector('#sal-save-rules');
   if (saveRules) saveRules.addEventListener('click', () => {
     const rules = {};

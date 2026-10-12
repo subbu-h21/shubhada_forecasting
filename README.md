@@ -8,7 +8,7 @@ dashboard so reports can be checked from a phone.
 
 ## Setup
 
-1. Install dependencies: `pip install pandas openpyxl flask waitress numpy playwright==1.61.0` (Playwright is only for sending salary slips by WhatsApp; it uses the installed Google Chrome)
+1. Install dependencies: `pip install pandas openpyxl flask waitress numpy playwright==1.61.0 cryptography==50.0.1` (Playwright is only for sending salary slips by WhatsApp; it uses the installed Google Chrome)
 2. Drop your first month's Sale and Purchase `.xlsx` files into `data/raw/`
 3. Run `python run_reckoner.py` — this ingests the files, builds
    `data/processed/*.csv` (permanent history) and writes
@@ -35,7 +35,7 @@ from the *full* history to date.
 
 3. **Install the Python packages:**
    ```bash
-   pip install pandas openpyxl flask waitress numpy playwright==1.61.0
+   pip install pandas openpyxl flask waitress numpy playwright==1.61.0 cryptography==50.0.1
    ```
 
 4. **Bring your data over.** `data/raw/` and `data/processed/` are
@@ -132,6 +132,13 @@ Each month:
 
 What you enter is kept in `data/processed/salary/`, so it's included in the
 normal backups.
+
+**Logins vault** (bottom of Salary > Edit): website logins the reckoner uses
+on its own - first shubhadahealth.com, for fetching attendance and
+Performance Charts. Stored encrypted in `.credentials.enc` with the key
+`RECKONER_VAULT_KEY` in `.env` (both on this PC only, both gitignored). The
+dashboard only ever shows a masked username. Losing `.env` means typing the
+logins in again.
 
 ## Voice (trial)
 

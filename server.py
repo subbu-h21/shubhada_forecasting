@@ -34,6 +34,7 @@ import ask as ask_mod
 import ask_limits
 import run_reckoner as rk
 import salary as salary_mod
+import vault
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -646,6 +647,7 @@ def _salary_payload(month=None):
     return {
         'month': month, 'months': months, 'slips': result['slips'],
         'sends': salary_mod.load_sends().get(month, {}) if month else {},
+        'vault': vault.summary(),
         'phones': settings['phones'], 'shares': salary_mod.load_shares().get(month, {}) if month else {}, 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
         'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
@@ -928,6 +930,26 @@ def api_salary_whatsapp_status():
         st = {k: (list(v) if isinstance(v, list) else v) for k, v in _wa_state.items()}
     st['sends'] = salary_mod.load_sends().get(request.args.get('month') or st.get('month') or '', {})
     return jsonify(st)
+
+
+@app.route('/api/vault', methods=['POST'])
+@requires_auth
+def api_vault():
+    """Saves or clears a website login in the encrypted vault. Returns only
+    the masked summary - a stored password is never sent back."""
+    b = _json_body()
+    platform = b.get('platform')
+    if platform not in vault.PLATFORMS:
+        return jsonify({'error': 'Unknown login.'}), 400
+    if b.get('clear'):
+        vault.clear_credentials(platform)
+        logger.info('Vault: %s login removed', platform)
+    else:
+        err = vault.set_credentials(platform, b.get('username'), b.get('password'))
+        if err:
+            return jsonify({'error': err}), 400
+        logger.info('Vault: %s login saved', platform)      # never the username or password
+    return jsonify({'vault': vault.summary()})
 
 
 @app.route('/api/salary/chart', methods=['POST'])
