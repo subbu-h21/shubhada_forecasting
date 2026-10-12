@@ -652,9 +652,10 @@ def compute_slips(inputs, month):
         hist = hist_all[hist_all['Employee'] == emp]
         items, notes = [], []
 
-        def add(code, group, label, score, raw, basis):
+        def add(code, group, label, score, raw, basis, value=None, best=None, lower=False):
             items.append({'code': code, 'group': group, 'label': label,
-                          'score': None if score is None else round(score), 'raw': raw, 'basis': basis})
+                          'score': None if score is None else round(score), 'raw': raw, 'basis': basis,
+                          'value': value, 'best': best, 'lower': lower})
 
         short_month = cur['Days_Active'] < rules['min_days_active']
         if short_month:
@@ -676,7 +677,11 @@ def compute_slips(inputs, month):
             v = cur.get(code)
             if v is None or pd.isna(v):
                 continue
-            add(code, group, label, _vs_best(v, hist[code], rules, lower), show(v), 'vs own best')
+            past_vals = pd.Series(hist[code], dtype=float).dropna()
+            past_vals = past_vals[past_vals > 0] if lower else past_vals
+            best = None if past_vals.empty else float(past_vals.min() if lower else past_vals.max())
+            add(code, group, label, _vs_best(v, hist[code], rules, lower), show(v), 'vs own best',
+                value=float(v), best=best, lower=lower)
 
         # Performance Chart (shubhadahealth), scored against their own best chart month, per active day.
         chart = charts.get(month, {}).get(emp)
@@ -698,7 +703,8 @@ def compute_slips(inputs, month):
                 score = _vs_best(rows[cat] / d, past, rules) if d else None
                 if score is None:
                     continue  # never done this work in any chart month
-                add(code, group, label, score, f'{rows[cat]:,.0f} this month', 'chart, vs own best')
+                add(code, group, label, score, f'{rows[cat]:,.0f} this month', 'chart, vs own best',
+                    value=rows[cat], best=max(past) * d if past else None)
             sales_n, ret_n = rows.get('Sales'), rows.get('Sales-Return')
             if sales_n and ret_n is not None:
                 rp = ret_n / sales_n * 100
@@ -811,7 +817,7 @@ def compute_slips(inputs, month):
             actual = cur.get(code)
             actual = 0.0 if actual is None or pd.isna(actual) else float(actual)
             checks.append({'code': code, 'label': label, 'target': t, 'actual': round(actual, 1),
-                           'met': actual >= t, 'source': source})
+                           'met': actual >= t * 0.995, 'source': source})
         if checks:
             commit_info = {'checks': checks, 'met': sum(c['met'] for c in checks), 'of': len(checks),
                            'counted': not short_month}
@@ -1206,8 +1212,143 @@ def slip_message(x, rules):
             L.append(f"{t['label']}: target {t['target']:,.0f}, you did {t['actual']:,.0f} - "
                      + ('reached' if t['met'] else 'not reached'))
 
+    plan = action_plan(x, rules)
+    if plan:
+        L += ['', '*ಮುಂದಿನ ತಿಂಗಳು ಹೆಚ್ಚು ಗಳಿಸಲು / Next month: how to earn more*']
+        for n, p_ in enumerate(plan, 1):
+            # "Step 1:" rather than "1." - a numbered line would be turned into a list
+            # Kannada only here (owner: "KANNADA BEST") - the English stays on the owner's screen,
+            # and leaving it out keeps the WhatsApp link well under its length limit
+            L.append(f"ಹಂತ {n}: {p_['kn']}")
     L += ['', 'Questions? Please talk to ADMIN. / ಪ್ರಶ್ನೆಗಳಿದ್ದರೆ ADMIN ಸಂಪರ್ಕಿಸಿ.']
     return '\n'.join(L)
+
+
+# A few of the money figures below need the item's own label for staff.
+_PLAN_UNITS = {'S1': ('₹', '/day'), 'S2': ('', ' bills/day'), 'S3': ('', ' customers/day'), 'S4': ('₹', ' per bill'),
+               'S6': ('₹', ' per ₹100'), 'F1': ('', ' items/day'), 'F2': ('', ' items/hour'),
+               'F3': ('', ' different products'), 'F5': ('', ' lines/bill'), 'B1': ('', ' lines/day')}
+
+
+_KN_LABELS = {'S1': 'ದಿನಕ್ಕೆ ಮಾರಾಟ', 'S2': 'ದಿನಕ್ಕೆ ಬಿಲ್‌ಗಳು', 'S3': 'ದಿನಕ್ಕೆ ಗ್ರಾಹಕರು', 'S4': 'ಸರಾಸರಿ ಬಿಲ್ ಮೊತ್ತ',
+              'S5': 'ಲಾಭಾಂಶ', 'S6': '₹100 ಮಾರಾಟಕ್ಕೆ ರಿಯಾಯಿತಿ', 'F1': 'ದಿನಕ್ಕೆ ತಂದ ಐಟಂಗಳು',
+              'F2': 'ಗಂಟೆಗೆ ತಂದ ಐಟಂಗಳು', 'F3': 'ತಿಂಗಳಲ್ಲಿ ಬೇರೆ ಬೇರೆ ಉತ್ಪನ್ನಗಳು', 'F4': 'ಅಪರೂಪದ ಐಟಂ ಪಾಲು',
+              'F5': 'ಪ್ರತಿ ಬಿಲ್‌ನ ಐಟಂಗಳು', 'B1': 'ದಿನಕ್ಕೆ ಖರೀದಿ ನಮೂದು'}
+
+
+def _plan_num(code, v, units=True):
+    pre, post = _PLAN_UNITS.get(code, ('', '')) if units else ('₹' if code in ('S1', 'S4', 'S6') else '', '')
+    if code in ('S6', 'F2', 'F5') or abs(v) < 20:
+        return f'{pre}{v:,.1f}{post}'
+    return f'{pre}{v:,.0f}{post}'
+
+
+def action_plan(x, rules, limit=4):
+    """What this person can do next month to earn more, from their own slip -
+    owner's ask (2026-10-12). Each step carries an English and a Kannada line
+    and a rough rupee value; the biggest ones come first.
+
+    The rupee figures are estimates on purpose: they assume everything else
+    stays as it was this month."""
+    m, d, sh = x.get('money'), x['discipline'], x.get('shift') or {}
+    steps = []
+
+    def step(rs, en, kn):
+        steps.append({'rs': round(rs or 0), 'en': en, 'kn': kn})
+
+    short = x['days_active'] < rules['min_days_active']
+    if short:
+        step(m['perf_max'] if m else 0,
+             f"Work at least {rules['min_days_active']:g} days - only then is performance (and its pay) counted.",
+             f"ಕನಿಷ್ಠ {rules['min_days_active']:g} ದಿನ ಕೆಲಸ ಮಾಡಿ - ಆಗ ಮಾತ್ರ ಸಾಧನೆ ವೇತನ ಸಿಗುತ್ತದೆ.")
+
+    # Discipline: every charged incident has a price
+    if m and d['timed'] and d['charged'] > 0:
+        per = m['disc_max'] * rules['pct_per_incident'] / 100
+        def plus15(t):
+            mins = int(t[:2]) * 60 + int(t[3:]) + 15
+            return f'{mins // 60:02d}:{mins % 60:02d}'
+        by = kn_by = ''
+        if sh.get('agreed') and sh.get('start') and d['late']:
+            by, kn_by = f" Be in by {plus15(sh['start'])}.", f" {plus15(sh['start'])} ಒಳಗೆ ಬನ್ನಿ."
+        if sh.get('agreed') and sh.get('break_in') and d['long_lunch'] and not sh.get('half'):
+            by += f" Be back from break by {plus15(sh['break_in'])}."
+            kn_by += f" ವಿರಾಮದಿಂದ {plus15(sh['break_in'])} ಒಳಗೆ ಮರಳಿ."
+        parts = [f"{n} {w}" for n, w in ((d['late'], 'late arrivals'), (d['long_lunch'], 'long breaks'),
+                                          (d['early_exit'], 'early exits')) if n]
+        kn_parts = [f"{n} {w}" for n, w in ((d['late'], 'ಬಾರಿ ತಡ'), (d['long_lunch'], 'ದೀರ್ಘ ವಿರಾಮ'),
+                                             (d['early_exit'], 'ಬಾರಿ ಬೇಗ ಹೊರಟಿದ್ದು')) if n]
+        step(m['disc_deduction'],
+             f"Discipline: {', '.join(parts)} cost you {_rs(m['disc_deduction'])} "
+             f"({_rs(per)} each after {d['free']:g} free).{by} On time every day = full {_rs(m['disc_max'])}.",
+             f"ಶಿಸ್ತು: {', '.join(kn_parts)} - {_rs(m['disc_deduction'])} ಕಡಿತ (ಉಚಿತ {d['free']:g} ನಂತರ ಪ್ರತಿಯೊಂದಕ್ಕೆ {_rs(per)}).{kn_by} "
+             f"ಪ್ರತಿದಿನ ಸಮಯಕ್ಕೆ ಬಂದರೆ ಪೂರ್ಣ {_rs(m['disc_max'])} ಸಿಗುತ್ತದೆ.")
+
+    if d['leave_days'] and m:
+        step(m['admin_savings'],
+             f"Unplanned leave cost {_rs(m['admin_savings'])}. Tell ADMIN before taking leave and it costs nothing.",
+             f"ತಿಳಿಸದೆ ರಜೆಯಿಂದ {_rs(m['admin_savings'])} ಕಡಿತ. ಮೊದಲೇ ತಿಳಿಸಿದರೆ ಕಡಿತವಿಲ್ಲ.")
+
+    if not short and m:
+        if x['floor_hit']:
+            step(m['perf_max'] * rules['floor_pct'] / 100,
+                 f"Performance was {x['perf_score']}% - under {rules['floor_pct']:g}% there is no performance pay at all. "
+                 f"Getting above {rules['floor_pct']:g}% brings at least {_rs(m['perf_max'] * rules['floor_pct'] / 100)}.",
+                 f"ಸಾಧನೆ {x['perf_score']}% - {rules['floor_pct']:g}% ಮೇಲೆ ಹೋದರೆ ಕನಿಷ್ಠ {_rs(m['perf_max'] * rules['floor_pct'] / 100)}.")
+        # Weakest measured items: what one more push is worth, through the group's weight
+        share = {g['code']: g['share_pct'] / 100 for g in x['groups']}
+        per_group = {}
+        for i in x['items']:
+            if i['score'] is not None:
+                per_group[i['group']] = per_group.get(i['group'], 0) + 1
+        full = rules['full_at_pct'] / 100
+        for i in x['items']:
+            if i['score'] is None or i['score'] >= 95 or i['group'] not in share:
+                continue
+            gain_pts = (100 - i['score']) / per_group[i['group']] * share[i['group']]
+            rs = m['perf_max'] * gain_pts / 100 if x['perf_score'] is not None and x['perf_score'] < rules['perf_cap_pct'] else 0
+            if i.get('best') and i.get('value') is not None and i['code'] in _PLAN_UNITS:
+                goal = i['best'] / full if i['lower'] else i['best'] * full
+                word = 'down to' if i['lower'] else 'up to'
+                en = (f"{_MESSAGE_LABELS.get(i['code'], i['label'])}: {_plan_num(i['code'], i['value'])} now ({i['score']} marks). "
+                      f"Get it {word} {_plan_num(i['code'], goal)} - {rules['full_at_pct']:g}% of your best, "
+                      f"{_plan_num(i['code'], i['best'])} - for full marks.")
+                kn = (f"{_KN_LABELS.get(i['code'], i['label'])}: ಈಗ {_plan_num(i['code'], i['value'], False)} ({i['score']} ಅಂಕ). "
+                      f"{_plan_num(i['code'], goal, False)} {'ಕ್ಕೆ ಇಳಿಸಿದರೆ' if i['lower'] else 'ತಲುಪಿದರೆ'} ಪೂರ್ಣ ಅಂಕ "
+                      f"(ನಿಮ್ಮ ಉತ್ತಮ {_plan_num(i['code'], i['best'], False)} ರ {rules['full_at_pct']:g}%)."
+                      + (f" ಸುಮಾರು +{_rs(rs)}." if rs >= 50 else ''))
+            elif i['code'] == 'O1-4':
+                en = f"Owner's rating was {i['score']} marks. Ask ADMIN what to improve - each point up adds marks."
+                kn = 'ಮಾಲೀಕರ ಅಂಕ ಕಡಿಮೆ - ಏನು ಸುಧಾರಿಸಬೇಕೆಂದು ADMIN ಅವರನ್ನು ಕೇಳಿ.'
+            elif i['code'] == 'Q2-4':
+                en = f"Mistakes were logged ({i['raw']}). Check every item and the cash before handing over."
+                kn = 'ತಪ್ಪುಗಳು ದಾಖಲಾಗಿವೆ - ಕೊಡುವ ಮೊದಲು ಪ್ರತಿ ಐಟಂ ಮತ್ತು ಹಣ ಪರಿಶೀಲಿಸಿ.'
+            elif i['code'] == 'C1-2':
+                en = f"Complaints cost marks ({i['raw']}). Every compliment adds marks back."
+                kn = 'ದೂರುಗಳಿಂದ ಅಂಕ ಕಡಿಮೆ - ಗ್ರಾಹಕರ ಮೆಚ್ಚುಗೆ ಅಂಕ ಹೆಚ್ಚಿಸುತ್ತದೆ.'
+            elif i['code'] == 'Q1':
+                en = f"PTR > MRP entry errors: {i['raw']}. Check the PTR against the MRP on every line you enter."
+                kn = 'ಖರೀದಿ ನಮೂದಿನಲ್ಲಿ PTR ಮತ್ತು MRP ಪರಿಶೀಲಿಸಿ.'
+            else:
+                continue
+            step(rs, en + (f" About +{_rs(rs)}." if rs >= 50 else ''), kn)
+
+        # Targets they missed: their share of the target bonus
+        c = x.get('commitment')
+        if c and c['counted'] and m.get('commit_max'):
+            each = m['commit_max'] / c['of']
+            for t in c['checks']:
+                if not t['met']:
+                    step(each,
+                         f"Target {t['label']}: {t['target']:,.0f} - you did {t['actual']:,.0f}. Reach it for +{_rs(each)}.",
+                         f"ಗುರಿ - {_KN_LABELS.get(t['code'], t['label'])}: {t['target']:,.0f} (ನೀವು ಮಾಡಿದ್ದು {t['actual']:,.0f}). "
+                         f"ತಲುಪಿದರೆ +{_rs(each)} ಬೋನಸ್.")
+
+    steps.sort(key=lambda s_: -s_['rs'])
+    if not steps:
+        step(0, 'Everything was at its best this month - keep it up, and beating your best month adds more.',
+             'ಈ ತಿಂಗಳು ಎಲ್ಲವೂ ಉತ್ತಮ - ಹೀಗೆಯೇ ಮುಂದುವರಿಸಿ.')
+    return steps[:limit]
 
 
 def load_shares():

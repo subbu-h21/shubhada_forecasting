@@ -1406,6 +1406,10 @@ function salDetailHTML(x) {
     h += `<tr><td colspan="2" class="raw">Add a base salary in Edit to see rupees.</td></tr>`;
   }
   h += `</tbody></table>`;
+  if ((x.plan || []).length) {
+    h += `<div class="sal-sub" style="margin-top:10px">ಮುಂದಿನ ತಿಂಗಳು ಹೆಚ್ಚು ಗಳಿಸಲು · Next month</div>` +
+      x.plan.map((p, n) => `<div class="raw" style="margin-top:6px"><b>${n + 1}.</b> ${escHtml(p.kn)}<br><span class="sal-kn">${escHtml(p.en)}</span></div>`).join('');
+  }
   if (x.notes.length) h += `<div class="raw" style="margin-top:8px">${x.notes.map(n => '• ' + escHtml(n)).join('<br>')}</div>`;
   return h + `</div>`;
 }
@@ -1614,6 +1618,8 @@ function salEditCard(p, i, roles) {
     </div>${salBaseWarning(p)}
     <div class="sal-sub">Timings <label class="sal-chk"><input type="checkbox" id="sal-half-${i}" data-salhalf="${escAttr(p)}"${half ? ' checked' : ''}> Half-day</label>${usual ? ` <span class="sal-kn">${usual}</span>` : ''}</div>
     <div class="sal-edit-grid four">${box('start', 'Start')}<span data-salbreak="${escAttr(p)}" style="display:${half ? 'none' : 'contents'}">${box('break_out', 'Break')}${box('break_in', 'Back')}</span>${box('end', 'End')}</div>
+    ${['start', 'break_out', 'break_in', 'end'].some(k => t[k] && (t[k] < '06:00' || t[k] > '23:30'))
+      ? `<div class="sal-msg err" style="margin:8px 0 0">Check the timings: ${['start', 'break_out', 'break_in', 'end'].filter(k => t[k] && (t[k] < '06:00' || t[k] > '23:30')).map(k => escHtml(t[k])).join(', ')} is in the night. 4 pm is 16:00.</div>` : ''}
     ${offered.length ? `<div class="sal-sub">Targets for the bonus <span class="sal-kn">blank = own best</span></div><div class="sal-edit-grid">${targets}</div>` : ''}
   </div>`;
 }

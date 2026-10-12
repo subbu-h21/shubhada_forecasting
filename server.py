@@ -642,6 +642,7 @@ def _salary_payload(month=None):
     for sl in result['slips']:
         sl['share'] = {'phone': settings['phones'].get(sl['employee'], ''),
                        'text': salary_mod.slip_message(sl, settings['rules'])}
+        sl['plan'] = salary_mod.action_plan(sl, settings['rules'])
     return {
         'month': month, 'months': months, 'slips': result['slips'],
         'sends': salary_mod.load_sends().get(month, {}) if month else {},
