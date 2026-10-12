@@ -610,7 +610,7 @@ def _usual_times(inputs, emp, month):
             'end': med('Exit_Min')}
 
 
-def _shift_discipline(inputs, emp, month, shift, half, punches=None):
+def _shift_discipline(inputs, emp, month, shift, half, punches=None, returns=None):
     """Late / early / long-break day counts against the agreed timings. A day
     they arrived OTHER_SHIFT_MIN+ before the start was another shift and
     isn't judged. None when the person has no timed days this month.
@@ -620,7 +620,15 @@ def _shift_discipline(inputs, emp, month, shift, half, punches=None):
     - which on a quiet morning comes long after they walked in (Sept 2026:
     16 of 32 people lost all discipline pay on first-bill arrival). Breaks and
     exits still come from the bills; the punch's out-time is a scheduled
-    shift-end, not a real clock-out."""
+    shift-end, not a real clock-out.
+
+    `returns` ({'YYYY-MM-DD': [minutes, ...]}) are their LATER punch-ins that
+    day. One near the agreed break (break-out - 1h .. break-back + 3h) is the
+    real return from lunch: the day is a long break when it comes after
+    break-back + tolerance. Days without one fall back to the bills (owner
+    2026-10-12) - last bill before to first bill after, which on a quiet
+    afternoon can look far longer than the real break (Archana, 3 Sep 2026:
+    last bill 11:42, punched back on time at 16:00)."""
     d = inputs.get('daily')
     if d is None:
         return None
@@ -642,13 +650,20 @@ def _shift_discipline(inputs, emp, month, shift, half, punches=None):
     judged = now[now['Arrive_Min'] > start - OTHER_SHIFT_MIN]
     late = int((judged['Arrive_Min'] > start + tol).sum())
     early = int((judged['Exit_Min'] < end - tol).sum())
-    long_break = 0
+    long_break = back_from_punch = 0
     if not half and shift.get('break_out') and shift.get('break_in'):
-        agreed = _to_min(shift['break_in']) - _to_min(shift['break_out'])
-        gap = judged['Lunch_In_Min'] - judged['Lunch_Out_Min']
-        long_break = int((gap > agreed + tol).sum())   # days with no visible break aren't counted
-    return {'late': late, 'early': early, 'long_break': long_break, 'judged': len(judged),
-            'other_shift_days': len(now) - len(judged), 'from_punch': from_punch}
+        b_out, b_in = _to_min(shift['break_out']), _to_min(shift['break_in'])
+        agreed = b_in - b_out
+        for day, l_out, l_in in zip(judged['Day'].dt.strftime('%Y-%m-%d'), judged['Lunch_Out_Min'], judged['Lunch_In_Min']):
+            back = [t for t in (returns or {}).get(day, []) if b_out - 60 <= t <= b_in + 180]
+            if back:
+                back_from_punch += 1
+                long_break += min(back) > b_in + tol
+            elif not (pd.isna(l_out) or pd.isna(l_in)):   # days with no visible break aren't counted
+                long_break += (l_in - l_out) > agreed + tol
+    return {'late': late, 'early': early, 'long_break': int(long_break), 'judged': len(judged),
+            'other_shift_days': len(now) - len(judged), 'from_punch': from_punch,
+            'back_from_punch': back_from_punch}
 
 
 def compute_slips(inputs, month):
@@ -657,6 +672,7 @@ def compute_slips(inputs, month):
     half_day, shifts = set(settings['half_day']), settings['shifts']
     set_targets = settings['targets']
     punches = load_punches(month) if MONTH_RE.match(str(month or '')) else {}
+    returns = load_punches(month, returns=True) if punches else {}
     if not inputs or not MONTH_RE.match(str(month or '')):
         return {'slips': [], 'needs_role': []}
     pm = _person_metrics(inputs, rules)
@@ -809,13 +825,15 @@ def compute_slips(inputs, month):
             brk = f", break {x['break_out']}-{x['break_in']}" if x.get('break_out') and not is_half else ''
             return f"{x['start']}-{x['end']}{brk}"
         if agreed:
-            res = _shift_discipline(inputs, emp, month, sh, is_half, punches.get(emp))
+            res = _shift_discipline(inputs, emp, month, sh, is_half, punches.get(emp), returns.get(emp))
             if res:
                 late, early, long_lunch = res['late'], res['early'], res['long_break']
                 timed = res['judged'] > 0
                 n_other = shift_info['other_shift_days'] = res['other_shift_days']
                 if res.get('from_punch'):
                     notes.append(f"Arrival from the shubhadahealth punch-in on {res['from_punch']} days.")
+                if res.get('back_from_punch'):
+                    notes.append(f"Back from lunch from the punch on {res['back_from_punch']} days; other days from the bills.")
                 notes.append(f"Judged against the agreed {'half-day shift' if is_half else 'timings'} {times(sh)}"
                              + ('; no break counted' if is_half else ('' if sh.get('break_out') else '; no break agreed, so breaks not counted'))
                              + (f'; {n_other} day{"s" if n_other != 1 else ""} on another shift not judged' if n_other else '') + '.')
@@ -1464,8 +1482,10 @@ def load_attendance(month):
     return _load(ATT_DIR / f'{month}.json', None)
 
 
-def load_punches(month):
-    """{employee: {'YYYY-MM-DD': first plausible punch-in, in minutes}}."""
+def load_punches(month, returns=False):
+    """{employee: {'YYYY-MM-DD': first plausible punch-in, in minutes}}.
+    returns=True: {employee: {'YYYY-MM-DD': [the LATER punch-ins, sorted]}}
+    - after-lunch returns among them."""
     att = load_attendance(month)
     if not att:
         return {}
@@ -1479,7 +1499,10 @@ def load_punches(month):
         if not PUNCH_EARLIEST <= m <= PUNCH_LATEST:
             continue
         day = out.setdefault(emp, {})
-        day[r['date']] = min(day.get(r['date'], m), m)
+        day.setdefault(r['date'], []).append(m)
+    for emp, days in out.items():
+        for d, ms in days.items():
+            days[d] = sorted(ms)[1:] if returns else min(ms)
     return out
 
 
