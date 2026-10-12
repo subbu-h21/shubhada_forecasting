@@ -1222,6 +1222,14 @@ SPEECH_STT_TIMEOUT_S = float(os.environ.get('SPEECH_STT_TIMEOUT_S', '8'))
 SPEECH_STT_FALLBACK_MODEL = os.environ.get('SPEECH_STT_FALLBACK_MODEL', 'openai/gpt-4o-mini-transcribe')
 SPEECH_TTS_MODEL = os.environ.get('SPEECH_TTS_MODEL', 'google/gemini-3.1-flash-tts-preview')
 SPEECH_TTS_VOICE = os.environ.get('SPEECH_TTS_VOICE', 'Kore')
+# 2026-10-12: the same stalls as transcription - Gemini 3.1 TTS took 31 s on one
+# call and 4-7 s on the next, and the page waits for the whole piece before any
+# sound. So a piece gets this many seconds, then goes to the fallback (3.8 TTS,
+# 2.7-3.3 s on every try, same "Kore" voice; blocked by the account's
+# zero-data-retention rule on 2026-10-04, allowed when re-tested). If that fails
+# too the page uses the phone's own voice. Empty fallback = wait for the first.
+SPEECH_TTS_TIMEOUT_S = float(os.environ.get('SPEECH_TTS_TIMEOUT_S', '8'))
+SPEECH_TTS_FALLBACK_MODEL = os.environ.get('SPEECH_TTS_FALLBACK_MODEL', 'google/gemini-3.8-flash-tts')
 SPEECH_MAX_AUDIO_BYTES = 4_000_000  # ~2 minutes of 16 kHz mono WAV
 SPEECH_MAX_TTS_CHARS = 1500
 
@@ -1352,6 +1360,31 @@ def api_speech_transcribe():
     return jsonify({'text': text, 'addressed': addressed, 'echo': echo, 'cost': cost})
 
 
+def _synthesize(text):
+    """-> (audio_bytes, fmt, content_type, generation_id, model_used). Tries
+    SPEECH_TTS_MODEL for at most SPEECH_TTS_TIMEOUT_S, then the same text on
+    SPEECH_TTS_FALLBACK_MODEL. Raises only when both fail (or no fallback)."""
+    client = _openrouter_client()
+
+    def one(model, timeout):
+        # Gemini TTS only returns raw PCM; other providers can return MP3.
+        fmt = 'pcm' if 'gemini' in model else 'mp3'
+        # max_retries=0: the SDK would otherwise retry a timed-out call twice.
+        result = client.with_options(timeout=timeout, max_retries=0).audio.speech.create(
+            model=model, voice=SPEECH_TTS_VOICE, input=text, response_format=fmt)
+        return (result.content, fmt, result.response.headers.get('content-type', ''),
+                result.response.headers.get('x-generation-id', ''), model)
+
+    try:
+        return one(SPEECH_TTS_MODEL, SPEECH_TTS_TIMEOUT_S)
+    except Exception as e:
+        if not SPEECH_TTS_FALLBACK_MODEL or SPEECH_TTS_FALLBACK_MODEL == SPEECH_TTS_MODEL:
+            raise
+        logger.warning('Text-to-speech: %s gave %s within %.0fs - using %s',
+                       SPEECH_TTS_MODEL, type(e).__name__, SPEECH_TTS_TIMEOUT_S, SPEECH_TTS_FALLBACK_MODEL)
+    return one(SPEECH_TTS_FALLBACK_MODEL, 20)
+
+
 @app.route('/api/speech/tts', methods=['POST'])
 @requires_auth
 def api_speech_tts():
@@ -1359,22 +1392,18 @@ def api_speech_tts():
     text = str(body.get('text') or '').strip()[:SPEECH_MAX_TTS_CHARS]
     if not text:
         return jsonify({'error': 'text is required'}), 400
-    # Gemini TTS only returns raw PCM; other providers can return MP3.
-    fmt = 'pcm' if 'gemini' in SPEECH_TTS_MODEL else 'mp3'
     try:
-        result = _openrouter_client().audio.speech.create(
-            model=SPEECH_TTS_MODEL, voice=SPEECH_TTS_VOICE, input=text, response_format=fmt)
+        audio, fmt, ctype, gen_id, _model = _synthesize(text)
     except Exception as e:
+        # The page falls back to the phone's own voice on this.
         logger.warning('Text-to-speech failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not create speech ({type(e).__name__}).'}), 502
-    audio = result.content
     # The speech endpoint doesn't return its cost; OpenRouter's generation id
     # lets the page look it up a few seconds later (/api/speech/costs).
-    headers = {'X-Generation-Id': result.response.headers.get('x-generation-id', '')}
+    headers = {'X-Generation-Id': gen_id}
     if fmt == 'mp3':
         return Response(audio, mimetype='audio/mpeg', headers=headers)
     # e.g. 'audio/pcm;rate=24000;channels=1'
-    ctype = result.response.headers.get('content-type', '')
     rate = next((int(p.split('=', 1)[1]) for p in ctype.split(';') if p.strip().startswith('rate=')), 24000)
     return Response(_pcm_to_wav(audio, rate), mimetype='audio/wav', headers=headers)
 

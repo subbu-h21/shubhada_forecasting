@@ -197,6 +197,63 @@ finally:
     ask.T.run_tool, ask.T.get_notes = real_run_tool, real_notes
 
 
+# --- 4b. text-to-speech: time limit + fallback ----------------------------------------------
+class FakeSpeech:
+    def __init__(self, log, behaviour):
+        self.log, self.behaviour = log, behaviour
+
+    def create(self, model, voice, input, response_format):
+        self.log.append((model, response_format))
+        b = self.behaviour.get(model, 'ok')
+        if b == 'timeout':
+            raise openai.APITimeoutError(request=types.SimpleNamespace(url='x'))
+        if b == 'error':
+            raise RuntimeError('provider down')
+        hdrs = {'content-type': 'audio/pcm;rate=24000;channels=1', 'x-generation-id': 'gen-' + model[-6:]}
+        return types.SimpleNamespace(content=b'\0\0' * 2400, response=types.SimpleNamespace(headers=hdrs))
+
+
+class FakeTtsClient:
+    def __init__(self, behaviour):
+        self.log, self.behaviour, self.options = [], behaviour, []
+
+    def with_options(self, **kw):
+        self.options.append(kw)
+        return self
+
+    @property
+    def audio(self):
+        return types.SimpleNamespace(speech=FakeSpeech(self.log, self.behaviour))
+
+
+TTS_PRIMARY, TTS_FALLBACK = server.SPEECH_TTS_MODEL, server.SPEECH_TTS_FALLBACK_MODEL
+check('tts: a fallback model is configured by default and differs from the primary', bool(TTS_FALLBACK) and TTS_FALLBACK != TTS_PRIMARY, TTS_FALLBACK)
+check('tts: the fallback is a Gemini voice (same Kore voice, so Kannada keeps working)', 'gemini' in TTS_FALLBACK)
+
+fc = FakeTtsClient({TTS_PRIMARY: 'timeout'})
+server._openrouter_client = lambda: fc
+audio, fmt, ctype, gen, used = server._synthesize('hello')
+check('tts: primary times out -> fallback speaks the same text', used == TTS_FALLBACK and fc.log == [(TTS_PRIMARY, 'pcm'), (TTS_FALLBACK, 'pcm')] and gen.endswith(TTS_FALLBACK[-6:]), (used, fc.log, gen))
+check('tts: the primary call carries the time limit and no SDK retries', fc.options[0] == {'timeout': server.SPEECH_TTS_TIMEOUT_S, 'max_retries': 0}, fc.options)
+check('tts: the fallback call is bounded too', fc.options[1].get('max_retries') == 0 and 0 < fc.options[1].get('timeout', 0) <= 30, fc.options)
+
+fc = FakeTtsClient({})
+server._openrouter_client = lambda: fc
+audio, fmt, ctype, gen, used = server._synthesize('hello')
+check('tts: primary answers in time -> fallback is not called', used == TTS_PRIMARY and fc.log == [(TTS_PRIMARY, 'pcm')], fc.log)
+
+fc = FakeTtsClient({TTS_PRIMARY: 'error', TTS_FALLBACK: 'error'})
+server._openrouter_client = lambda: fc
+r = cl.post('/api/speech/tts', data=json.dumps({'text': 'hello'}), headers={'X-Session-Token': tok, 'Content-Type': 'application/json'})
+check('tts route: both voices fail -> 502 (the page then uses the phone voice)', r.status_code == 502 and 'Could not create speech' in r.get_json()['error'], (r.status_code, r.get_json()))
+
+fc = FakeTtsClient({TTS_PRIMARY: 'timeout'})
+server._openrouter_client = lambda: fc
+r = cl.post('/api/speech/tts', data=json.dumps({'text': 'hello'}), headers={'X-Session-Token': tok, 'Content-Type': 'application/json'})
+check('tts route: fallback result is wrapped as a WAV with the generation id header', r.status_code == 200 and r.data[:4] == b'RIFF' and r.mimetype == 'audio/wav' and r.headers.get('X-Generation-Id', '').endswith(TTS_FALLBACK[-6:]), (r.status_code, r.mimetype, dict(r.headers)))
+server._openrouter_client = real_client
+
+
 # --- 5. the page ----------------------------------------------------------------------------
 html = (ROOT / 'ask_dashboard.html').read_text(encoding='utf-8')
 check('page: interrupt threshold while an answer plays is now 800 ms', 'const TALK_START_MS_OVER_ANSWER = 800;' in html)
