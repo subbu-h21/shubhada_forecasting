@@ -11,6 +11,7 @@ import copy
 import json
 import os
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -193,8 +194,33 @@ try:
     answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), reply(''), reply('Retried answer.')])
     models = [r['model'] for r in fake.requests]
     check('typed: an empty reasoning answer still falls back to the fast model', answer == 'Retried answer.' and models[-2:] == ['fake/reasoning-model', 'fake/fast-model'], models)
+    answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), reply('Live answer.')], voice=True)
+    models = [r['model'] for r in fake.requests]
+    check('live voice (delegated): the FAST model writes the final answer', answer == 'Live answer.' and models[-1] == 'fake/fast-model' and len(models) == 3, models)
+    sysmsg = fake.requests[0]['messages'][0]['content']
+    check('live voice: the delegated question still carries the identity and the live-voice rules', 'suubbiii' in sysmsg and 'LIVE VOICE conversation' in sysmsg)
 finally:
     ask.T.run_tool, ask.T.get_notes = real_run_tool, real_notes
+
+# --- 4c. the live-voice persona (GPT-Live's own instructions) ------------------------------------
+VI = ' '.join(server.VOICE_INSTRUCTIONS.split())
+check('live persona: named suubbiii', 'Your name is suubbiii' in VI)
+# The family facts are private (public repo): they come from the gitignored owner_facts.txt
+# at run time, so the test uses a stand-in file with made-up names.
+_real_facts = ask.OWNER_FACTS_PATH
+ask.OWNER_FACTS_PATH = Path(tempfile.mkdtemp(prefix='owner_facts_')) / 'owner_facts.txt'
+ask.OWNER_FACTS_PATH.write_text("Your boss is Test Owner. Test Owner's wife is Test Spouse, and "
+                                "Test Owner's son is Test Son.\n", encoding='utf-8')
+VF = ' '.join(server.voice_instructions().split())
+check('live persona: the family facts come from the private owner_facts.txt, not the code',
+      'Your boss is Test Owner' in VF and 'Test Spouse' in VF and 'Test Son' in VF and 'Test Owner' not in VI)
+ask.OWNER_FACTS_PATH.unlink()
+check('live persona: without the private file there are no family facts', server.voice_instructions() == server.VOICE_INSTRUCTIONS)
+ask.OWNER_FACTS_PATH = _real_facts
+check('live persona: does not assume who is speaking', 'never assume' in VI)
+check('live persona: knows order questions are delegated too', 'order-tracking' in VI and 'overdue' in VI)
+check('live persona: still delegates every figure', 'Delegate every question that needs a figure' in VI)
+check('live voice is gated by VOICE_LIVE_ENABLED', hasattr(server, 'VOICE_LIVE_ENABLED') and server.VOICE_MAX_MINUTES == 10)
 
 
 # --- 4b. text-to-speech: time limit + fallback ----------------------------------------------

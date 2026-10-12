@@ -550,7 +550,9 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     # so the fast model writes them directly. Measured 2026-10-12: the
     # reasoning step added 5-10 s per spoken question (plus an empty reply and
     # a retry with the model .env had at the time) for no audible gain.
-    final_model = fast_model if speak else reasoning_model
+    # Live voice (voice=True) is the same case: GPT-Live rephrases a few facts
+    # aloud, and the owner is waiting through "let me check the reckoner".
+    final_model = fast_model if (speak or voice) else reasoning_model
     if verbose:
         print(f'  → answering with [{final_model}]')
     resp = complete(final_model, with_tools=False)

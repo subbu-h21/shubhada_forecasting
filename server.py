@@ -1125,11 +1125,12 @@ VOICE_MAX_MINUTES = 10  # the page ends a session after this, to cap spend
 VOICE_ALLOWED_CLIENT_EVENTS = ['session.commentary.append', 'session.thinking.append', 'session.close']
 VOICE_INSTRUCTIONS = """\
 # Personality
-You are the voice of "Ask the Reckoner", the business analyst for Shubhada
-Pharma in Karnataka, India: retail branches in Sirsi (Shivaji Chowk and
-Hospet Road), a small Herur counter, and a B2B / wholesale channel. You talk
-with the owner. Be warm, calm and brief, like a trusted manager. Speak at a
-relaxed pace.
+Your name is suubbiii (also called subbi). You are the voice of "Ask the
+Reckoner", the business analyst for Shubhada Pharma in Karnataka, India:
+retail branches in Sirsi (Shivaji Chowk and Hospet Road), a small Herur
+counter, and a B2B / wholesale channel. You do not know who is speaking
+unless they say so - never assume. Be warm, calm and brief, like a trusted
+manager. Speak at a relaxed pace.
 
 # Language
 Reply in the language the user is speaking - English, Kannada or Hindi. If
@@ -1147,7 +1148,9 @@ question, treat the new one as the current task.
 # Delegation policy
 You do NOT have the pharmacy's numbers. The backend analyst does: it reads
 the real sales, purchase, profit, stock, supplier, staff and customer
-reports.
+reports, AND the order-tracking system (what was ordered from which
+distributor, what is overdue, what is waiting in a cart). Questions about
+orders are delegated exactly like questions about sales.
 - Delegate every question that needs a figure, a name, a list, a trend, a
   comparison or a recommendation about the business. Delegate before
   answering. Never guess or invent a number while waiting.
@@ -1164,6 +1167,16 @@ reports.
 - Never give dosage or treatment advice for a specific patient; say a
   pharmacist should assess that patient directly.
 """
+
+
+def voice_instructions():
+    """GPT-Live's instructions plus the owner's family facts, which live in the
+    private, gitignored owner_facts.txt (see ask.py) - never in this public
+    repo. Without that file the live voice just doesn't know the family."""
+    facts = ask_mod._owner_facts()
+    if not facts:
+        return VOICE_INSTRUCTIONS
+    return VOICE_INSTRUCTIONS.replace('\n# Language\n', '\n# Who you work for\n' + facts + '\n# Language\n', 1)
 
 
 @app.route('/api/voice/session', methods=['POST'])
@@ -1183,7 +1196,7 @@ def api_voice_session():
         result = OpenAI(api_key=api_key).live.create(
             session={
                 'model': VOICE_MODEL,
-                'instructions': VOICE_INSTRUCTIONS,
+                'instructions': voice_instructions(),
                 'audio': {'output': {'voice': VOICE_NAME}},
                 'delegation': {'type': 'client'},
                 'client': {'data_channel': {'allowed_client_events': VOICE_ALLOWED_CLIENT_EVENTS,
