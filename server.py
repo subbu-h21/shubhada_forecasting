@@ -35,6 +35,7 @@ import ask_limits
 import run_reckoner as rk
 import salary as salary_mod
 import vault
+import shubhada_fetch
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -648,6 +649,8 @@ def _salary_payload(month=None):
         'month': month, 'months': months, 'slips': result['slips'],
         'sends': salary_mod.load_sends().get(month, {}) if month else {},
         'vault': vault.summary(),
+        'fetch': salary_mod.fetch_status(month) if month else None,
+        'site_links': settings['site_names'],
         'phones': settings['phones'], 'shares': salary_mod.load_shares().get(month, {}) if month else {}, 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
         'rules': settings['rules'], 'default_rules': salary_mod.DEFAULT_RULES, 'roles': settings['roles'],
@@ -693,10 +696,11 @@ def api_salary_settings():
     b = _json_body()
     _, err = salary_mod.update_settings(rules=b.get('rules'), roles=b.get('roles'), salaries=b.get('salaries'),
                                         half_day=b.get('half_day'), shifts=b.get('shifts'), targets=b.get('targets'),
-                                        phones=b.get('phones'))
+                                        phones=b.get('phones'), site_names=b.get('site_names'))
     if err:
         return jsonify({'error': err}), 400
-    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts', 'targets', 'phones') if b.get(k)))
+    logger.info('Salary settings changed: %s', ', '.join(k for k in ('rules', 'roles', 'salaries', 'half_day', 'shifts', 'targets', 'phones', 'site_names')
+                                                       if b.get(k)))
     return jsonify(_salary_payload(b.get('month')))
 
 
@@ -929,6 +933,76 @@ def api_salary_whatsapp_status():
     with _wa_lock:
         st = {k: (list(v) if isinstance(v, list) else v) for k, v in _wa_state.items()}
     st['sends'] = salary_mod.load_sends().get(request.args.get('month') or st.get('month') or '', {})
+    return jsonify(st)
+
+
+# --- Fetch from shubhadahealth.com ------------------------------------------
+# Read-only: logs in with the vault's login and reads the Attendance Report and
+# each Emp Performance Chart (see shubhada_fetch.py for what it never touches).
+SH_PROFILE_DIR = ROOT / shubhada_fetch.PROFILE_DIR_NAME
+_sh_lock = threading.Lock()
+_sh_state = {'running': False, 'stage': '', 'log': [], 'month': None, 'error': None, 'stop': False}
+
+
+def _sh_log(message):
+    with _sh_lock:
+        _sh_state['log'] = (_sh_state['log'] + [f"{time.strftime('%H:%M:%S')} {message}"])[-40:]
+        _sh_state['stage'] = message
+    logger.info('[shubhadahealth] %s', message)
+
+
+def _run_sh_fetch(month, want_att, want_charts):
+    try:
+        res = shubhada_fetch.fetch(month, vault.get_credentials('shubhadahealth'), SH_PROFILE_DIR, _sh_log,
+                                   want_attendance=want_att, want_charts=want_charts,
+                                   stop=lambda: _sh_state['stop'])
+        if res['attendance'] is not None:
+            salary_mod.save_attendance(month, res['attendance'], res['range'])
+        unmatched = salary_mod.save_fetched_charts(month, res['charts']) if res['charts'] else []
+        sites = [r['site_name'] for r in (res['attendance'] or [])] + list(res['charts']) + res['employees']
+        salary_mod.save_fetch_meta(month, sites, res['chart_errors'])
+        _sh_log(f"Done: {len(res['attendance'] or [])} punches, {len(res['charts'])} charts saved"
+                + (f"; {len(unmatched)} name(s) need linking" if unmatched else '') + '.')
+    except Exception as exc:
+        logger.error('shubhadahealth fetch failed:\n%s', traceback.format_exc())
+        with _sh_lock:
+            _sh_state['error'] = str(exc)[:300]
+        _sh_log(f'Stopped: {exc}')
+    finally:
+        with _sh_lock:
+            _sh_state['running'] = False
+
+
+@app.route('/api/salary/fetch', methods=['POST'])
+@requires_auth
+def api_salary_fetch():
+    b = _json_body()
+    month = str(b.get('month') or '')
+    if b.get('stop'):
+        with _sh_lock:
+            _sh_state['stop'] = True
+        return jsonify({'ok': True})
+    if not salary_mod.MONTH_RE.match(month):
+        return jsonify({'error': 'Choose a month.'}), 400
+    if not vault.get_credentials('shubhadahealth'):
+        return jsonify({'error': 'Save the shubhadahealth login in Edit > Logins vault first.'}), 400
+    want_att, want_charts = b.get('attendance', True), b.get('charts', True)
+    with _sh_lock:
+        if _sh_state['running']:
+            return jsonify({'error': 'A fetch is already running - wait for it to finish.'}), 409
+        _sh_state.update(running=True, stage='starting', log=[], month=month, error=None, stop=False)
+    logger.info('shubhadahealth fetch started: %s (attendance=%s, charts=%s)', month, want_att, want_charts)
+    threading.Thread(target=_run_sh_fetch, args=(month, bool(want_att), bool(want_charts)), daemon=True).start()
+    return jsonify({'started': True})
+
+
+@app.route('/api/salary/fetch/status')
+@requires_auth
+def api_salary_fetch_status():
+    with _sh_lock:
+        st = {k: (list(v) if isinstance(v, list) else v) for k, v in _sh_state.items()}
+    month = request.args.get('month') or st.get('month')
+    st['fetch'] = salary_mod.fetch_status(month) if month and salary_mod.MONTH_RE.match(month) else None
     return jsonify(st)
 
 

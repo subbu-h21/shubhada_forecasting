@@ -45,6 +45,9 @@ backups/
 .credentials.enc
 .credentials.tmp
 
+# The reckoner's own Chrome profile for shubhadahealth.com (a logged-in session)
+.shubhadahealth_profile/
+
 # The reckoner's own Chrome profile for WhatsApp Web - holds the linked
 # WhatsApp session (anyone with it can read and send the owner's messages).
 .whatsapp_profile/

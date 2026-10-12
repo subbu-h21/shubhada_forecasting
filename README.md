@@ -140,6 +140,15 @@ Performance Charts. Stored encrypted in `.credentials.enc` with the key
 dashboard only ever shows a masked username. Losing `.env` means typing the
 logins in again.
 
+**Fetch from shubhadahealth** (top of Salary > Charts): logs in with the
+vault's login in its own Chrome window (`.shubhadahealth_profile/`) and, for
+the month, reads the Attendance Report (everyone's punches) and every Emp
+Performance Chart - read-only; it never clicks a "Change", "Add Target" or
+leave/shift page. The punch-in becomes each person's arrival time for
+discipline (bills still give breaks and exits; a punch-in outside 05:00-23:00
+is ignored). Names spelt differently on the site are matched automatically;
+any it can't match are listed there for you to link once.
+
 ## Voice (trial)
 
 The Ask page has two voice buttons. Both answer from the same Ask the

@@ -186,10 +186,11 @@ def load_settings():
             shifts[n] = {'start': v.get('start', ''), 'end': v.get('end', '')}
     return {'rules': rules, 'roles': roles, 'salaries': s.get('salaries', {}), 'half_day': half, 'shifts': shifts,
             'commit_template': s.get('commit_template', ''), 'commitments': s.get('commitments', {}),
-            'targets': s.get('targets', {}), 'phones': s.get('phones', {})}
+            'targets': s.get('targets', {}), 'phones': s.get('phones', {}), 'site_names': s.get('site_names', {})}
 
 
-def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None, targets=None, phones=None):
+def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts=None, targets=None, phones=None,
+                    site_names=None):
     """Validates and merges; returns (settings, error)."""
     with _lock:
         s = _load(SETTINGS_PATH, {})
@@ -260,6 +261,17 @@ def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts
                     return None, f'The break for {name} must fall between their start and end.'
                 sh[name] = v if any(v.values()) else None
             s['shifts'] = {n: v for n, v in sh.items() if v}
+        if site_names:
+            sn = dict(s.get('site_names', {}))
+            for site, emp in site_names.items():
+                site = str(site)[:120]
+                if emp in ('', None):
+                    sn.pop(site, None)
+                elif emp == '-':
+                    sn[site] = '-'            # "not one of our staff": stop asking
+                else:
+                    sn[site] = str(emp)[:120]
+            s['site_names'] = sn
         if phones:
             ph = dict(s.get('phones', {}))
             for name, number in phones.items():
@@ -598,14 +610,31 @@ def _usual_times(inputs, emp, month):
             'end': med('Exit_Min')}
 
 
-def _shift_discipline(inputs, emp, month, shift, half):
+def _shift_discipline(inputs, emp, month, shift, half, punches=None):
     """Late / early / long-break day counts against the agreed timings. A day
     they arrived OTHER_SHIFT_MIN+ before the start was another shift and
-    isn't judged. None when the person has no timed days this month."""
+    isn't judged. None when the person has no timed days this month.
+
+    `punches` ({'YYYY-MM-DD': minutes}) is their shubhadahealth punch-in:
+    when it exists for a day it IS the arrival, not their first bill or fetch
+    - which on a quiet morning comes long after they walked in (Sept 2026:
+    16 of 32 people lost all discipline pay on first-bill arrival). Breaks and
+    exits still come from the bills; the punch's out-time is a scheduled
+    shift-end, not a real clock-out."""
     d = inputs.get('daily')
     if d is None:
         return None
-    now = d[(d['Employee'] == emp) & (d['Calendar_Month'] == month)]
+    now = d[(d['Employee'] == emp) & (d['Calendar_Month'] == month)].copy()
+    from_punch = 0
+    if punches:
+        days = now['Day'].dt.strftime('%Y-%m-%d')
+        from_punch = int(days.isin(list(punches)).sum())
+        now['Arrive_Min'] = [punches.get(dd, a) for dd, a in zip(days, now['Arrive_Min'])]
+        extra = [dd for dd in punches if dd.startswith(month) and dd not in set(days)]
+        if extra:      # punched in, but no bills that day (back-office work): arrival still counts
+            now = pd.concat([now, pd.DataFrame({'Employee': emp, 'Day': pd.to_datetime(extra), 'Calendar_Month': month,
+                                                'Arrive_Min': [punches[x] for x in extra]})], ignore_index=True)
+            from_punch += len(extra)
     if now.empty:
         return None
     tol = rk.SHIFT_TOLERANCE_MIN
@@ -619,7 +648,7 @@ def _shift_discipline(inputs, emp, month, shift, half):
         gap = judged['Lunch_In_Min'] - judged['Lunch_Out_Min']
         long_break = int((gap > agreed + tol).sum())   # days with no visible break aren't counted
     return {'late': late, 'early': early, 'long_break': long_break, 'judged': len(judged),
-            'other_shift_days': len(now) - len(judged)}
+            'other_shift_days': len(now) - len(judged), 'from_punch': from_punch}
 
 
 def compute_slips(inputs, month):
@@ -627,6 +656,7 @@ def compute_slips(inputs, month):
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
     half_day, shifts = set(settings['half_day']), settings['shifts']
     set_targets = settings['targets']
+    punches = load_punches(month) if MONTH_RE.match(str(month or '')) else {}
     if not inputs or not MONTH_RE.match(str(month or '')):
         return {'slips': [], 'needs_role': []}
     pm = _person_metrics(inputs, rules)
@@ -779,11 +809,13 @@ def compute_slips(inputs, month):
             brk = f", break {x['break_out']}-{x['break_in']}" if x.get('break_out') and not is_half else ''
             return f"{x['start']}-{x['end']}{brk}"
         if agreed:
-            res = _shift_discipline(inputs, emp, month, sh, is_half)
+            res = _shift_discipline(inputs, emp, month, sh, is_half, punches.get(emp))
             if res:
                 late, early, long_lunch = res['late'], res['early'], res['long_break']
                 timed = res['judged'] > 0
                 n_other = shift_info['other_shift_days'] = res['other_shift_days']
+                if res.get('from_punch'):
+                    notes.append(f"Arrival from the shubhadahealth punch-in on {res['from_punch']} days.")
                 notes.append(f"Judged against the agreed {'half-day shift' if is_half else 'timings'} {times(sh)}"
                              + ('; no break counted' if is_half else ('' if sh.get('break_out') else '; no break agreed, so breaks not counted'))
                              + (f'; {n_other} day{"s" if n_other != 1 else ""} on another shift not judged' if n_other else '') + '.')
@@ -1383,6 +1415,122 @@ def record_send(month, employee, sent, reason=''):
         sd.setdefault(month, {})[str(employee)[:120]] = {
             'at': time.strftime('%Y-%m-%d %H:%M'), 'sent': bool(sent), 'reason': str(reason or '')[:200]}
         _save(SENDS_PATH, sd)
+
+
+# ------------------------------------------------- fetched from shubhadahealth --
+ATT_DIR = SALARY_DIR / 'attendance'
+PUNCH_EARLIEST, PUNCH_LATEST = 5 * 60, 23 * 60   # an in-time outside 05:00-23:00 is not believed (one read 04:00)
+
+
+def match_site_names(site_names):
+    """shubhadahealth's spellings -> reckoner names. The owner's own links win;
+    then an exact match (letters only, any case); then the POS aliases - but an
+    alias match is dropped when another site name already matched that person
+    exactly (the site lists "Raghavendra" AND "Raghavendra s palankar", so the
+    plain one is somebody else). Unmatched names map to ''."""
+    st = load_settings()
+    staff = [n for n, r in st['roles'].items() if r != 'Not staff']
+    letters = lambda x: re.sub(r'[^a-z]', '', str(x).lower())
+    by_letters = {letters(n): n for n in staff}
+    out, taken = {}, set()
+    for site in site_names:
+        if site in st['site_names']:
+            out[site] = st['site_names'][site]
+        elif letters(site) in by_letters:
+            out[site] = by_letters[letters(site)]
+        else:
+            continue
+        taken.add(out[site])
+    for site in site_names:
+        if site in out:
+            continue
+        norm = rk._norm_name(pd.Series([str(site)])).iloc[0]
+        out[site] = norm if norm in staff and norm not in taken else ''
+        if out[site]:
+            taken.add(norm)
+    return out
+
+
+def save_attendance(month, rows, fetched_range):
+    """Keeps the month's punches exactly as read (site spellings), so a name
+    linked later still finds its punches."""
+    ATT_DIR.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        _save(ATT_DIR / f'{month}.json', {'month': month, 'range': fetched_range,
+                                          'fetched_at': time.strftime('%Y-%m-%d %H:%M'), 'rows': rows})
+
+
+def load_attendance(month):
+    return _load(ATT_DIR / f'{month}.json', None)
+
+
+def load_punches(month):
+    """{employee: {'YYYY-MM-DD': first plausible punch-in, in minutes}}."""
+    att = load_attendance(month)
+    if not att:
+        return {}
+    names = match_site_names(sorted({r['site_name'] for r in att['rows']}))
+    out = {}
+    for r in att['rows']:
+        emp = names.get(r['site_name'])
+        if not emp or emp == '-' or not TIME_RE.match(r.get('in') or ''):
+            continue
+        m = _to_min(r['in'])
+        if not PUNCH_EARLIEST <= m <= PUNCH_LATEST:
+            continue
+        day = out.setdefault(emp, {})
+        day[r['date']] = min(day.get(r['date'], m), m)
+    return out
+
+
+def save_fetched_charts(month, charts):
+    """Fetched Performance Charts into the same store as uploaded ones. Returns
+    the site names that could not be linked to a staff member."""
+    names = match_site_names(list(charts))
+    unmatched = []
+    with _lock:
+        c = load_charts()
+        for site, ch in charts.items():
+            emp = names.get(site)
+            if not emp or emp == '-':
+                if not emp:
+                    unmatched.append(site)
+                continue
+            c.setdefault(month, {})[emp] = {'rows': ch['rows'], 'targets': ch.get('targets', {}), 'file': '',
+                                            'original_name': f'fetched from shubhadahealth ({site})',
+                                            'uploaded_at': time.strftime('%Y-%m-%d %H:%M')}
+        _save(CHARTS_PATH, c)
+    return unmatched
+
+
+FETCH_META_PATH = SALARY_DIR / 'fetch_meta.json'
+
+
+def save_fetch_meta(month, site_names, chart_errors):
+    """Every site name seen in the last fetch, so names that could not be
+    linked are still listed for the owner after the fetch is over."""
+    with _lock:
+        meta = _load(FETCH_META_PATH, {})
+        meta[month] = {'sites': sorted(set(site_names)), 'chart_errors': chart_errors,
+                       'at': time.strftime('%Y-%m-%d %H:%M')}
+        _save(FETCH_META_PATH, meta)
+
+
+def fetch_status(month):
+    """What has been fetched for the month, and which site names still need linking."""
+    att = load_attendance(month) if MONTH_RE.match(str(month or '')) else None
+    sites = sorted({r['site_name'] for r in att['rows']}) if att else []
+    charts = load_charts().get(month, {})
+    fetched_charts = [e for e, ch in charts.items() if str(ch.get('original_name', '')).startswith('fetched')]
+    chart_sites = [ch['original_name'][len('fetched from shubhadahealth ('):-1] for ch in charts.values()
+                   if str(ch.get('original_name', '')).startswith('fetched')]
+    meta = _load(FETCH_META_PATH, {}).get(month, {})
+    names = match_site_names(sorted(set(sites) | set(chart_sites) | set(meta.get('sites', []))))
+    return {'attendance': {'rows': len(att['rows']), 'people': len(sites), 'range': att['range'],
+                           'fetched_at': att['fetched_at']} if att else None,
+            'charts': len(fetched_charts), 'last_fetch': meta.get('at'),
+            'chart_errors': meta.get('chart_errors', {}),
+            'unmatched': sorted(s_ for s_, e in names.items() if not e)}
 
 
 def summary(result):

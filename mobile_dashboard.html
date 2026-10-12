@@ -1461,7 +1461,7 @@ function salRatingsHTML() {
 
 function salChartsHTML() {
   const ch = SAL.charts;
-  let html = `<div class="sal-note">Upload each person's Performance Chart from shubhadahealth.com <b>after the month has ended</b>, so it covers the whole month. Its items are scored against that person's own best chart month.
+  let html = salFetchHTML() + `<div class="sal-note">Upload each person's Performance Chart from shubhadahealth.com <b>after the month has ended</b>, so it covers the whole month. Its items are scored against that person's own best chart month.
     <span class="kn">ತಿಂಗಳು ಮುಗಿದ ನಂತರ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ.</span></div>
     <form class="sal-form" id="sal-chart-form">
       <label>Month it covers<select id="sal-chart-month">${SAL.months.map(m => `<option value="${m}"${m === SAL.month ? ' selected' : ''}>${monthAbbr(m)} ${m.slice(0, 4)}</option>`).join('')}</select></label>
@@ -1474,6 +1474,85 @@ function salChartsHTML() {
   return html + `<div class="card-list">` + Object.entries(ch).sort().map(([e, c]) =>
     `<div class="card" style="--card-stripe:var(--accent)"><div class="row1"><div class="name">${escHtml(e)}<div class="meta">${escHtml(c.original_name || c.file)} · uploaded ${escHtml(c.uploaded_at || '')}</div></div>
       <button class="sal-link" style="padding:0;color:var(--danger)" data-salchartdel="${escAttr(e)}">Remove</button></div></div>`).join('') + `</div>`;
+}
+
+let salSh = null, salShTimer = null, salShWatching = false;
+
+function salFetchHTML() {
+  const v = (SAL.vault || {}).shubhadahealth || {}, f = SAL.fetch || {}, running = salSh && salSh.running;
+  const mon = `${monthAbbr(SAL.month)} ${SAL.month.slice(0, 4)}`;
+  let h = `<div class="sal-form sal-fetch"><div class="name">Fetch from shubhadahealth <span class="sal-kn">shubhadahealth ನಿಂದ ತರಿಸಿ</span></div>
+    <div class="sal-note" style="margin:0">Logs in with the login in the vault and reads, for ${mon}: everyone's <b>attendance punches</b> (the punch-in becomes their arrival time) and every <b>Performance Chart</b>. Read-only - it never changes anything on shubhadahealth. Takes about 3 minutes; a Chrome window opens while it works.</div>`;
+  if (!v.configured) {
+    h += `<div class="sal-msg err" style="margin:0">Save the shubhadahealth login first: <b>Edit → Logins vault</b>.</div></div>`;
+    return h;
+  }
+  const att = f.attendance;
+  h += `<div class="meta">${att ? `Punches: ${fmt(att.rows)} for ${att.people} people (${escHtml(att.range[0])} to ${escHtml(att.range[1])}), fetched ${escHtml(att.fetched_at)}.` : 'No punches fetched for this month yet.'}
+    ${f.charts ? ` Charts: ${f.charts} fetched.` : ''}</div>`;
+  if (running) {
+    h += `<div class="sal-msg ok" style="margin:0">Working… ${escHtml(salSh.stage || '')}</div>
+      <button class="sal-btn ghost" id="sal-sh-stop">Stop</button>`;
+  } else {
+    h += `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="sal-btn" id="sal-sh-go">Fetch ${mon}</button>
+      <button class="sal-btn ghost" id="sal-sh-att">Punches only</button></div>`;
+    if (salSh && salSh.error) h += `<div class="sal-msg err" style="margin:0">${escHtml(salSh.error)}</div>`;
+  }
+  if (salSh && (salSh.log || []).length) {
+    h += `<details${running ? ' open' : ''}><summary class="sal-link" style="padding:0">What it's doing</summary><div class="meta" style="white-space:pre-wrap">${escHtml(salSh.log.slice(-8).join('\n'))}</div></details>`;
+  }
+  const un = f.unmatched || [];
+  if (un.length) {
+    h += `<div class="sal-msg err" style="margin:0">${un.length} name${un.length > 1 ? 's' : ''} on shubhadahealth could not be matched to your staff. Link each one (or mark "not our staff"), then Save links.</div>
+      <div class="sal-edit-grid">` + un.map((n, i) => `<label>${escHtml(n)}<select data-sitelink="${escAttr(n)}" id="sal-site-${i}">
+        <option value="">Choose…</option><option value="-">Not one of our staff</option>${SAL.staff.map(x => `<option>${escHtml(x)}</option>`).join('')}</select></label>`).join('') +
+      `</div><button class="sal-btn ghost" id="sal-site-save">Save links</button>`;
+  }
+  return h + `</div>`;
+}
+
+async function salShPoll(container) {
+  clearTimeout(salShTimer);
+  try {
+    const res = await authFetch('/api/salary/fetch/status?month=' + encodeURIComponent(salMonth));
+    salSh = await res.json();
+    if (salSh.fetch) SAL.fetch = salSh.fetch;
+  } catch (e) { return; }
+  if (currentPeopleSub === 'salary' && salView === 'charts') {
+    const box = container.querySelector('.sal-fetch');
+    if (box) { box.outerHTML = salFetchHTML(); salBindFetch(container); }
+  }
+  if (salSh.running) { salShWatching = true; salShTimer = setTimeout(() => salShPoll(container), 3000); }
+  else if (salShWatching) {
+    salShWatching = false;             // a fetch we were watching just finished - reload once for the new data
+    SAL = null; renderSalary(container);
+  }
+}
+
+function salBindFetch(container) {
+  const start = async (body) => {
+    try {
+      const res = await authFetch('/api/salary/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ month: salMonth }, body)) });
+      const out = await res.json();
+      if (!res.ok) { salMsg = { kind: 'err', text: out.error || 'Could not start.' }; renderSalary(container); return; }
+      salSh = { running: true, stage: 'starting', log: [] }; salShWatching = true;
+      renderSalary(container);
+    } catch (e) { if (e.message !== 'unauthorized') { salMsg = { kind: 'err', text: 'Could not reach the server.' }; renderSalary(container); } }
+  };
+  const go = container.querySelector('#sal-sh-go');
+  if (go) go.addEventListener('click', () => { go.disabled = true; start({ attendance: true, charts: true }); });
+  const att = container.querySelector('#sal-sh-att');
+  if (att) att.addEventListener('click', () => { att.disabled = true; start({ attendance: true, charts: false }); });
+  const stop = container.querySelector('#sal-sh-stop');
+  if (stop) stop.addEventListener('click', () => { stop.disabled = true; start({ stop: true }); });
+  const save = container.querySelector('#sal-site-save');
+  if (save) save.addEventListener('click', () => {
+    const links = {};
+    container.querySelectorAll('[data-sitelink]').forEach(sel => { if (sel.value) links[sel.dataset.sitelink] = sel.value; });
+    if (!Object.keys(links).length) { salMsg = { kind: 'err', text: 'Choose who each name is first.' }; renderSalary(container); return; }
+    salPost('/api/salary/settings', { site_names: links }, 'Links saved. Fetch again to bring in their charts.');
+  });
 }
 
 function salWaText(p, url) {
@@ -1686,6 +1765,7 @@ function salBind(container) {
     container.querySelectorAll(`[data-salrate="${CSS.escape(p)}"]`).forEach(s2 => { ratings[s2.dataset.key] = s2.value ? Number(s2.value) : null; });
     salPost('/api/salary/rating', { employee: p, ratings }, `Saved ${p}'s rating.`);
   }));
+  if (salView === 'charts') { salBindFetch(container); salShPoll(container); }
   const chartForm = container.querySelector('#sal-chart-form');
   if (chartForm) {
     const fileIn = container.querySelector('#sal-chart-file'), empSel = container.querySelector('#sal-chart-emp');
