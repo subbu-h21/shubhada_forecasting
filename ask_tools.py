@@ -1372,6 +1372,84 @@ def query_sales(group_by=None, metric='revenue', product=None, branch=None, mont
 # Registry: provider-neutral tool specs (name / description / JSON-schema args)
 # ask.py converts these into whatever the model SDK wants.
 # ---------------------------------------------------------------------------
+def _compact(x):
+    return re.sub(r'[^A-Z0-9]', '', str(x).upper())
+
+
+def _latest_mrp():
+    """{product: (MRP per strip, strip size, date, source)} - the MRP on the
+    product's most recent PURCHASE bill (what is on the box on the shelf now);
+    a product never purchased falls back to its latest sale. Strip size is the
+    usual pack size (same factor map the rest of the reckoner uses)."""
+    if 'latest_mrp' not in _cache:
+        s, p = _load()
+        fm = _factor_map()
+        out = {}
+        for df, src in ((s, 'sale'), (p, 'purchase')):    # purchase last, so it wins
+            if df.empty:
+                continue
+            d = df[['Product', 'MRP', 'Date']].copy()
+            d['MRP'] = pd.to_numeric(d['MRP'], errors='coerce')
+            d['D'] = pd.to_datetime(d['Date'], errors='coerce', dayfirst=False)
+            d = d.dropna(subset=['Product', 'MRP', 'D'])
+            d = d[d['MRP'] > 0]
+            last = d.sort_values(['D', 'MRP']).groupby('Product').tail(1)
+            for prod, mrp, dt in zip(last['Product'], last['MRP'], last['D']):
+                f = float(fm.get(prod, 1) or 1)
+                out[prod] = (float(mrp), f, dt.strftime('%Y-%m-%d'), src)
+        _cache['latest_mrp'] = out
+    return _cache['latest_mrp']
+
+
+def get_mrp_total(items):
+    """MRP total for a list of products and a number of TABLETS/CAPSULES each
+    (owner's rule: "Ecosprin AV 75, 30" = 30 capsules of Ecosprin AV 75 = 2
+    strips of 15). Each item is {"product": what the owner said, "units":
+    tablets/capsules}. Uses the MRP on the latest purchase bill, divides by the
+    strip size and multiplies by the units, all done here - read the totals
+    out exactly, never recompute them. When several products have a similar
+    name, the closest name is used and the others are listed in 'similar'."""
+    mrp = _latest_mrp()
+    rows, grand = [], 0.0
+    for it in items or []:
+        said = str((it or {}).get('product', '')).strip()
+        try:
+            units = float((it or {}).get('units'))
+        except (TypeError, ValueError):
+            rows.append({'asked': said, 'found': False, 'reason': 'number of tablets/capsules missing'})
+            continue
+        q = _compact(said)
+        tokens = [t for t in re.split(r'[^A-Z0-9]+', said.upper()) if t]
+        cands = [n for n in mrp if not _compact(n).startswith('XXX')
+                 and all(t in _compact(n) for t in tokens)]
+        if not cands:
+            close = difflib.get_close_matches(said.upper(), [str(n).upper() for n in mrp], n=1, cutoff=0.6)
+            cands = [n for n in mrp if str(n).upper() in close]
+        if not cands:
+            rows.append({'asked': said, 'found': False, 'reason': 'no product with that name - try search_products'})
+            continue
+        # closest name first: exact (ignoring spaces/dots), then the fewest
+        # extra letters, then the most recently bought
+        cands.sort(key=lambda n: (_compact(n) != q, len(_compact(n)) - len(q), [-ord(c) for c in mrp[n][2]]))
+
+        def line(n):
+            m, f, dt, src = mrp[n]
+            strips = units / f
+            return {'product': n, 'mrp_per_strip': round(m, 2), 'strip_size': int(f) if f == int(f) else f,
+                    'mrp_per_unit': round(m / f, 4), 'units': units if units != int(units) else int(units),
+                    'strips': int(strips) if strips == int(strips) else round(strips, 2),
+                    'mrp_total': round(m * units / f, 2), 'mrp_date': dt, 'mrp_from': src}
+        best = line(cands[0])
+        best['asked'] = said
+        best['found'] = True
+        best['similar'] = [{k: v for k, v in line(n).items() if k in ('product', 'mrp_per_strip', 'strip_size', 'mrp_total')}
+                           for n in cands[1:5]]
+        grand += best['mrp_total']
+        rows.append(best)
+    return {'items': rows, 'grand_total_mrp': round(grand, 2),
+            'note': 'units = tablets/capsules; total = MRP per strip / strip size x units'}
+
+
 def _schema(props, required=()):
     return {'type': 'object', 'properties': props, 'required': list(required)}
 
@@ -1455,6 +1533,10 @@ TOOLS = [
     {'name': 'get_product_patient_history', 'fn': get_product_patient_history,
      'description': get_product_patient_history.__doc__,
      'parameters': _schema({'product': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['product'])},
+    {'name': 'get_mrp_total', 'fn': get_mrp_total,
+     'description': get_mrp_total.__doc__,
+     'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
+         'product': {'type': 'string'}, 'units': {'type': 'number'}}, 'required': ['product', 'units']}}}, ['items'])},
 ]
 
 TOOL_FNS = {t['name']: t['fn'] for t in TOOLS}
