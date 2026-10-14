@@ -42,6 +42,7 @@ line, '#' comments allowed) instead of being set system-wide - handy on
 Windows where a just-set system env var needs a fresh terminal/app restart to
 be seen. `.env` is gitignored; a real environment variable always wins over it.
 """
+import datetime
 import json
 import os
 import sys
@@ -169,6 +170,11 @@ Rules:
   where given. It covers the latest month unless the owner names a month or
   asks about all months (month='all'). If the name matches several parties,
   report each separately. Do not swap in other checks for "issues".
+- MONTH TOTALS: for a month's total sales, purchases, gross profit or margin
+  - or "how did this month go", month-vs-month, or all months side by side -
+  call get_month_summary (month 'YYYY-MM', or 'all'; optional branch) once,
+  instead of piecing it together from other tools. For a partial month,
+  compare sales per day, and say the month is partial.
 - SCHEDULE H1 DRUGS: for any question about Schedule H1 / "H1" drugs -
   their sales or purchases (value, strips, bills, by month / branch / product
   / supplier), which products are H1, or whether a given product is H1 - call
@@ -370,6 +376,24 @@ MAX_STEPS = 6  # tool-call rounds before we force a final answer
 MAX_HISTORY_TURNS = 4  # earlier question/answer pairs kept for follow-up questions
 
 
+def _date_context():
+    """Today's date and what the loaded data covers. The model has no clock, so
+    without this it read 'last month' (asked on 14 Oct) as October (2026-10-14)."""
+    today = datetime.date.today()
+    this_month = today.strftime('%Y-%m')
+    last_month = (today.replace(day=1) - datetime.timedelta(days=1)).strftime('%Y-%m')
+    text = (f"\n\nToday is {today:%A %d %B %Y}. 'This month' means {this_month} and 'last month' means "
+            f"{last_month} (calendar months), unless the owner says otherwise.")
+    try:
+        c = T.data_coverage()
+        text += (f" The sales history loaded runs from {c['first_day']} to {c['last_day']} ({c['first_month']} to "
+                 f"{c['last_month']}); the latest month has {c['last_month_days']} days of data so far - say a month "
+                 f"is partial when it is. If asked about a period with no data, say so plainly.")
+    except Exception:
+        pass
+    return text
+
+
 def _build_system_prompt(voice=False, speak=False):
     """SYSTEM_PROMPT plus recent persisted notes (see ask_tools.save_note) -
     this is what actually gives every NEW conversation access to what was
@@ -377,7 +401,7 @@ def _build_system_prompt(voice=False, speak=False):
     Notes are marked as possibly stale so the model verifies against a tool
     rather than trusting an old note at face value. Voice / push-to-talk mode
     appends its prompt last, so its formatting rules win."""
-    prompt = identity_prompt() + SYSTEM_PROMPT
+    prompt = identity_prompt() + SYSTEM_PROMPT + _date_context()
     if order_bridge.tool_specs():
         prompt += DUAL_PROMPT
         facts = order_bridge.context()
@@ -669,6 +693,9 @@ def selftest():
         ('get_purchase_issues', {'n': 5}),
         ('get_distributor_issues', {'supplier': 'Kapila', 'n': 3}),
         ('get_distributor_issues', {'supplier': 'drk', 'month': 'all', 'n': 3}),
+        ('get_month_summary', {}),
+        ('get_month_summary', {'month': '2026-09', 'branch': 'Hospet'}),
+        ('get_month_summary', {'month': 'all'}),
         ('get_schedule_h1', {'n': 3}),
         ('get_schedule_h1', {'month': 'all', 'drug': 'alprazolam', 'branch': 'Hospet', 'n': 3}),
         ('get_schedule_h1', {'product': 'ultracet', 'include_upcoming': True, 'n': 3}),

@@ -136,6 +136,23 @@ def _latest_month():
     return sorted(s['Calendar_Month'].unique())[-1]
 
 
+def data_coverage():
+    """First/last day and month of the loaded sales history, and how many
+    days of the latest month it covers - so the assistant (which has no
+    clock or calendar of its own) can resolve 'this month' / 'last month'."""
+    if 'coverage' not in _cache:
+        s, _ = _load()
+        days = pd.to_datetime(s['Date'], format='mixed').dt.normalize()
+        months = sorted(s['Calendar_Month'].unique())
+        last = months[-1]
+        _cache['coverage'] = {
+            'first_day': days.min().strftime('%d %b %Y'), 'last_day': days.max().strftime('%d %b %Y'),
+            'first_month': months[0], 'last_month': last,
+            'last_month_days': int(days[s['Calendar_Month'] == last].nunique()),
+        }
+    return _cache['coverage']
+
+
 def _mobile_col():
     """The sales mobile-number column, if this export has one - same
     detection rule as run_reckoner's own customer-loyalty analysis, so a
@@ -679,6 +696,78 @@ def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_up
         'sales_value_with_unknown_composition_rs': _round(unknown_value),
         'note': ('H1 status = each product\'s composition (worked out from its brand name) matched to the official '
                  'list. No prescriber details exist in this data, so this is not the legal H1 register.'),
+    })
+
+
+def get_month_summary(month=None, branch=None):
+    """One month's SALES, PURCHASES and GROSS PROFIT / MARGIN together, with
+    the month before it for comparison - or month='all' for every month side
+    by side. Sales: value with GST, value before GST, bills, strips, days with
+    sales (a month still in progress is partial). Purchases: invoice value,
+    invoices, packs, suppliers. Gross profit and margin %: before GST, for
+    products with a known cost (cost from all purchase history - the same
+    method as the profit reports), split by branch/channel. month = 'YYYY-MM'
+    (default: the latest month). branch filters sales and profit only -
+    purchase invoices carry no branch."""
+    s, p = _load()
+    months = sorted(s['Calendar_Month'].unique())
+    if month in (None, '', 'latest'):
+        month = months[-1]
+    if str(month).lower() != 'all' and month not in months:
+        return _guard_no_pii({'error': f'no sales data for month {month!r}', 'months_available': months})
+
+    def one(m):
+        ss = s[s['Calendar_Month'] == m]
+        if branch:
+            ss = ss[ss['Inv.No'].apply(rk.extract_branch).str.contains(str(branch), case=False, regex=False)]
+        pp = p[p['Calendar_Month'] == m]
+        days = pd.to_datetime(ss['Date'], format='mixed').dt.normalize().nunique()
+        y, mo = map(int, m.split('-'))
+        ch = rk.build_channel_profit(ss, p) if len(ss) else pd.DataFrame(
+            columns=['Branch', 'Revenue', 'Gross_Profit', 'Margin_Pct', 'Revenue_Cost_Unknown'])
+        known_rev, gp = float(ch['Revenue'].sum()), float(ch['Gross_Profit'].sum())
+        return {
+            'month': m, 'days_with_sales': int(days), 'days_in_month': rk.days_in_month(y, mo),
+            'sales': {'value_rs': _round(ss['Item Total'].sum()),
+                      'value_before_gst_rs': _round((ss['Item Total'] / (1 + ss['Tax Rate'].fillna(0) / 100)).sum()),
+                      'bills': int(ss['Inv.No'].nunique()),
+                      'strips': _round(rk.to_strips(ss['Qty'], ss['Product'], _factor_map()).sum(), 1)},
+            'purchases': {'invoice_value_rs': _round(pp['Item Total'].sum()),
+                          'invoices': int(pp[['Inv.No', 'Supplier']].astype(str).drop_duplicates().shape[0]),
+                          'packs': _round(pp['Qty'].sum(), 1), 'suppliers': int(pp['Supplier'].nunique())},
+            'gross_profit_rs': _round(gp),
+            'gross_margin_pct': _round(gp / known_rev * 100, 1) if known_rev else None,
+            'sales_with_unknown_cost_rs': _round(ch['Revenue_Cost_Unknown'].sum()),
+            'by_channel': _records(ch, ['Branch', 'Revenue', 'Gross_Profit', 'Margin_Pct']),
+        }
+
+    if str(month).lower() == 'all':
+        rows = [one(m) for m in months]
+        return _guard_no_pii({
+            'branch_filter': branch,
+            'months': [{'month': r['month'], 'days_with_sales': r['days_with_sales'],
+                        'sales_rs': r['sales']['value_rs'], 'purchases_rs': r['purchases']['invoice_value_rs'],
+                        'gross_profit_rs': r['gross_profit_rs'], 'gross_margin_pct': r['gross_margin_pct']}
+                       for r in rows],
+            'note': 'Purchases are counted by invoice date; the latest month may be partial.'})
+    cur = one(month)
+    i = months.index(month)
+    prev = one(months[i - 1]) if i > 0 else None
+
+    def change(a, b):
+        return _round((a - b) / b * 100, 1) if a is not None and b else None
+    per_day = lambda r: (r['sales']['value_rs'] or 0) / max(1, r['days_with_sales'])
+    return _guard_no_pii({
+        'branch_filter': branch, 'month': cur, 'previous_month': prev,
+        'change_vs_previous': None if not prev else {
+            'sales_pct': change(cur['sales']['value_rs'], prev['sales']['value_rs']),
+            'sales_per_day_pct': change(per_day(cur), per_day(prev)),
+            'purchases_pct': change(cur['purchases']['invoice_value_rs'], prev['purchases']['invoice_value_rs']),
+            'gross_margin_points': (_round(cur['gross_margin_pct'] - prev['gross_margin_pct'], 1)
+                                    if cur['gross_margin_pct'] is not None and prev['gross_margin_pct'] is not None
+                                    else None)},
+        'note': ('Compare a partial month by sales PER DAY, not the total. Purchases are counted by invoice '
+                 'date, so late-entered invoices from the month before can land in a month.'),
     })
 
 
@@ -1623,6 +1712,9 @@ TOOLS = [
      'parameters': _schema({'month': {'type': 'string'}, 'branch': {'type': 'string'},
                             'product': {'type': 'string'}, 'drug': {'type': 'string'},
                             'include_upcoming': {'type': 'boolean'}, 'n': {'type': 'integer'}})},
+    {'name': 'get_month_summary', 'fn': get_month_summary,
+     'description': get_month_summary.__doc__,
+     'parameters': _schema({'month': {'type': 'string'}, 'branch': {'type': 'string'}})},
     {'name': 'get_thin_margin_purchases', 'fn': get_thin_margin_purchases,
      'description': get_thin_margin_purchases.__doc__,
      'parameters': _schema({'supplier': {'type': 'string'}, 'n': {'type': 'integer'}})},
