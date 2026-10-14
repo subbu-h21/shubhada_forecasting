@@ -73,3 +73,7 @@ Thumbs.db
 # The owner's family facts for the Ask assistant (ask.py reads them) - private,
 # kept off this public repo.
 owner_facts.txt
+
+# Product master from shubhadahealth.com and the category file built from it -
+# business data, never committed (this repo is public).
+data/product_master/

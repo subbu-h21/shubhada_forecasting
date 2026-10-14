@@ -169,6 +169,19 @@ Rules:
   where given. It covers the latest month unless the owner names a month or
   asks about all months (month='all'). If the name matches several parties,
   report each separately. Do not swap in other checks for "issues".
+- SCHEDULE H1 DRUGS: for any question about Schedule H1 / "H1" drugs -
+  their sales or purchases (value, strips, bills, by month / branch / product
+  / supplier), which products are H1, or whether a given product is H1 - call
+  get_schedule_h1 (filters: month, branch, product, drug). "H1" means the
+  drugs in force now; pregabalin becomes H1 on 16 Nov 2026 and flupentixol,
+  zopiclone, gabapentin and carisoprodol are only proposed - include them
+  (include_upcoming=true) only when the owner asks about them or about
+  upcoming changes, and say which is which. Say that H1 status comes from
+  each product's composition as worked out from the product list, and mention
+  any marked please_check. The data has no prescriber details, so it is not
+  the legal H1 register - never invent prescriber or patient details; for
+  who bought one specific H1 product use get_product_patient_history (typed
+  page only).
 - If a question is about thin/negative purchase margins or loss-making
   purchases (not "issues" - see above), use get_thin_margin_purchases
   (all-history, not just the latest month).
@@ -656,6 +669,9 @@ def selftest():
         ('get_purchase_issues', {'n': 5}),
         ('get_distributor_issues', {'supplier': 'Kapila', 'n': 3}),
         ('get_distributor_issues', {'supplier': 'drk', 'month': 'all', 'n': 3}),
+        ('get_schedule_h1', {'n': 3}),
+        ('get_schedule_h1', {'month': 'all', 'drug': 'alprazolam', 'branch': 'Hospet', 'n': 3}),
+        ('get_schedule_h1', {'product': 'ultracet', 'include_upcoming': True, 'n': 3}),
         ('get_optimum_stock', {'n': 5}),
         ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
         ('get_refill_due', {'n': 5}),

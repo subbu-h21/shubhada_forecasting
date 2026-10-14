@@ -547,6 +547,141 @@ def get_distributor_issues(supplier, month=None, n=10):
     })
 
 
+# Schedule H1 (2026-10-14): which products are H1 comes from the Shubhada
+# Health product list - each product's active ingredients were worked out by AI
+# from its brand name, then matched IN CODE against the official list (the 46
+# drugs of G.S.R. 588(E) 2013 + Oxytocin 2018, Tapentadol 2021, Oseltamivir and
+# Zanamivir 2024; Pregabalin notified May 2026, in force from 16 Nov 2026;
+# Flupentixol/Zopiclone/Gabapentin/Carisoprodol only a draft). The table lives
+# in data/product_master/ (gitignored business data) and is joined to the
+# sales/purchase history by product name.
+PRODUCT_MASTER_CSV = Path(__file__).parent / 'data' / 'product_master' / 'product_master.csv'
+H1_IN_FORCE = 'Yes'
+H1_UPCOMING = ('Yes - from 16 Nov 2026', 'Proposed (draft)')
+
+
+def _product_master():
+    """Product list with CATEGORY / ACTIVE INGREDIENTS / SCHEDULE H1 columns,
+    indexed by upper-cased product name; None if it hasn't been built."""
+    if not PRODUCT_MASTER_CSV.exists():
+        return None
+    stamp = PRODUCT_MASTER_CSV.stat().st_mtime
+    if _cache.get('product_master_stamp') != stamp:
+        df = pd.read_csv(PRODUCT_MASTER_CSV, dtype=str, keep_default_na=False)
+        df['_key'] = df['PRODUCT'].str.strip().str.upper()
+        _cache['product_master'] = df.drop_duplicates('_key').set_index('_key')
+        _cache['product_master_stamp'] = stamp
+    return _cache['product_master']
+
+
+def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_upcoming=False, n=15):
+    """Sales and purchase figures for SCHEDULE H1 drugs, and whether a product
+    is H1. H1 = the drugs in force now; include_upcoming=true also counts
+    pregabalin (H1 from 16 Nov 2026) and the four drafted drugs. Filters:
+    month 'YYYY-MM' or 'all' (default: latest month), branch (part of the
+    name; sales only - purchases have no branch), product (part of the name -
+    also tells whether that product is H1 and its composition), drug (an H1
+    drug name such as 'alprazolam', 'cefixime', 'tramadol'). Returns totals,
+    month-by-month, by branch, by H1 drug, top products, and purchases by
+    supplier. Aggregates only - no patient names. H1 status comes from each
+    product's composition as worked out from the product list; ones marked
+    please_check were uncertain."""
+    s, p = _load()
+    pm = _product_master()
+    if pm is None:
+        return _guard_no_pii({'available': False,
+                              'reason': 'the Schedule H1 product list has not been built yet '
+                                        '(data/product_master/product_master.csv is missing)'})
+    statuses = {H1_IN_FORCE, *H1_UPCOMING} if include_upcoming else {H1_IN_FORCE}
+    h1 = pm[pm['SCHEDULE H1'].isin(statuses)]
+    if drug:
+        h1 = h1[h1['H1 DRUG'].str.contains(str(drug), case=False, regex=False)]
+
+    product_status = None
+    if product:
+        hits = pm[pm['PRODUCT'].str.contains(str(product), case=False, regex=False)].head(int(n))
+        product_status = [{'product': r['PRODUCT'], 'schedule_h1': r['SCHEDULE H1'] or 'No',
+                           'h1_drug': r['H1 DRUG'], 'active_ingredients': r['ACTIVE INGREDIENTS'],
+                           'please_check': r['H1 CHECK'] == 'Please check'} for _, r in hits.iterrows()]
+        h1 = h1[h1['PRODUCT'].str.contains(str(product), case=False, regex=False)]
+
+    operating = sorted(s['Calendar_Month'].unique())
+    if month in (None, '', 'latest'):
+        months = [operating[-1]]
+    elif str(month).lower() == 'all':
+        months = operating
+    elif month in operating:
+        months = [month]
+    else:
+        return _guard_no_pii({'error': f'no data for month {month!r}', 'months_available': operating})
+
+    def tag(df):
+        key = df['Product'].astype(str).str.strip().str.upper()
+        out = df[key.isin(h1.index)].copy()
+        out['H1_Drug'] = key[key.isin(h1.index)].map(h1['H1 DRUG'])
+        return out
+
+    sales_all, purch_all = tag(s), tag(p)
+    sales_all['Branch'] = sales_all['Inv.No'].apply(rk.extract_branch)
+    if branch:
+        sales_all = sales_all[sales_all['Branch'].str.contains(str(branch), case=False, regex=False)]
+    sales_all['Strips'] = rk.to_strips(sales_all['Qty'], sales_all['Product'], _factor_map())
+    sales = sales_all[sales_all['Calendar_Month'].isin(months)]
+    purch = purch_all[purch_all['Calendar_Month'].isin(months)]
+
+    def by(df, keys, **agg):
+        """Top n groups by the last metric - or, for months, every month in date order."""
+        if df.empty:
+            return []
+        g = df.groupby(keys).agg(**agg).reset_index()
+        if keys == 'Calendar_Month':
+            return _records(g.sort_values('Calendar_Month').round(2))
+        return _records(g.sort_values(list(agg)[-1], ascending=False).head(int(n)).round(2))
+
+    # The share and the "unknown composition" figure use the same scope as the
+    # H1 figures (period, and branch when one is asked for).
+    scope = s[s['Calendar_Month'].isin(months)]
+    if branch:
+        scope = scope[scope['Inv.No'].apply(rk.extract_branch).str.contains(str(branch), case=False, regex=False)]
+    scope_keys = scope['Product'].astype(str).str.strip().str.upper()
+    # Products sold whose composition the product list doesn't know at all -
+    # their H1 status is unknown, so say how much that is.
+    unknown_value = float(scope.loc[~scope_keys.isin(pm.index), 'Item Total'].sum())
+    period_value = float(scope['Item Total'].sum())
+    check_sold = int(h1.loc[h1.index.isin(sales['Product'].astype(str).str.strip().str.upper()), 'H1 CHECK']
+                     .eq('Please check').sum())
+    return _guard_no_pii({
+        'period': months[0] if len(months) == 1 else f'{months[0]} to {months[-1]}',
+        'what_counts': ('Schedule H1 drugs in force now' if not include_upcoming else
+                        'Schedule H1 in force + pregabalin (H1 from 16 Nov 2026) + drafted drugs (not in force)'),
+        'filters': {'branch': branch, 'product': product, 'drug': drug},
+        'product_status': product_status,
+        'h1_products_in_product_list': int(len(h1)),
+        'sales': {
+            'bills': int(sales['Inv.No'].nunique()), 'lines': int(len(sales)),
+            'strips': _round(sales['Strips'].sum(), 1), 'value_rs': _round(sales['Item Total'].sum()),
+            'share_of_all_sales_pct': _round(sales['Item Total'].sum() / period_value * 100, 1) if period_value else None,
+            'by_month_all_history': by(sales_all, 'Calendar_Month', bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'),
+                                       value_rs=('Item Total', 'sum')),
+            'by_branch': by(sales, 'Branch', bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'), value_rs=('Item Total', 'sum')),
+            'by_h1_drug': by(sales, 'H1_Drug', strips=('Strips', 'sum'), value_rs=('Item Total', 'sum')),
+            'top_products': by(sales, ['Product', 'H1_Drug'], bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'),
+                               value_rs=('Item Total', 'sum')),
+        },
+        'purchases': {
+            'invoices': int(purch['Inv.No'].astype(str).nunique()), 'lines': int(len(purch)),
+            'packs': _round(purch['Qty'].sum(), 1), 'value_rs': _round(purch['Item Total'].sum()),
+            'by_month_all_history': by(purch_all, 'Calendar_Month', packs=('Qty', 'sum'), value_rs=('Item Total', 'sum')),
+            'top_suppliers': by(purch, 'Supplier', invoices=('Inv.No', 'nunique'), value_rs=('Item Total', 'sum')),
+            'top_products': by(purch, ['Product', 'H1_Drug'], packs=('Qty', 'sum'), value_rs=('Item Total', 'sum')),
+        },
+        'sold_h1_products_marked_please_check': check_sold,
+        'sales_value_with_unknown_composition_rs': _round(unknown_value),
+        'note': ('H1 status = each product\'s composition (worked out from its brand name) matched to the official '
+                 'list. No prescriber details exist in this data, so this is not the legal H1 register.'),
+    })
+
+
 def get_thin_margin_purchases(supplier=None, n=15):
     """Purchase lines with thin-to-negative embedded margin, ALL history (not
     just the latest month): where MRP/Rate is at or below ~1.10 (embedded
@@ -1483,6 +1618,11 @@ TOOLS = [
      'description': get_distributor_issues.__doc__,
      'parameters': _schema({'supplier': {'type': 'string'}, 'month': {'type': 'string'},
                             'n': {'type': 'integer'}}, ['supplier'])},
+    {'name': 'get_schedule_h1', 'fn': get_schedule_h1,
+     'description': get_schedule_h1.__doc__,
+     'parameters': _schema({'month': {'type': 'string'}, 'branch': {'type': 'string'},
+                            'product': {'type': 'string'}, 'drug': {'type': 'string'},
+                            'include_upcoming': {'type': 'boolean'}, 'n': {'type': 'integer'}})},
     {'name': 'get_thin_margin_purchases', 'fn': get_thin_margin_purchases,
      'description': get_thin_margin_purchases.__doc__,
      'parameters': _schema({'supplier': {'type': 'string'}, 'n': {'type': 'integer'}})},
