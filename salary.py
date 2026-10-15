@@ -14,8 +14,7 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   after 3 free ones a month (a %, so a Rs 4,000 and a Rs 20,000 person are
   treated alike) - a late arrival or a long break counts 1, an early exit 0.5
   (exit is read from the last bill/fetch, so it's weaker evidence). Unplanned leave
-  costs a fixed amount that goes to admin savings, and it only ever comes
-  out of the bonus parts, never the fixed part.
+  is loss of pay (owner, 2026-10-15) - see LEAVE below.
 
   Everyone can have agreed timings on the Edit screen (start, break out, break back,
   end; owner, 2026-10-10) and is then judged against them, not against their
@@ -35,7 +34,18 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   WhatsApp link (google/commitment_form.gs); an approved answer sets them.
 
   First 3 months are a trial: slips are calculated and shown, but nobody is
-  paid less than their base.
+  paid less than their base - except for loss of pay, which is cut even in
+  the trial (owner, 2026-10-15: it is leave the person chose to take unpaid).
+
+  LEAVE (owner, 2026-10-15) comes from the shop's leave app (leave_app.py):
+  approved leave and paid sick days cost nothing; a loss-of-pay day (leave not
+  approved, no paid days left, or absent with no leave applied) costs
+  base / lop_divisor (30). An absence is a working day the shop was open
+  (3+ people punched in) with no punch-in, no bill/fetch and no leave in the
+  app - counted only once that month's leave has been fetched, and only from
+  rule absent_from (the leave app's first day; before it, days off were
+  agreed by word of mouth). Sunday
+  sessions worked add the leave app's extra pay (rates set there).
 
 Owner-entered data (base salaries, roles, the incident log, the monthly 1-5
 ratings and uploaded shubhadahealth Performance Charts) lives in
@@ -70,7 +80,8 @@ DEFAULT_RULES = {
     'floor_pct': 60,            # performance under this -> no performance pay
     'biller_share_pct': 80,     # rest of each sale goes to the fetcher
     'free_incidents': 3, 'pct_per_incident': 5, 'early_exit_weight': 0.5,
-    'unplanned_leave_rs': 200,  # per day, to admin savings
+    'lop_divisor': 30,          # loss of pay per day = base / this (owner, 2026-10-15)
+    'absent_from': '2026-10-16',  # days absent without leave count from here (the leave app's first day)
     'marks_per_mistake': 10, 'marks_per_complaint': 10,
     'marks_per_compliment': 5, 'marks_per_cover': 5,
     'returns_gate_pct': 3,      # chart Sales-Return / Sales above this -> no performance pay
@@ -82,7 +93,7 @@ DEFAULT_RULES = {
 RULE_LIMITS = {k: (0, 100) for k in ('fixed_pct', 'perf_pct', 'disc_pct', 'biller_share_pct')}
 RULE_LIMITS.update({'full_at_pct': (50, 100), 'item_cap_pct': (100, 200), 'perf_cap_pct': (100, 200),
                     'floor_pct': (0, 100), 'free_incidents': (0, 31), 'pct_per_incident': (0, 100),
-                    'early_exit_weight': (0, 1), 'unplanned_leave_rs': (0, 20000),
+                    'early_exit_weight': (0, 1), 'lop_divisor': (1, 31),
                     'marks_per_mistake': (0, 100), 'marks_per_complaint': (0, 100),
                     'marks_per_compliment': (0, 100), 'marks_per_cover': (0, 100),
                     'returns_gate_pct': (0, 100), 'min_days_active': (1, 31), 'min_role_lines': (0, 10000),
@@ -108,7 +119,7 @@ INCIDENT_TYPES = {
     'complaint': {'label': 'Customer complaint', 'kn': 'ಗ್ರಾಹಕರ ದೂರು', 'code': 'C1'},
     'compliment': {'label': 'Compliment / asked for by name', 'kn': 'ಮೆಚ್ಚುಗೆ', 'code': 'C2'},
     'covered': {'label': 'Covered for an absent colleague', 'kn': 'ಗೈರು ಸಹೋದ್ಯೋಗಿಯ ಕೆಲಸ', 'code': 'T3'},
-    'unplanned_leave': {'label': 'Unplanned leave (1 day)', 'kn': 'ತಿಳಿಸದೆ ರಜೆ', 'code': 'D6'},
+    'unplanned_leave': {'label': 'Absent without leave (1 day, loss of pay)', 'kn': 'ತಿಳಿಸದೆ ರಜೆ', 'code': 'D6'},
 }
 RATING_KEYS = {'O1': 'Behaviour with customers', 'O2': 'Cleanliness, uniform, rack order',
                'O3': 'Responsibility and initiative', 'O4': 'Learning'}
@@ -202,6 +213,11 @@ def update_settings(rules=None, roles=None, salaries=None, half_day=None, shifts
                 if k == 'trial_until':
                     if v not in ('', None) and not MONTH_RE.match(str(v)):
                         return None, 'Trial end must be a month like 2026-12.'
+                    new[k] = v or ''
+                    continue
+                if k == 'absent_from':
+                    if v not in ('', None) and not DATE_RE.match(str(v)):
+                        return None, 'Absences counted from must be a date like 2026-10-16.'
                     new[k] = v or ''
                     continue
                 try:
@@ -666,6 +682,94 @@ def _shift_discipline(inputs, emp, month, shift, half, punches=None, returns=Non
             'back_from_punch': back_from_punch}
 
 
+# ------------------------------------------------------------------ leave --
+LEAVE_DIR = SALARY_DIR / 'leave'
+SHOP_OPEN_MIN_PUNCHES = 3   # a weekday counts as a working day when this many people punched in
+
+
+def save_leave(month, data):
+    LEAVE_DIR.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        _save(LEAVE_DIR / f'{month}.json', dict(data, fetched_at=time.strftime('%Y-%m-%d %H:%M')))
+
+
+def load_leave(month):
+    return _load(LEAVE_DIR / f'{month}.json', None)
+
+
+def leave_for_month(month):
+    """{reckoner name: {'paid': [dates], 'sick': [...], 'lop': [...], 'sunday': {...}}}
+    from the saved leave-app export, and info (fetched_at, unmatched names)."""
+    data = load_leave(month) if MONTH_RE.match(str(month or '')) else None
+    if not data:
+        return {}, {'fetched': False}
+    names = match_site_names(sorted({e['name'] for e in data.get('employees', [])}))
+    code_to = {e['emp_code']: names.get(e['name']) for e in data.get('employees', [])}
+    out = {}
+    blank = lambda: {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}}
+    for d in data.get('leaveDays', []):
+        emp = code_to.get(d['emp_code'])
+        if not emp or emp == '-':
+            continue
+        kind = 'lop' if d['pay_type'] == 'salary_cut' else ('sick' if d['leave_type'] == 'sick' else 'paid')
+        out.setdefault(emp, blank())[kind].append(d['date'])
+    for w in data.get('sundayWork', []):
+        emp = code_to.get(w['emp_code'])
+        if emp and emp != '-':
+            out.setdefault(emp, blank())['sunday'] = {'sessions': w['sessions'], 'amount': w['amount'], 'dates': w['dates']}
+    return out, {'fetched': True, 'fetched_at': data.get('fetched_at'), 'pay': data.get('sundaySessionPay'),
+                 'unmatched': sorted(n for n, e in names.items() if not e)}
+
+
+def _open_days(punches, month):
+    """Weekdays of the month, up to yesterday, when the shop was open (enough punch-ins)."""
+    per_day = {}
+    for days in (punches or {}).values():
+        for d in days:
+            if d.startswith(month):
+                per_day[d] = per_day.get(d, 0) + 1
+    yesterday = (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    return sorted(d for d, n in per_day.items()
+                  if n >= SHOP_OPEN_MIN_PUNCHES and d <= yesterday and pd.Timestamp(d).dayofweek != 6)
+
+
+def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_days):
+    """One person's leave for the slip: loss-of-pay days with the reason for each,
+    paid and sick days, Sunday work."""
+    lv = leave_by_emp.get(emp) or {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}}
+    reasons = {d: 'leave not approved / no paid days left' for d in lv['lop']}
+    for r in logged:
+        if r['type'] == 'unplanned_leave' and r.get('date', '').startswith(month):
+            reasons.setdefault(r['date'], 'absent without leave (logged)')
+    notes, absent = [], []
+    if not info.get('fetched'):
+        notes.append('Leave app not fetched for this month - approved leave, loss of pay and Sunday pay are not counted yet.')
+    elif my_punches:
+        # Days they came: a punch-in or any bill/fetch stamp.
+        seen = set(my_punches)
+        d = inputs.get('daily')
+        if d is not None:
+            mine = d[(d['Employee'] == emp) & (d['Calendar_Month'] == month)]
+            seen |= set(mine['Day'].dt.strftime('%Y-%m-%d'))
+        on_leave = set(lv['paid']) | set(lv['sick']) | set(lv['lop'])
+        first = min(seen) if seen else None
+        absent = [x for x in open_days if first and x >= first and x not in seen and x not in on_leave]
+        for x in absent:
+            reasons.setdefault(x, 'absent without leave')
+        if absent:
+            notes.append(f"Absent without leave on {len(absent)} day{'s' if len(absent) != 1 else ''} "
+                         f"(shop open, no punch-in, no bill, no leave applied) - loss of pay.")
+    elif info.get('fetched'):
+        notes.append('No punch-ins this month, so days absent without leave are not checked.')
+    lop = sorted(reasons)
+    if lv['paid'] or lv['sick']:
+        notes.append(f"Approved leave: {len(lv['paid'])} paid day{'s' if len(lv['paid']) != 1 else ''}"
+                     + (f", {len(lv['sick'])} sick" if lv['sick'] else '') + ' - no cut.')
+    return {'paid': sorted(lv['paid']), 'sick': sorted(lv['sick']),
+            'lop': [{'date': x, 'why': reasons[x]} for x in lop],
+            'sunday': lv['sunday'], 'notes': notes}
+
+
 def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
@@ -683,6 +787,8 @@ def compute_slips(inputs, month):
     charts = load_charts()
     br = inputs['branch_daily']
     in_trial = bool(rules['trial_until']) and month <= rules['trial_until']
+    leave_by_emp, leave_info = leave_for_month(month)
+    open_days = [d for d in _open_days(punches, month) if rules['absent_from'] and d >= rules['absent_from']]
 
     slips, needs_role = [], []
     for emp, cur in cur_all.iterrows():
@@ -846,7 +952,8 @@ def compute_slips(inputs, month):
                          'days late. Enter their timings in Edit' + (f" (usually {times(usual)})." if usual else '.'))
         incidents = late + long_lunch + early * exit_w
         charged = max(0.0, incidents - rules['free_incidents'])
-        leave_days = count('unplanned_leave')
+        leave = _leave_for(emp, month, leave_by_emp, leave_info, mine, punches.get(emp), inputs, open_days)
+        notes += leave['notes']
         if not timed and not (is_half and not agreed):
             notes.append('Not enough bill/fetch stamps to time their day - no late/lunch/exit deductions.')
 
@@ -888,30 +995,28 @@ def compute_slips(inputs, month):
             perf_pay = perf_max * perf_frac
             disc_ded = min(disc_max, disc_max * charged * rules['pct_per_incident'] / 100)
             disc_pay = disc_max - disc_ded
-            leave_due = leave_days * rules['unplanned_leave_rs']
-            from_disc = min(disc_pay, leave_due)
-            from_perf = min(perf_pay, leave_due - from_disc)
-            disc_pay -= from_disc
-            perf_pay -= from_perf
-            leave_taken = from_disc + from_perf
             commit_max = base * rules['commit_bonus_pct'] / 100 if commit_info else 0
             commit_bonus = commit_max * commit_info['met'] / commit_info['of'] if commit_info and commit_info['counted'] else 0
             calculated = fixed + perf_pay + disc_pay + commit_bonus
-            payable = max(calculated, base) if in_trial else calculated
+            # The trial protects the new scoring, not loss of pay (owner's choice A).
+            lop_per_day = base / rules['lop_divisor']
+            lop_amount = lop_per_day * len(leave['lop'])
+            sunday_pay = leave['sunday']['amount']
+            payable = max(0, (max(calculated, base) if in_trial else calculated) - lop_amount + sunday_pay)
             money = {k: round(v) for k, v in dict(
                 base=base, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
-                disc_deduction=disc_ded, disc_pay=disc_pay, leave_due=leave_due, admin_savings=leave_taken,
+                disc_deduction=disc_ded, disc_pay=disc_pay,
                 commit_bonus=commit_bonus, commit_max=commit_max,
-                calculated=calculated, payable=payable, vs_base=calculated - base).items()}
-            if leave_due > leave_taken:
-                notes.append(f'Leave penalty capped at the bonus parts: ₹{leave_due - leave_taken:,.0f} not taken (fixed pay is never cut).')
+                calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, sunday_pay=sunday_pay,
+                payable=payable, vs_base=calculated - base).items()}
         slips.append({
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
             'groups': groups, 'items': items, 'perf_score': None if perf is None else round(perf),
             'perf_paid_pct': round(perf_frac * 100), 'floor_hit': floor_hit, 'gate': gate,
             'shift': shift_info, 'commitment': commit_info,
             'discipline': {'late': late, 'long_lunch': long_lunch, 'early_exit': early, 'incidents': incidents,
-                           'free': rules['free_incidents'], 'charged': charged, 'leave_days': leave_days, 'timed': bool(timed)},
+                           'free': rules['free_incidents'], 'charged': charged, 'timed': bool(timed)},
+            'leave': {k: v for k, v in leave.items() if k != 'notes'},
             'money': money, 'trial': in_trial, 'notes': notes,
             'log_count': len(mine), 'rated': bool(rt), 'has_chart': bool(chart),
         })
@@ -1196,12 +1301,13 @@ def slip_message(x, rules):
     salary itself is not shown to staff."""
     mon = f"{_MONTHS[int(x['month'][5:7]) - 1]} {x['month'][:4]}"
     m, d, sh = x['money'], x['discipline'], x.get('shift') or {}
+    lv = x['leave']
     short = x['days_active'] < rules['min_days_active']
     days = f"{x['days_active']} day{'s' if x['days_active'] != 1 else ''}"
     L = [f'*Shubhada Pharma - Salary slip, {mon}*', f"*{x['employee']}* ({x['role']})",
          f"Days worked: {x['days_active']}"]
     if x['trial']:
-        L.append('Trial month: you are paid at least your base salary. / ಪ್ರಯೋಗ ತಿಂಗಳು')
+        L.append('Trial month: you are paid at least your base salary, less any loss-of-pay days. / ಪ್ರಯೋಗ ತಿಂಗಳು')
 
     if m:
         L += ['', '*Salary / ಸಂಬಳ*',
@@ -1210,10 +1316,15 @@ def slip_message(x, rules):
               f"Discipline: {_rs(m['disc_pay'])} of {_rs(m['disc_max'])}"]
         if m.get('commit_max'):
             L.append(f"Target bonus: {_rs(m['commit_bonus'])} of {_rs(m['commit_max'])}")
-        if m.get('admin_savings'):
-            L.append(f"Unplanned leave: minus {_rs(m['admin_savings'])}")
         L.append(f"*Calculated: {_rs(m['calculated'])}*")
         if x['trial']:
+            L.append('Trial: not less than your base salary.')
+        if m.get('lop_amount'):
+            n = len(lv['lop'])
+            L.append(f"Loss of pay ({n} day{'s' if n != 1 else ''} x {_rs(m['lop_per_day'])}): minus {_rs(m['lop_amount'])}")
+        if m.get('sunday_pay'):
+            L.append(f"Sunday work ({lv['sunday']['sessions']} session{'s' if lv['sunday']['sessions'] != 1 else ''}): plus {_rs(m['sunday_pay'])}")
+        if x['trial'] or m.get('lop_amount') or m.get('sunday_pay'):
             L.append(f"*To be paid: {_rs(m['payable'])}*")
 
     perf = x['perf_score']
@@ -1249,8 +1360,14 @@ def slip_message(x, rules):
                  + (f" x {rules['pct_per_incident']:g}% = minus {_rs(m['disc_deduction'])}" if m else ''))
     else:
         L.append('No late / break / exit counted this month.')
-    if d['leave_days']:
-        L.append(f"Unplanned leave days: {d['leave_days']}")
+    if lv['paid'] or lv['sick'] or lv['lop'] or lv['sunday']['sessions']:
+        L += ['', '*Leave / ರಜೆ*']
+        if lv['paid'] or lv['sick']:
+            L.append(f"Approved leave: {len(lv['paid']) + len(lv['sick'])} day{'s' if len(lv['paid']) + len(lv['sick']) != 1 else ''} (no cut)")
+        if lv['lop']:
+            L.append('Loss of pay: ' + ', '.join(f"{int(i['date'][8:])} {_MONTHS[int(i['date'][5:7]) - 1]}" for i in lv['lop']))
+        if lv['sunday']['sessions']:
+            L.append(f"Sunday sessions worked: {lv['sunday']['sessions']}")
 
     c = x.get('commitment')
     if c and not c['counted']:
@@ -1334,10 +1451,12 @@ def action_plan(x, rules, limit=4):
              f"ಶಿಸ್ತು: {', '.join(kn_parts)} - {_rs(m['disc_deduction'])} ಕಡಿತ (ಉಚಿತ {d['free']:g} ನಂತರ ಪ್ರತಿಯೊಂದಕ್ಕೆ {_rs(per)}).{kn_by} "
              f"ಪ್ರತಿದಿನ ಸಮಯಕ್ಕೆ ಬಂದರೆ ಪೂರ್ಣ {_rs(m['disc_max'])} ಸಿಗುತ್ತದೆ.")
 
-    if d['leave_days'] and m:
-        step(m['admin_savings'],
-             f"Unplanned leave cost {_rs(m['admin_savings'])}. Tell ADMIN before taking leave and it costs nothing.",
-             f"ತಿಳಿಸದೆ ರಜೆಯಿಂದ {_rs(m['admin_savings'])} ಕಡಿತ. ಮೊದಲೇ ತಿಳಿಸಿದರೆ ಕಡಿತವಿಲ್ಲ.")
+    absent = sum(1 for i in x['leave']['lop'] if i['why'].startswith('absent'))
+    if absent and m:
+        step(m['lop_per_day'] * absent,
+             f"Absent without leave on {absent} day{'s' if absent != 1 else ''}: {_rs(m['lop_per_day'] * absent)} loss of pay. "
+             f"Apply in the leave app first - approved leave is paid.",
+             f"ತಿಳಿಸದೆ ರಜೆ {absent} ದಿನ: {_rs(m['lop_per_day'] * absent)} ಸಂಬಳ ಕಡಿತ. ಮೊದಲೇ ರಜೆ ಆ್ಯಪ್‌ನಲ್ಲಿ ಅರ್ಜಿ ಹಾಕಿ - ಮಂಜೂರಾದ ರಜೆಗೆ ಕಡಿತವಿಲ್ಲ.")
 
     if not short and m:
         if x['floor_hit']:
@@ -1548,7 +1667,9 @@ def fetch_status(month):
     chart_sites = [ch['original_name'][len('fetched from shubhadahealth ('):-1] for ch in charts.values()
                    if str(ch.get('original_name', '')).startswith('fetched')]
     meta = _load(FETCH_META_PATH, {}).get(month, {})
-    names = match_site_names(sorted(set(sites) | set(chart_sites) | set(meta.get('sites', []))))
+    leave = load_leave(month) or {}
+    leave_names = [e['name'] for e in leave.get('employees', []) if e.get('active', 1)]
+    names = match_site_names(sorted(set(sites) | set(chart_sites) | set(meta.get('sites', [])) | set(leave_names)))
     return {'attendance': {'rows': len(att['rows']), 'people': len(sites), 'range': att['range'],
                            'fetched_at': att['fetched_at']} if att else None,
             'charts': len(fetched_charts), 'last_fetch': meta.get('at'),
@@ -1563,7 +1684,9 @@ def summary(result):
         'base_total': sum(s['money']['base'] for s in sl),
         'calculated_total': sum(s['money']['calculated'] for s in sl),
         'payable_total': sum(s['money']['payable'] for s in sl),
-        'admin_savings': sum(s['money']['admin_savings'] for s in sl),
+        'lop_total': sum(s['money']['lop_amount'] for s in sl),
+        'lop_days': sum(len(s['leave']['lop']) for s in result['slips']),
+        'sunday_total': sum(s['money']['sunday_pay'] for s in sl),
         'below_floor': sum(1 for s in result['slips'] if s['floor_hit']),
         'not_rated': sum(1 for s in result['slips'] if not s['rated']),
         'commit_bonus': sum(s['money'].get('commit_bonus', 0) for s in sl),

@@ -1110,7 +1110,7 @@ const SAL_RULE_LABELS = {
   perf_cap_pct: 'Highest performance pay, %', floor_pct: 'No performance pay below, %',
   biller_share_pct: "Biller's share of each sale, %", free_incidents: 'Free late / lunch / exit incidents a month',
   pct_per_incident: '% of the discipline part cut per incident after that', early_exit_weight: 'An early exit counts as (0.5 = half)',
-  unplanned_leave_rs: '₹ per unplanned leave day (to admin savings)', marks_per_mistake: 'Marks lost per logged mistake',
+  lop_divisor: 'Loss of pay per day = base ÷ this', absent_from: 'Count days absent without leave from (date)', marks_per_mistake: 'Marks lost per logged mistake',
   marks_per_complaint: 'Marks lost per complaint', marks_per_compliment: 'Marks gained per compliment',
   marks_per_cover: 'Marks gained per day covering a colleague', returns_gate_pct: 'No performance pay if returns above, % of sales',
   trial_until: 'Trial until (month) — nobody paid below base', min_days_active: 'Fewest active days to score a month',
@@ -1182,7 +1182,7 @@ function salTrialText() {
   const t = SAL.rules.trial_until;
   if (!t) return '';
   return SAL.month <= t
-    ? `<b>Trial month</b> (until ${monthAbbr(t)} ${t.slice(0, 4)}): slips are calculated and shown, but nobody is paid less than their base salary. <span class="kn">ಪ್ರಯೋಗ ಅವಧಿ — ಯಾರಿಗೂ ಮೂಲ ಸಂಬಳಕ್ಕಿಂತ ಕಡಿಮೆ ಇಲ್ಲ.</span>`
+    ? `<b>Trial month</b> (until ${monthAbbr(t)} ${t.slice(0, 4)}): slips are calculated and shown, but nobody is paid less than their base salary — except loss-of-pay days, which are still cut. <span class="kn">ಪ್ರಯೋಗ ಅವಧಿ — ಯಾರಿಗೂ ಮೂಲ ಸಂಬಳಕ್ಕಿಂತ ಕಡಿಮೆ ಇಲ್ಲ, ಆದರೆ ಸಂಬಳ ಕಡಿತದ (LOP) ದಿನಗಳು ಕಡಿತವಾಗುತ್ತವೆ.</span>`
     : '';
 }
 
@@ -1191,10 +1191,13 @@ function salSlipsHTML() {
   const stats = [];
   if (s.with_salary) {
     stats.push(['var(--accent)', money(s.calculated_total), `Calculated for ${s.with_salary} staff (base ${money(s.base_total)})`]);
-    stats.push(['var(--ok)', money(s.payable_total), SAL.month <= (r.trial_until || '') ? 'To pay (trial: never below base)' : 'To pay']);
+    stats.push(['var(--ok)', money(s.payable_total), SAL.month <= (r.trial_until || '') ? 'To pay (trial: never below base, less loss of pay)' : 'To pay']);
   }
   stats.push([s.below_floor ? 'var(--danger)' : 'var(--ok)', fmt(s.below_floor), `Below the ${fmt(r.floor_pct)}% floor — no performance pay`]);
-  stats.push(['var(--warn)', money(s.admin_savings), 'To admin savings (unplanned leave)']);
+  if (s.with_salary) {
+    stats.push(['var(--danger)', money(s.lop_total), `Loss of pay (${fmt(s.lop_days)} day${s.lop_days === 1 ? '' : 's'}, base ÷ ${fmt(r.lop_divisor)})`]);
+    stats.push(['var(--ok)', money(s.sunday_total), 'Sunday work extra pay']);
+  }
   let html = `<div class="sal-note">Salary = Fixed ${fmt(r.fixed_pct)}% + Performance ${fmt(r.perf_pct)}% + Discipline ${fmt(r.disc_pct)}%.
     Performance is against each person's <b>own best</b>; ${fmt(r.full_at_pct)}% of their best already earns full marks.
     Discipline loses ${fmt(r.pct_per_incident)}% of its part per late arrival or long break after ${fmt(r.free_incidents)} free ones (an early exit counts half), judged against the timings you agreed in Edit.
@@ -1392,16 +1395,26 @@ function salDetailHTML(x) {
       h += `<tr><td>${escHtml(c.label)}<div class="raw">target ${fmt(c.target)} (${escHtml(c.source)}) · reached ${fmt(c.actual)}</div></td><td class="n" style="color:${c.met ? 'var(--ok)' : 'var(--danger)'}">${c.met ? 'met' : 'not met'}</td></tr>`;
     }
   }
-  if (d.leave_days) h += `<tr><td>Unplanned leave days</td><td class="n">${fmt(d.leave_days)}${m ? ' · ' + money(m.admin_savings) : ''}</td></tr>`;
+  const lv = x.leave;
+  if (lv && (lv.paid.length || lv.sick.length || lv.lop.length || lv.sunday.sessions)) {
+    const dd = (iso) => `${+iso.slice(8)} ${monthAbbr(iso.slice(0, 7))}`;
+    h += `<tr class="grp"><td>Leave <span class="sal-kn">ರಜೆ</span> · from the leave app</td><td class="n"></td></tr>`;
+    if (lv.paid.length) h += `<tr><td>Approved leave (paid)<div class="raw">${lv.paid.map(dd).join(', ')}</div></td><td class="n">${lv.paid.length}</td></tr>`;
+    if (lv.sick.length) h += `<tr><td>Sick leave (paid)<div class="raw">${lv.sick.map(dd).join(', ')}</div></td><td class="n">${lv.sick.length}</td></tr>`;
+    if (lv.lop.length) h += `<tr><td>Loss of pay<div class="raw">${lv.lop.map(i => `${dd(i.date)} — ${escHtml(i.why)}`).join('<br>')}</div></td><td class="n" style="color:var(--danger)">${lv.lop.length}</td></tr>`;
+    if (lv.sunday.sessions) h += `<tr><td>Sunday sessions worked<div class="raw">${lv.sunday.dates.map(escHtml).join(', ')}</div></td><td class="n" style="color:var(--ok)">${lv.sunday.sessions}</td></tr>`;
+  }
   if (m) {
     h += `<tr class="grp"><td>Salary <span class="sal-kn">ಸಂಬಳ</span> (base ${money(m.base)})</td><td class="n"></td></tr>
       <tr><td>Fixed ${fmt(r.fixed_pct)}%</td><td class="n">${money(m.fixed)}</td></tr>
       <tr><td>Performance (out of ${money(m.perf_max)})</td><td class="n">${money(m.perf_pay)}</td></tr>
       <tr><td>Discipline (out of ${money(m.disc_max)})</td><td class="n">${money(m.disc_pay)}</td></tr>
-      ${m.admin_savings ? `<tr><td>Unplanned leave → admin savings</td><td class="n">−${money(m.admin_savings)}</td></tr>` : ''}
       ${x.commitment ? `<tr><td>Target bonus (${x.commitment.met} of ${x.commitment.of} targets)</td><td class="n">${money(m.commit_bonus)}</td></tr>` : ''}
       <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
-      ${x.trial ? `<tr><td>To pay (trial: never below base)</td><td class="n"><b>${money(m.payable)}</b></td></tr>` : ''}`;
+      ${x.trial ? `<tr><td colspan="2" class="raw">Trial: the calculated part is never below base. Loss of pay is still cut.</td></tr>` : ''}
+      ${m.lop_amount ? `<tr><td>Loss of pay (${x.leave.lop.length} × ${money(m.lop_per_day)})</td><td class="n" style="color:var(--danger)">−${money(m.lop_amount)}</td></tr>` : ''}
+      ${m.sunday_pay ? `<tr><td>Sunday work (${x.leave.sunday.sessions} session${x.leave.sunday.sessions === 1 ? '' : 's'})</td><td class="n" style="color:var(--ok)">+${money(m.sunday_pay)}</td></tr>` : ''}
+      <tr class="grp"><td>To pay</td><td class="n"><b>${money(m.payable)}</b></td></tr>`;
   } else {
     h += `<tr><td colspan="2" class="raw">Add a base salary in Edit to see rupees.</td></tr>`;
   }
@@ -1461,7 +1474,7 @@ function salRatingsHTML() {
 
 function salChartsHTML() {
   const ch = SAL.charts;
-  let html = salFetchHTML() + `<div class="sal-note">Upload each person's Performance Chart from shubhadahealth.com <b>after the month has ended</b>, so it covers the whole month. Its items are scored against that person's own best chart month.
+  let html = salLeaveHTML() + salFetchHTML() + `<div class="sal-note">Upload each person's Performance Chart from shubhadahealth.com <b>after the month has ended</b>, so it covers the whole month. Its items are scored against that person's own best chart month.
     <span class="kn">ತಿಂಗಳು ಮುಗಿದ ನಂತರ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ.</span></div>
     <form class="sal-form" id="sal-chart-form">
       <label>Month it covers<select id="sal-chart-month">${SAL.months.map(m => `<option value="${m}"${m === SAL.month ? ' selected' : ''}>${monthAbbr(m)} ${m.slice(0, 4)}</option>`).join('')}</select></label>
@@ -1477,6 +1490,17 @@ function salChartsHTML() {
 }
 
 let salSh = null, salShTimer = null, salShWatching = false;
+
+function salLeaveHTML() {
+  const l = SAL.leave || {};
+  const mon = `${monthAbbr(SAL.month)} ${SAL.month.slice(0, 4)}`;
+  let h = `<div class="sal-form"><div class="name">Leave app <span class="sal-kn">ರಜೆ ಆ್ಯಪ್</span></div>
+    <div class="sal-note" style="margin:0">Approved leave, sick leave, loss of pay and Sunday work for ${mon} come from the shop's leave app on this PC. They are read again whenever this screen opens (every 5 minutes at most).</div>`;
+  h += `<div class="meta">${l.fetched ? `Last read ${escHtml(l.fetched_at || '')}${l.pay ? ` · Sunday pay A ₹${fmt(l.pay.A)}, B ₹${fmt(l.pay.B)} per session` : ''}.` : 'Not read yet for this month.'}</div>`;
+  if (l.error) h += `<div class="sal-msg err" style="margin:0">${escHtml(l.error)}${l.fetched ? ' Using the last saved copy.' : ''}</div>`;
+  h += `<div><button class="sal-btn ghost" id="sal-leave-go">Read leave now</button></div>`;
+  return h + '</div>';
+}
 
 function salFetchHTML() {
   const v = (SAL.vault || {}).shubhadahealth || {}, f = SAL.fetch || {}, running = salSh && salSh.running;
@@ -1503,7 +1527,7 @@ function salFetchHTML() {
   }
   const un = f.unmatched || [];
   if (un.length) {
-    h += `<div class="sal-msg err" style="margin:0">${un.length} name${un.length > 1 ? 's' : ''} on shubhadahealth could not be matched to your staff. Link each one (or mark "not our staff"), then Save links.</div>
+    h += `<div class="sal-msg err" style="margin:0">${un.length} name${un.length > 1 ? 's' : ''} on shubhadahealth or the leave app could not be matched to your staff. Link each one (or mark "not our staff"), then Save links.</div>
       <div class="sal-edit-grid">` + un.map((n, i) => `<label>${escHtml(n)}<select data-sitelink="${escAttr(n)}" id="sal-site-${i}">
         <option value="">Choose…</option><option value="-">Not one of our staff</option>${SAL.staff.map(x => `<option>${escHtml(x)}</option>`).join('')}</select></label>`).join('') +
       `</div><button class="sal-btn ghost" id="sal-site-save">Save links</button>`;
@@ -1546,6 +1570,8 @@ function salBindFetch(container) {
   if (att) att.addEventListener('click', () => { att.disabled = true; start({ attendance: true, charts: false }); });
   const stop = container.querySelector('#sal-sh-stop');
   if (stop) stop.addEventListener('click', () => { stop.disabled = true; start({ stop: true }); });
+  const lg = container.querySelector('#sal-leave-go');
+  if (lg) lg.addEventListener('click', () => { lg.disabled = true; salPost('/api/salary/leave/fetch', {}, 'Leave read from the leave app.'); });
   const save = container.querySelector('#sal-site-save');
   if (save) save.addEventListener('click', () => {
     const links = {};
@@ -1652,7 +1678,7 @@ function salSetupHTML() {
     <div class="section-title">Rules</div>
     <div class="sal-form"><div class="sal-rules">` +
     Object.keys(SAL.default_rules).map(k => `<label for="sal-rule-${k}" style="font-size:12.5px;color:var(--ink);font-weight:500">${escHtml(SAL_RULE_LABELS[k] || k)}${SAL.rules[k] != SAL.default_rules[k] ? ` <span class="sal-kn">(agreed: ${escHtml(String(SAL.default_rules[k]))})</span>` : ''}</label>
-      <input id="sal-rule-${k}" data-salrule="${k}" ${k === 'trial_until' ? 'type="month"' : 'type="number" step="any"'} value="${escAttr(String(SAL.rules[k] ?? ''))}">`).join('') +
+      <input id="sal-rule-${k}" data-salrule="${k}" ${k === 'trial_until' ? 'type="month"' : k === 'absent_from' ? 'type="date"' : 'type="number" step="any"'} value="${escAttr(String(SAL.rules[k] ?? ''))}">`).join('') +
     `</div><button class="sal-btn ghost" id="sal-save-rules">Save rules</button></div>
     <div class="section-title">Role weights (agreed in review round 2)</div>
     <div class="chart-card" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums">
@@ -1892,7 +1918,7 @@ function salBind(container) {
   const saveRules = container.querySelector('#sal-save-rules');
   if (saveRules) saveRules.addEventListener('click', () => {
     const rules = {};
-    container.querySelectorAll('[data-salrule]').forEach(i => { rules[i.dataset.salrule] = i.dataset.salrule === 'trial_until' ? i.value : (i.value === '' ? null : Number(i.value)); });
+    container.querySelectorAll('[data-salrule]').forEach(i => { rules[i.dataset.salrule] = ['trial_until', 'absent_from'].includes(i.dataset.salrule) ? i.value : (i.value === '' ? null : Number(i.value)); });
     saveRules.disabled = true;
     salPost('/api/salary/settings', { rules }, 'Rules saved — every slip has been recalculated.');
   });

@@ -38,6 +38,7 @@ import salary as salary_mod
 import vault
 import shubhada_fetch
 import leave_notify
+import leave_app
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -632,12 +633,34 @@ def api_upload():
 
 
 # --- Salary (People > Salary) ---------------------------------------------
+# Leave and Sunday work come from the leave app (project 13). Fetched again
+# when the Salary screen opens if the saved copy is over LEAVE_REFRESH_S old;
+# when the leave app is closed the last saved copy is used.
+LEAVE_REFRESH_S = 300
+_leave_fetch = {}   # month -> {'at': time, 'error': str}
+
+
+def _refresh_leave(month, force=False):
+    last = _leave_fetch.get(month, {})
+    if not force and time.time() - last.get('at', 0) < LEAVE_REFRESH_S:
+        return last.get('error')
+    try:
+        salary_mod.save_leave(month, leave_app.fetch(month, timeout=3))
+        _leave_fetch[month] = {'at': time.time(), 'error': None}
+        logger.info('Leave app: %s fetched', month)
+    except Exception as exc:
+        _leave_fetch[month] = {'at': time.time(), 'error': str(exc)[:200]}
+        logger.info('Leave app: %s not fetched - %s', month, exc)
+    return _leave_fetch[month]['error']
+
+
 def _salary_payload(month=None):
     get_cached_data()  # recomputes first if the master files changed on disk
     inputs = _salary_inputs['v']
     months = salary_mod.months_available(inputs)
     if not month or month not in months:
         month = months[-1] if months else None
+    leave_error = _refresh_leave(month) if month else None
     result = salary_mod.compute_slips(inputs, month) if month else {'slips': [], 'needs_role': []}
     settings = salary_mod.load_settings()
     staff = sorted({s['employee'] for s in result['slips']} | set(result['needs_role'])
@@ -652,6 +675,7 @@ def _salary_payload(month=None):
         'sends': salary_mod.load_sends().get(month, {}) if month else {},
         'vault': vault.summary(),
         'fetch': salary_mod.fetch_status(month) if month else None,
+        'leave': dict(salary_mod.leave_for_month(month)[1], error=leave_error, url=leave_app.url()) if month else None,
         'site_links': settings['site_names'],
         'phones': settings['phones'], 'shares': salary_mod.load_shares().get(month, {}) if month else {}, 'needs_role': result['needs_role'],
         'summary': salary_mod.summary(result), 'staff': staff,
@@ -890,6 +914,18 @@ def _run_wa_send(month, jobs, test):
         with _wa_lock:
             _wa_state['running'] = False
         leave_notify.PROFILE_LOCK.release()
+
+
+@app.route('/api/salary/leave/fetch', methods=['POST'])
+@requires_auth
+def api_salary_leave_fetch():
+    month = _json_body().get('month') or ''
+    if not salary_mod.MONTH_RE.match(month):
+        return jsonify({'error': 'Choose a month.'}), 400
+    error = _refresh_leave(month, force=True)
+    if error:
+        return jsonify({'error': error}), 502
+    return jsonify(_salary_payload(month))
 
 
 @app.route('/api/salary/whatsapp/send', methods=['POST'])

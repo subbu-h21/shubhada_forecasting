@@ -1025,7 +1025,7 @@ def get_employee_scorecard(name=None, month=None, n=15):
 # return anything that still carries a rupee sign or a pay key.
 # ---------------------------------------------------------------------------
 _MONEY_KEYS = {'money', 'base', 'fixed', 'perf_pay', 'perf_max', 'disc_pay', 'disc_max', 'disc_deduction',
-               'calculated', 'payable', 'vs_base', 'commit_bonus', 'commit_max', 'admin_savings', 'leave_due',
+               'calculated', 'payable', 'vs_base', 'commit_bonus', 'commit_max', 'lop_amount', 'lop_per_day', 'sunday_pay',
                'salary', 'salaries', 'share', 'plan', 'rs'}
 # items whose shown value is a rupee figure; their marks are kept, the value is not
 _RUPEE_ITEMS = {'S1', 'S4', 'S6', 'S5', 'T1'}
@@ -1127,7 +1127,12 @@ def get_salary_slips(name=None, month=None, n=40):
             'discipline': {'late_arrivals': d['late'], 'long_breaks': d['long_lunch'], 'early_exits': d['early_exit'],
                            'incidents': d['incidents'], 'free': d['free'], 'charged': charged,
                            'discipline_cut_pct': min(100, charged * rules['pct_per_incident']),
-                           'timed': d['timed'], 'unplanned_leave_days': d['leave_days']},
+                           'timed': d['timed']},
+            # from the leave app: days, never rupees
+            'leave': {'approved_paid_days': len(x['leave']['paid']), 'sick_days': len(x['leave']['sick']),
+                      'loss_of_pay_days': len(x['leave']['lop']),
+                      'absent_without_leave_days': sum(1 for i in x['leave']['lop'] if i['why'].startswith('absent')),
+                      'sunday_sessions_worked': x['leave']['sunday']['sessions']},
             'agreed_timings': ({k: sh.get(k) for k in ('start', 'break_out', 'break_in', 'end') if sh.get(k)}
                                if sh.get('agreed') else None),
             'half_day': bool(sh.get('half')),
@@ -1145,8 +1150,8 @@ def get_salary_slips(name=None, month=None, n=40):
             if r['targets']:
                 r['targets'] = {k: r['targets'][k] for k in ('reached', 'of', 'counted')}
             d = r['discipline']
-            r['discipline'] = {k: d[k] for k in ('late_arrivals', 'long_breaks', 'early_exits', 'discipline_cut_pct',
-                                                  'unplanned_leave_days')}
+            r['discipline'] = {k: d[k] for k in ('late_arrivals', 'long_breaks', 'early_exits', 'discipline_cut_pct')}
+            r['leave'] = {k: v for k, v in r['leave'].items() if v}
             for k in [k for k, v in r.items() if v in (None, False, [], {})]:
                 del r[k]
     return _guard_no_money({
