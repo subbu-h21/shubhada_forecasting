@@ -37,6 +37,7 @@ import run_reckoner as rk
 import salary as salary_mod
 import vault
 import shubhada_fetch
+import leave_notify
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -888,6 +889,7 @@ def _run_wa_send(month, jobs, test):
     finally:
         with _wa_lock:
             _wa_state['running'] = False
+        leave_notify.PROFILE_LOCK.release()
 
 
 @app.route('/api/salary/whatsapp/send', methods=['POST'])
@@ -922,6 +924,11 @@ def api_salary_whatsapp_send():
     with _wa_lock:
         if _wa_state['running']:
             return jsonify({'error': 'Already sending - wait for it to finish.'}), 409
+        # The leave app's messages use the same WhatsApp profile (leave_notify.py).
+        if not leave_notify.PROFILE_LOCK.acquire(blocking=False):
+            leave_notify.request_release()
+            return jsonify({'error': 'WhatsApp is open for leave-app messages and is closing now - '
+                                     'press Send again in about 20 seconds.'}), 409
         _wa_state.update(running=True, stage='starting', log=[], results=[], month=month, test=test)
     logger.info('WhatsApp salary send started: %s %s people%s', month, len(jobs), ' (test)' if test else '')
     threading.Thread(target=_run_wa_send, args=(month, jobs, test), daemon=True).start()
@@ -935,6 +942,11 @@ def api_salary_whatsapp_status():
         st = {k: (list(v) if isinstance(v, list) else v) for k, v in _wa_state.items()}
     st['sends'] = salary_mod.load_sends().get(request.args.get('month') or st.get('month') or '', {})
     return jsonify(st)
+
+
+# Leave app (project 13) WhatsApp messages: localhost + shared token only.
+leave_notify.init(WA_PROFILE_DIR, lambda: _wa_state['running'], lambda m: logger.info('%s', m))
+app.register_blueprint(leave_notify.bp)
 
 
 # --- Fetch from shubhadahealth.com ------------------------------------------
