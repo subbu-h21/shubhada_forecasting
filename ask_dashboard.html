@@ -511,6 +511,8 @@ const TALK_PREROLL_MS = 700;       // sound kept from just before speech is noti
 const TALK_START_MS = 200;         // this much loud sound = you started speaking
 const TALK_START_MS_OVER_ANSWER = 800;  // stricter while an answer plays: its own voice from the
                                          // speaker must not count as you interrupting (was 400)
+const TALK_BARGE_MIN_MS = 1300;    // speech over a playing answer must last this long (a real sentence,
+                                   // not one or two words) before it interrupts the answer
 const TALK_END_SILENCE_MS = 900;   // this much quiet = you finished
 const TALK_MIN_SPEECH_MS = 450;    // shorter blips (a cough, a click) are ignored
 const TALK_MAX_UTTERANCE_MS = 30000;   // a very long stretch is sent anyway
@@ -620,22 +622,30 @@ function talkFrame(t, frame) {
     while (t.preroll.length * t.frameMs > TALK_PREROLL_MS) t.preroll.shift();
     t.loudMs = rms > startLevel ? t.loudMs + t.frameMs : 0;
     if (t.loudMs >= (t.speaking ? TALK_START_MS_OVER_ANSWER : TALK_START_MS)) {
-      t.utt = { frames: t.preroll.slice(), voicedMs: t.loudMs, quietMs: 0, startedAt: Date.now() };
+      t.utt = { frames: t.preroll.slice(), voicedMs: t.loudMs, quietMs: 0, startedAt: Date.now(), overAnswer: t.speaking, interrupted: false };
       t.preroll = [];
       t.loudMs = 0;
       t.lastActivity = Date.now();
-      if (t.speaking) talkStopSpeaking(t);  // you talked over the answer
-      setVoiceStatus('Hearing you…');
+      // The owner's rule: one or two words from someone while the answer plays
+      // must not derail it - so the answer keeps going until the speech has
+      // clearly become a full sentence (see TALK_BARGE_MIN_MS below).
+      if (!t.speaking) setVoiceStatus('Hearing you…');
     }
     return;
   }
   t.utt.frames.push(frame);
   if (rms >= endLevel) { t.utt.quietMs = 0; t.utt.voicedMs += t.frameMs; } else { t.utt.quietMs += t.frameMs; }
+  if (t.utt.overAnswer && !t.utt.interrupted && t.speaking && t.utt.voicedMs >= TALK_BARGE_MIN_MS) {
+    t.utt.interrupted = true;
+    talkStopSpeaking(t);  // a real sentence over the answer: you want something else
+    setVoiceStatus('Hearing you…');
+  }
   if (t.utt.quietMs >= TALK_END_SILENCE_MS || Date.now() - t.utt.startedAt >= TALK_MAX_UTTERANCE_MS) {
     const utt = t.utt;
     t.utt = null;
     t.lastActivity = Date.now();
     if (utt.voicedMs < TALK_MIN_SPEECH_MS) { setVoiceStatus(talkIdleStatus(t)); return; }
+    if (utt.overAnswer && !utt.interrupted) return;  // a word or two during the answer: ignored, the answer carries on
     talkAnswer(t, encodeWav(resampleLinear(flattenChunks(utt.frames), t.rate, TALK_RATE), TALK_RATE));
   }
 }
@@ -651,7 +661,18 @@ async function talkAnswer(t, wav) {
     const question = (heard.text || '').trim();
     if (t.ended) return;
     if (!question || heard.addressed === false) {
-      if (!t.speaking && !t.utt) talkFlash(t, question ? 'Ignored - not said to me' : "Didn't catch that");
+      if (heard.short && !t.speaking && !t.utt) {
+        // one or two stray words: acknowledge with a "hmm" and keep listening
+        talkFlash(t, 'Hmm');
+        await speakWithBrowser('hmm', t);
+      } else if (heard.unclear && !t.speaking && !t.utt) {
+        // seemed meant for me but wasn't a proper question: the standard reply
+        const kannada = /[ಀ-೿]/.test(question);
+        talkFlash(t, 'Please repeat your question');
+        await speakWithBrowser(kannada ? 'ದಯವಿಟ್ಟು ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಮತ್ತೆ ಹೇಳಿ.' : 'Please repeat your question.', t);
+      } else if (!t.speaking && !t.utt) {
+        talkFlash(t, question ? 'Ignored - not said to me' : "Didn't catch that");
+      }
       return;
     }
     const qid = ++t.qseq;  // only the newest question is read out
@@ -699,7 +720,9 @@ async function talkSpeak(t, text) {
         res = await audio[i];
       } catch (e) {
         if (t.stopSpeaking || t.ended) return;
-        addNote("The online voice didn't respond - using the phone's own voice.");
+        if (!(e && e.message === 'phone voice')) {
+          addNote("The online voice didn't respond - using the phone's own voice.");
+        }
         await speakWithBrowser(parts.slice(i).join(' '), t);
         return;
       }
@@ -721,7 +744,12 @@ function talkStopSpeaking(t) {
 
 async function fetchSpeech(text) {
   const res = await authPost('/api/speech/tts', JSON.stringify({ text }), 'application/json');
-  if (!res.ok) throw new Error('speech failed');
+  if (!res.ok) {
+    // SPEECH_TTS_MODEL=phone on the server: no cloud voice, use the device's own.
+    let phone = false;
+    try { phone = !!(await res.json()).phone_voice; } catch (e) { /* not JSON */ }
+    throw new Error(phone ? 'phone voice' : 'speech failed');
+  }
   return { blob: await res.blob(), genId: res.headers.get('X-Generation-Id') || '' };
 }
 

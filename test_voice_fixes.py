@@ -129,7 +129,7 @@ gate_calls = []
 real_gate, real_transcribe = server._speech_gate, server._transcribe
 
 
-def post(text, last_answer, gate_result=(True, 0.0)):
+def post(text, last_answer, gate_result=('YES', 0.0)):
     server._transcribe = lambda audio: (text, 0.0001, PRIMARY)
     server._speech_gate = lambda t, la: (gate_calls.append((t, la)), gate_result)[1]
     import urllib.parse
@@ -144,8 +144,16 @@ check('route: ...and the paid gate was NOT called for it', gate_calls == [], gat
 st, body = post('where is my dolo order', LAST)
 check('route: a real question still goes through the gate', st == 200 and body['addressed'] is True and len(gate_calls) == 1, (st, body, gate_calls))
 check('route: the gate receives the last answer for follow-up context', gate_calls and gate_calls[0][1] == LAST)
-st, body = post('two strips of dolo please', LAST, gate_result=(False, 0.0))
+st, body = post('two strips of dolo please', LAST, gate_result=('NO', 0.0))
 check('route: counter chatter the gate rejects -> addressed=false, echo=false', body['addressed'] is False and body.get('echo') is False, body)
+# Owner's rule (16 Oct 2026): one or two stray words are ignored with a "hmm" - and never cost a gate call
+gate_calls.clear()
+st, body = post('haan haan', LAST)
+check('route: a one/two-word interjection -> short=true, addressed=false, no gate call',
+      body.get('short') is True and body['addressed'] is False and gate_calls == [], (body, gate_calls))
+st, body = post('subbi the thing about', LAST, gate_result=('UNCLEAR', 0.0))
+check('route: a fragment the gate calls UNCLEAR -> unclear=true, addressed=false (page says "repeat your question")',
+      body.get('unclear') is True and body['addressed'] is False and body.get('short') is False, body)
 r = cl.post('/api/speech/transcribe', data=b'RIFF' + b'\0' * 64, headers=H)
 check('route: without gate=1 (push-to-talk) nothing is screened', r.get_json()['addressed'] is True)
 server._transcribe = lambda audio: (_ for _ in ()).throw(RuntimeError('both failed'))

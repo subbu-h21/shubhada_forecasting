@@ -576,6 +576,33 @@ PRODUCT_MASTER_CSV = Path(__file__).parent / 'data' / 'product_master' / 'produc
 H1_IN_FORCE = 'Yes'
 H1_UPCOMING = ('Yes - from 16 Nov 2026', 'Proposed (draft)')
 
+# The owner's house rule (14 Oct 2026), returned with every H1 answer so the
+# assistant never treats H1 as ordinary stock.
+H1_POLICY = ('House rule: Shubhada Pharma sells no Schedule H1 drug without an authentic, valid '
+             'prescription - no exceptions. Reasons: multi-drug-resistant bacteria are increasing, '
+             'and habit-forming drugs (tramadol, alprazolam/Anxit and the like) need a close watch.')
+# Watch groups for that close watch. A product's H1 drug text (sometimes a
+# combination, e.g. 'Cefixime, Moxifloxacin') lands in the FIRST group any of
+# its drugs matches, so each product is counted once.
+H1_WATCH_GROUPS = (
+    ('Habit-forming & psychotropic', ('alprazolam', 'buprenorphine', 'chlordiazepoxide', 'codeine',
+                                      'diazepam', 'diphenoxylate', 'midazolam', 'nitrazepam', 'pentazocine',
+                                      'tramadol', 'zolpidem', 'tapentadol', 'pregabalin', 'zopiclone',
+                                      'gabapentin', 'carisoprodol', 'flupentixol')),
+    ('Antibiotic (resistance watch)', ('cef', 'penem', 'floxacin')),
+    ('Anti-TB (resistance watch)', ('capreomycin', 'clofazimine', 'cycloserine', 'ethambutol', 'ethionamide',
+                                    'isoniazid', 'pyrazinamide', 'rifabutin', 'rifampicin', 'thiacetazone')),
+    ('Antiviral', ('oseltamivir', 'zanamivir')),
+)
+
+
+def _h1_watch_group(drug_text):
+    text = str(drug_text).lower()
+    for group, needles in H1_WATCH_GROUPS:
+        if any(needle in text for needle in needles):
+            return group
+    return 'Other (e.g. oxytocin)'
+
 
 def _product_master():
     """Product list with CATEGORY / ACTIVE INGREDIENTS / SCHEDULE H1 columns,
@@ -619,6 +646,7 @@ def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_up
         hits = pm[pm['PRODUCT'].str.contains(str(product), case=False, regex=False)].head(int(n))
         product_status = [{'product': r['PRODUCT'], 'schedule_h1': r['SCHEDULE H1'] or 'No',
                            'h1_drug': r['H1 DRUG'], 'active_ingredients': r['ACTIVE INGREDIENTS'],
+                           'watch_group': _h1_watch_group(r['H1 DRUG']) if r['SCHEDULE H1'] else None,
                            'please_check': r['H1 CHECK'] == 'Please check'} for _, r in hits.iterrows()]
         h1 = h1[h1['PRODUCT'].str.contains(str(product), case=False, regex=False)]
 
@@ -636,6 +664,7 @@ def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_up
         key = df['Product'].astype(str).str.strip().str.upper()
         out = df[key.isin(h1.index)].copy()
         out['H1_Drug'] = key[key.isin(h1.index)].map(h1['H1 DRUG'])
+        out['Watch_Group'] = out['H1_Drug'].map(_h1_watch_group)
         return out
 
     sales_all, purch_all = tag(s), tag(p)
@@ -667,7 +696,11 @@ def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_up
     period_value = float(scope['Item Total'].sum())
     check_sold = int(h1.loc[h1.index.isin(sales['Product'].astype(str).str.strip().str.upper()), 'H1 CHECK']
                      .eq('Please check').sum())
+    watch_groups = {}
+    for drug_text in sorted(set(h1['H1 DRUG'])):
+        watch_groups.setdefault(_h1_watch_group(drug_text), []).append(drug_text)
     return _guard_no_pii({
+        'policy': H1_POLICY,
         'period': months[0] if len(months) == 1 else f'{months[0]} to {months[-1]}',
         'what_counts': ('Schedule H1 drugs in force now' if not include_upcoming else
                         'Schedule H1 in force + pregabalin (H1 from 16 Nov 2026) + drafted drugs (not in force)'),
@@ -682,16 +715,21 @@ def get_schedule_h1(month=None, branch=None, product=None, drug=None, include_up
                                        value_rs=('Item Total', 'sum')),
             'by_branch': by(sales, 'Branch', bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'), value_rs=('Item Total', 'sum')),
             'by_h1_drug': by(sales, 'H1_Drug', strips=('Strips', 'sum'), value_rs=('Item Total', 'sum')),
-            'top_products': by(sales, ['Product', 'H1_Drug'], bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'),
-                               value_rs=('Item Total', 'sum')),
+            'by_watch_group': by(sales, 'Watch_Group', bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'),
+                                 value_rs=('Item Total', 'sum')),
+            'top_products': by(sales, ['Product', 'H1_Drug', 'Watch_Group'], bills=('Inv.No', 'nunique'),
+                               strips=('Strips', 'sum'), value_rs=('Item Total', 'sum')),
         },
         'purchases': {
             'invoices': int(purch['Inv.No'].astype(str).nunique()), 'lines': int(len(purch)),
             'packs': _round(purch['Qty'].sum(), 1), 'value_rs': _round(purch['Item Total'].sum()),
             'by_month_all_history': by(purch_all, 'Calendar_Month', packs=('Qty', 'sum'), value_rs=('Item Total', 'sum')),
             'top_suppliers': by(purch, 'Supplier', invoices=('Inv.No', 'nunique'), value_rs=('Item Total', 'sum')),
-            'top_products': by(purch, ['Product', 'H1_Drug'], packs=('Qty', 'sum'), value_rs=('Item Total', 'sum')),
+            'by_watch_group': by(purch, 'Watch_Group', packs=('Qty', 'sum'), value_rs=('Item Total', 'sum')),
+            'top_products': by(purch, ['Product', 'H1_Drug', 'Watch_Group'], packs=('Qty', 'sum'),
+                               value_rs=('Item Total', 'sum')),
         },
+        'watch_groups': watch_groups,
         'sold_h1_products_marked_please_check': check_sold,
         'sales_value_with_unknown_composition_rs': _round(unknown_value),
         'note': ('H1 status = each product\'s composition (worked out from its brand name) matched to the official '

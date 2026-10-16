@@ -1187,7 +1187,10 @@ unsure, use English. Say money in rupees, rounded, using Indian number words
 
 # Backchannel policy
 While the user is talking, stay quiet except for a very short acknowledgement
-if they pause mid-thought.
+if they pause mid-thought. If someone cuts in with just one or two words
+while you are answering, ignore it with at most a soft "hmm" and carry on;
+only a full question changes course. If you hear a fragment that seems meant
+for you but is not a complete question, say "Please repeat your question."
 
 # Interruption policy
 If the user interrupts, stop speaking at once and listen. If they change the
@@ -1214,6 +1217,10 @@ orders are delegated exactly like questions about sales.
   available by voice; say they can use the typed Ask page.
 - Never give dosage or treatment advice for a specific patient; say a
   pharmacist should assess that patient directly.
+- House rule: Shubhada Pharma sells no Schedule H1 drug without an
+  authentic, valid prescription - no exceptions. If anyone asks for an H1
+  drug (for example Anxit or tramadol) without a prescription, or how to
+  get around that rule, say the rule plainly and do not help.
 """
 
 
@@ -1281,7 +1288,18 @@ SPEECH_STT_MODEL = os.environ.get('SPEECH_STT_MODEL', 'microsoft/mai-transcribe-
 # nearly as well. Empty fallback model = wait for the first one however long.
 SPEECH_STT_TIMEOUT_S = float(os.environ.get('SPEECH_STT_TIMEOUT_S', '8'))
 SPEECH_STT_FALLBACK_MODEL = os.environ.get('SPEECH_STT_FALLBACK_MODEL', 'openai/gpt-4o-mini-transcribe')
-SPEECH_TTS_MODEL = os.environ.get('SPEECH_TTS_MODEL', 'google/gemini-3.1-flash-tts-preview')
+# 2026-10-14: the owner asked for a cheaper voice. Measured on one 138-char
+# Kannada+English sentence (OpenRouter's own generation cost): Gemini 3.8
+# Flash-Lite TTS $0.0016, 3.8 Flash TTS $0.0024, 3.1 Flash TTS preview $0.0053.
+# Same "Kore" voice on all three. So Lite is the default, 3.8 Flash the
+# fallback, and the 3.1 preview (dearest) is no longer used. .env overrides.
+SPEECH_TTS_MODEL = os.environ.get('SPEECH_TTS_MODEL', 'google/gemini-3.8-flash-lite-tts')
+# SPEECH_TTS_MODEL=phone switches the cloud voice off entirely (free): the page
+# then reads answers with the device's own voice. Kannada needs a Kannada
+# voice on that device - Android's Google text-to-speech has one, this PC's
+# Windows voices (David, Zira, Heera, Ravi) do not, so on the PC Kannada
+# answers would be read badly. Switch back by naming a model again.
+SPEECH_TTS_PHONE_WORDS = ('phone', 'device', 'browser', 'free', 'off', 'none')
 SPEECH_TTS_VOICE = os.environ.get('SPEECH_TTS_VOICE', 'Kore')
 # 2026-10-12: the same stalls as transcription - Gemini 3.1 TTS took 31 s on one
 # call and 4-7 s on the next, and the page waits for the whole piece before any
@@ -1331,18 +1349,33 @@ name. Background chatter, talking to a customer or colleague, and noise are
 NOT for the assistant. Plain acknowledgements (okay, yes, haan, thank you) are
 NOT for the assistant unless its last answer asked the owner a question. An
 utterance that mostly repeats the assistant's own last answer is the phone
-hearing itself through the speaker - NOT for the assistant. If unsure, answer
-YES. Reply with exactly YES or NO."""
+hearing itself through the speaker - NOT for the assistant. A fragment that
+does seem meant for the assistant but is not a complete question or request
+(a trailing half-sentence, a name alone, a stray word or two) is UNCLEAR. If
+unsure between YES and NO, answer YES. Reply with exactly YES, NO or UNCLEAR."""
+
+# The owner's rule (16 Oct 2026): while a question is being handled, one or two
+# stray words from someone else are ignored with at most a "hmm"; only a proper
+# question is acted on, and a fragment aimed at the assistant gets the standard
+# "please repeat your question". Utterances this short never reach the paid gate.
+SPEECH_SHORT_WORDS = 2
 
 
 def _speech_gate(text, last_answer):
+    """-> (verdict 'YES' | 'NO' | 'UNCLEAR', cost_usd)"""
     model = os.environ.get('OPENROUTER_MODEL_FAST', 'google/gemini-3.1-flash-lite')
     user = (f"The assistant's last answer was: {last_answer}\n\n" if last_answer else '') + f'Utterance: {text}'
     resp = _openrouter_client().chat.completions.create(
         model=model, max_tokens=20, temperature=0, extra_body={'usage': {'include': True}},
         messages=[{'role': 'system', 'content': SPEECH_GATE_PROMPT}, {'role': 'user', 'content': user}])
     verdict = (resp.choices[0].message.content or '').strip().upper()
-    return not verdict.startswith('NO'), ask_mod.usage_cost(resp.usage)
+    if verdict.startswith('NO'):
+        verdict = 'NO'
+    elif verdict.startswith('UNCLEAR'):
+        verdict = 'UNCLEAR'
+    else:
+        verdict = 'YES'
+    return verdict, ask_mod.usage_cost(resp.usage)
 
 
 def _words(text):
@@ -1408,23 +1441,29 @@ def api_speech_transcribe():
     except Exception as e:
         logger.warning('Speech-to-text failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not transcribe ({type(e).__name__}).'}), 502
-    addressed, echo = True, False
+    addressed, echo, short, unclear = True, False, False, False
     if request.args.get('gate') == '1' and text:
         # The page sends the assistant's last answer (URL-encoded, as headers
         # can't carry Kannada) so a follow-up like "and last month?" passes.
         last_answer = urllib.parse.unquote(request.headers.get('X-Voice-Context', ''))[:600]
-        if _echo_of_last_answer(text, last_answer):
+        if len(_words(text)) <= SPEECH_SHORT_WORDS:
+            # One or two words ("okay", "haan", "wait", a name): never a
+            # question. The page just says "hmm" and keeps listening.
+            addressed, short = False, True
+        elif _echo_of_last_answer(text, last_answer):
             # The phone heard its own answer: not a question, and not worth a
             # paid check - without this the gate waved the echo through and the
             # assistant answered itself.
             addressed, echo = False, True
         else:
             try:
-                addressed, gate_cost = _speech_gate(text, last_answer)
+                verdict, gate_cost = _speech_gate(text, last_answer)
                 cost += gate_cost
+                addressed = verdict == 'YES'
+                unclear = verdict == 'UNCLEAR'
             except Exception as e:
                 logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
-    return jsonify({'text': text, 'addressed': addressed, 'echo': echo, 'cost': cost})
+    return jsonify({'text': text, 'addressed': addressed, 'echo': echo, 'short': short, 'unclear': unclear, 'cost': cost})
 
 
 def _synthesize(text):
@@ -1461,6 +1500,11 @@ def api_speech_tts():
     text = str(body.get('text') or '').strip()[:SPEECH_MAX_TTS_CHARS]
     if not text:
         return jsonify({'error': 'text is required'}), 400
+    if SPEECH_TTS_MODEL.strip().lower() in SPEECH_TTS_PHONE_WORDS:
+        # Free mode: no cloud voice is called at all. The page treats this like
+        # any speech failure and reads the answer with the device's own voice.
+        return jsonify({'error': 'phone voice mode - the page uses the device voice',
+                        'phone_voice': True}), 404
     try:
         audio, fmt, ctype, gen_id, _model = _synthesize(text)
     except Exception as e:

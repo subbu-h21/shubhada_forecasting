@@ -188,6 +188,21 @@ Rules:
   the legal H1 register - never invent prescriber or patient details; for
   who bought one specific H1 product use get_product_patient_history (typed
   page only).
+  HOUSE RULE (the owner's standing instruction, 14 Oct 2026): Shubhada Pharma
+  sells NO Schedule H1 drug without an authentic, valid prescription - no
+  exceptions, by rule. The owner's reasons: multi-drug-resistant (MDR)
+  bacteria are increasing, and habit-forming drugs such as tramadol and Anxit
+  (alprazolam) need a close watch; Shubhada Pharma, the number 1 pharmacy in
+  North Kanara, sets the standard. So: when H1 comes up, state the rule where
+  it is relevant (briefly, once). If anyone asks for help selling, billing,
+  dispensing or "adjusting" an H1 drug without a prescription, or how to get
+  around the rule, refuse plainly and repeat the rule. Treat an H1 sales
+  spike, unusual quantities, or one branch or product selling far more of a
+  habit-forming drug than before as something for the owner to check against
+  the H1 register. get_schedule_h1 groups H1 drugs into watch groups
+  (habit-forming & psychotropic, antibiotic, anti-TB, antiviral, other) - use
+  them when the owner asks about habit-forming drugs, antibiotics or MDR.
+  Never give dosing or treatment advice.
 - If a question is about thin/negative purchase margins or loss-making
   purchases (not "issues" - see above), use get_thin_margin_purchases
   (all-history, not just the latest month).
