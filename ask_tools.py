@@ -194,9 +194,18 @@ def _records_with_pii(df, cols=None):
     return json.loads(df.replace({np.nan: None}).to_json(orient='records'))
 
 
-def _guard_no_pii(payload):
+# The two STAFF columns on a sale line. They are blocked from rows handed to the
+# model by default, but the owner asked (19 Oct 2026) to see who fetched and who
+# billed each sale of a product, so exactly get_product_sales_history may carry
+# them (see run_tool). Patient names and mobiles stay blocked for that tool too.
+STAFF_ROW_COLUMNS = {'Given by', 'Given By', 'Billed By'}
+STAFF_ROW_TOOLS = {'get_product_sales_history'}
+
+
+def _guard_no_pii(payload, allow=()):
     """Last line of defence: refuse to return anything that carries a PII key.
-    Raises so a bug surfaces loudly instead of leaking silently."""
+    Raises so a bug surfaces loudly instead of leaking silently. `allow` names
+    keys a specific tool is permitted to carry (staff columns only - see above)."""
     def keys(o):
         if isinstance(o, dict):
             for k, v in o.items():
@@ -205,7 +214,7 @@ def _guard_no_pii(payload):
         elif isinstance(o, list):
             for v in o:
                 yield from keys(v)
-    bad = PII_COLUMNS.intersection(keys(payload))
+    bad = (PII_COLUMNS - set(allow)).intersection(keys(payload))
     if bad:
         raise ValueError(f'PII guard tripped - tool tried to return {sorted(bad)}')
     return payload
@@ -1555,30 +1564,157 @@ def get_patient_history(mobile, limit=100):
     }
 
 
-def get_product_patient_history(product, limit=100):
+def get_product_patient_history(product, limit=100, branch=None, month=None, date_from=None, date_to=None):
     """Row-level sale history for ONE product - every individual transaction
-    (not aggregated), with the real buyer's name and mobile number included,
-    most recent first. Use this whenever a question about a product's sales
-    should show WHO bought it, not just totals. Call search_products first
-    to get the exact product name."""
+    (not aggregated), most recent first, with the real CUSTOMER's name and
+    mobile number, the date and TIME, branch, quantity, and who FETCHED it
+    (Given by) and who BILLED it (Billed By). Use this for questions like "who
+    last gave / sold product X, and to whom" - anything that must show the
+    customer's name. For the same history WITHOUT customer identity use
+    get_product_sales_history. `product` may be a full or partial name; if
+    several products match the candidates are returned to choose from.
+    `limit` caps the lines (default 100); total_lines is the true count. Time
+    of day was not recorded in the June and July files (Time is null there).
+    Optional filters: branch (part of the name), month 'YYYY-MM', date_from /
+    date_to 'YYYY-MM-DD' - e.g. "who last gave X at Hospet Road"."""
     s, _ = _load()
     col = _mobile_col()
-    match = s[s['Product'] == product].copy()
-    if match.empty:
-        return {'product': product, 'found': False, 'hint': 'call search_products for the exact name'}
+    mask, matched_name, reply = _product_mask(s, product)
+    if reply is not None:
+        return reply
+    match = s[mask].copy()
+    match['_dt'] = pd.to_datetime(match['Date'], format='mixed')
     match['Branch'] = match['Inv.No'].apply(rk.extract_branch)
+    if branch:
+        match = match[match['Branch'].str.contains(str(branch), case=False, regex=False)]
+    if month:
+        match = match[match['Calendar_Month'] == month]
+    if date_from:
+        match = match[match['_dt'] >= pd.Timestamp(date_from)]
+    if date_to:
+        match = match[match['_dt'] < pd.Timestamp(date_to) + pd.Timedelta(days=1)]
+    if match.empty:
+        return {'product': matched_name, 'found': True, 'total_lines': 0, 'sales': [],
+                'filters': {'branch': branch, 'month': month, 'date_from': date_from, 'date_to': date_to},
+                'note': 'no sales of this product match those filters'}
+    match['Qty_units'] = match['Qty']
     match['Qty'] = rk.to_strips(match['Qty'], match['Product'], _factor_map())
-    match = match.sort_values('Date', ascending=False)
-    cols = ['Date', 'Patient']
+    match = match.sort_values('_dt', ascending=False)
+    match['Time'] = match['_dt'].dt.strftime('%H:%M').where(match['_dt'].dt.strftime('%H:%M:%S') != '00:00:00', None)
+    match['Date'] = match['_dt'].dt.strftime('%Y-%m-%d')
+    cols = ['Date', 'Time', 'Patient']
     if col:
         match = match.rename(columns={col: 'Mobile'})
         cols.append('Mobile')
-    cols += ['Branch', 'Inv.No', 'Qty', 'MRP', 'Item Total']
+    cols += ['Branch', 'Inv.No', 'Qty_units', 'Qty', 'Given by', 'Billed By', 'MRP', 'Item Total']
     sales = _records_with_pii(match, cols)
+    shown = sales[:int(limit)]
     return {
-        'product': product, 'found': True,
+        'product': matched_name, 'found': True,
         'total_lines': len(sales),
-        'sales': sales[:int(limit)],
+        'units_note': 'Qty_units = tablets/pieces as billed; Qty = strips.',
+        'name_note': ('Patient is null on B2B / Wholesale lines: wholesale bills are to shops and no customer '
+                      'name is recorded - say "not recorded (wholesale)" for those.'
+                      if any(not r.get('Patient') for r in shown) else None),
+        'time_note': ('Time is null where the sales file had no time of day (the June and July files).'
+                      if any(r.get('Time') is None for r in shown) else None),
+        'sales': shown,
+    }
+
+
+def _product_mask(s, product):
+    """Resolve a full or partial product name against the sales lines.
+    -> (row mask, exact product name, None) when exactly one sold product
+    matches, else (None, None, reply) where reply is ready to return: not found,
+    or the candidates to choose from. Case-insensitive; every word of a partial
+    name must appear in the product name."""
+    q = str(product or '').strip().upper()
+    if not q:
+        return None, None, {'error': 'product is required'}
+    names = s['Product'].astype(str).str.strip()
+    upper = names.str.upper()
+    exact = upper == q
+    if exact.any():
+        mask = exact
+    else:
+        mask = pd.Series(True, index=s.index)
+        for tok in q.split():
+            mask &= upper.str.contains(tok, regex=False)
+    if not mask.any():
+        return None, None, {'product_searched': product, 'found': False,
+                            'hint': 'no sold product matches - try search_products with part of the name'}
+    matched = sorted(set(names[mask]))
+    if len(matched) > 1:
+        counts = names[mask].value_counts()
+        return None, None, {'product_searched': product, 'found': False, 'kind': 'choose_one',
+                            'matches': [{'product': n, 'sale_lines': int(counts[n])} for n in counts.index[:15]],
+                            'total_matching_products': len(matched),
+                            'hint': 'several products match - ask which one, then call again with the exact name'}
+    return mask, matched[0], None
+
+
+def get_product_sales_history(product, branch=None, month=None, date_from=None, date_to=None, limit=40):
+    """Sale-by-sale history of ONE product, newest first: for every sale line the
+    date, TIME of day, branch, bill number, quantity (units as billed, and in
+    strips), who FETCHED it (Given by), who BILLED it (Billed By) and the line
+    value. Plus totals and a per-branch summary. Never includes the patient's
+    name or mobile (use get_product_patient_history for that, typed page only).
+    `product` can be a full or partial name; if several products match, the
+    candidates are returned so the owner can pick. Optional filters: branch
+    (part of the name), month 'YYYY-MM', date_from / date_to 'YYYY-MM-DD'.
+    `limit` caps the lines returned (default 40, max 300); totals always cover
+    every matching line. The time of day was not recorded in the June and July
+    sales files, so those lines have no time."""
+    s, _ = _load()
+    mask, matched_name, reply = _product_mask(s, product)
+    if reply is not None:
+        return reply
+    matched = [matched_name]
+
+    df = s[mask].copy()
+    df['_dt'] = pd.to_datetime(df['Date'], format='mixed')
+    df['Branch'] = df['Inv.No'].apply(rk.extract_branch)
+    if branch:
+        df = df[df['Branch'].str.contains(str(branch), case=False, regex=False)]
+    if month:
+        df = df[df['Calendar_Month'] == month]
+    if date_from:
+        df = df[df['_dt'] >= pd.Timestamp(date_from)]
+    if date_to:
+        df = df[df['_dt'] < pd.Timestamp(date_to) + pd.Timedelta(days=1)]
+    if df.empty:
+        return {'product': matched[0], 'found': True, 'total_lines': 0,
+                'filters': {'branch': branch, 'month': month, 'date_from': date_from, 'date_to': date_to},
+                'note': 'no sales of this product match those filters'}
+    df['Strips'] = rk.to_strips(df['Qty'], df['Product'], _factor_map())
+    df = df.sort_values('_dt', ascending=False)
+
+    has_time = df['_dt'].dt.strftime('%H:%M:%S') != '00:00:00'
+    no_time_months = sorted(df.loc[~has_time, 'Calendar_Month'].unique())
+    limit = max(1, min(int(limit), 300))
+    top = df.head(limit)
+    lines = [{
+        'Date': r['_dt'].strftime('%Y-%m-%d'),
+        'Time': r['_dt'].strftime('%H:%M') if r['_dt'].strftime('%H:%M:%S') != '00:00:00' else None,
+        'Branch': r['Branch'], 'Inv.No': str(r['Inv.No']),
+        'Qty_units': _round(r['Qty'], 2), 'Strips': _round(r['Strips'], 2),
+        'Given by': str(r['Given by']).strip(), 'Billed By': str(r['Billed By']).strip(),
+        'Item Total': _round(r['Item Total']),
+    } for _, r in top.iterrows()]
+    by_branch = (df.groupby('Branch').agg(lines=('Inv.No', 'size'), bills=('Inv.No', 'nunique'), strips=('Strips', 'sum'),
+                                          value_rs=('Item Total', 'sum')).reset_index()
+                 .sort_values('strips', ascending=False).round(2))
+    return {
+        'product': matched[0], 'found': True,
+        'filters': {'branch': branch, 'month': month, 'date_from': date_from, 'date_to': date_to},
+        'total_lines': int(len(df)), 'shown': len(lines), 'truncated': len(df) > len(lines),
+        'first_sale': df['_dt'].min().strftime('%Y-%m-%d'), 'last_sale': df['_dt'].max().strftime('%Y-%m-%d'),
+        'totals': {'strips': _round(df['Strips'].sum(), 1), 'units': _round(df['Qty'].sum(), 1), 'value_rs': _round(df['Item Total'].sum())},
+        'by_branch': _records(by_branch, ['Branch', 'lines', 'bills', 'strips', 'value_rs']),
+        'time_note': (f'Time of day was not recorded for sales in {", ".join(no_time_months)} (Time is null there).'
+                      if no_time_months else None),
+        'units_note': 'Qty_units = tablets/pieces as billed; Strips = Qty_units divided by the pack size.',
+        'sales': lines,
     }
 
 
@@ -1805,9 +1941,14 @@ TOOLS = [
     {'name': 'get_patient_history', 'fn': get_patient_history,
      'description': get_patient_history.__doc__,
      'parameters': _schema({'mobile': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['mobile'])},
+    {'name': 'get_product_sales_history', 'fn': get_product_sales_history,
+     'description': get_product_sales_history.__doc__,
+     'parameters': _schema({'product': {'type': 'string'}, 'branch': {'type': 'string'}, 'month': {'type': 'string'},
+                            'date_from': {'type': 'string'}, 'date_to': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['product'])},
     {'name': 'get_product_patient_history', 'fn': get_product_patient_history,
      'description': get_product_patient_history.__doc__,
-     'parameters': _schema({'product': {'type': 'string'}, 'limit': {'type': 'integer'}}, ['product'])},
+     'parameters': _schema({'product': {'type': 'string'}, 'limit': {'type': 'integer'}, 'branch': {'type': 'string'},
+                            'month': {'type': 'string'}, 'date_from': {'type': 'string'}, 'date_to': {'type': 'string'}}, ['product'])},
     {'name': 'get_mrp_total', 'fn': get_mrp_total,
      'description': get_mrp_total.__doc__,
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
@@ -1829,7 +1970,9 @@ def run_tool(name, args):
         return {'error': f'unknown tool {name}'}
     try:
         result = TOOL_FNS[name](**(args or {}))
-        return result if name in PII_ALLOWED_TOOLS else _guard_no_pii(result)
+        if name in PII_ALLOWED_TOOLS:
+            return result
+        return _guard_no_pii(result, allow=STAFF_ROW_COLUMNS if name in STAFF_ROW_TOOLS else ())
     except Exception as e:  # surface tool errors to the model, don't crash the loop
         return {'error': f'{type(e).__name__}: {e}'}
 

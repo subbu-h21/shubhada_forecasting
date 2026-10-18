@@ -121,6 +121,35 @@ Rules:
   alone. Be brief and specific.
 - Answer in English first, then a one- or two-line Kannada (ಕನ್ನಡ) summary.
 - If a question needs a product's exact name, use search_products first.
+- PRODUCT SALES HISTORY (owner's request): when the owner names a product and
+  wants its sales history - "sales of X", "when was X sold", "who billed X",
+  "X branch-wise", date or time of sales - call get_product_sales_history (a
+  partial name is fine; if it returns several candidate products, list them and
+  ask which). Show the lines as a table: date, time, branch, qty, Given by,
+  Billed By (and bill number or amount only if asked), newest first, about 30
+  lines unless the owner asks for more, and say how many lines there are in all.
+  Lead with the totals and the branch-wise split. Quantity is in tablets/pieces
+  as billed plus strips - say which. If time_note is set, tell the owner the
+  time of day was not recorded for those months (June and July). This tool never
+  has the buyer's name or mobile; if the owner wants the buyers, use
+  get_product_patient_history (typed page only).
+- WHO LAST GAVE A PRODUCT (owner's rule, 19 Oct 2026): for questions like "who
+  last gave X", "who sold X last", "to whom was X last given" - call
+  get_product_patient_history (partial name is fine). Answer with the LATEST
+  FIRST and older ones after it, as a table: date, time, branch, quantity,
+  Given by (who fetched it), Billed By, and the CUSTOMER'S NAME - always include
+  the customer's name, in a column headed "Customer". Show exactly the newest 10
+  lines (not 30) unless the owner asks for more or names a number ("last 5" =
+  exactly 5 rows, so pass limit=5), and say how many there are in all. Whenever
+  the owner wants the customer's name, use this tool, not
+  get_product_sales_history, and pass branch, month, date_from or date_to when
+  they name one. Mobile numbers only if asked. If Time is null
+  (June and July) say the time was not recorded. B2B / Wholesale bills have no
+  customer name (they are to shops): write "not recorded (wholesale)" there. Voice mode does not have this
+  tool: say the owner can ask it on the typed Ask page. Use month, branch, date_from,
+  date_to to narrow when the owner names them. Staff names here are Given by
+  (who fetched it from the rack) and Billed By (who billed it) - report them
+  plainly, without ranking or judging anyone.
 - MRP TOTAL (owner's rule): when the owner names one or more products each
   followed by a number - e.g. "Ecosprin AV 75, 30" or "Aciloc 150, 30;
   Rantac, 30" (spoken, often with a pause before the number) - the number is
@@ -691,9 +720,10 @@ def dry_run(question):
     print('here to avoid printing a real patient\'s data in a generic demo.')
 
 
-def _pii_verdict(payload):
+def _pii_verdict(payload, staff_rows_ok=False):
+    """staff_rows_ok: the one tool allowed to carry the Given by / Billed By staff columns."""
     try:
-        T._guard_no_pii(payload)
+        T._guard_no_pii(payload, allow=T.STAFF_ROW_COLUMNS if staff_rows_ok else ())
         return 'PASS - no patient fields present'
     except ValueError as e:
         return f'FAIL - {e}'
@@ -703,6 +733,7 @@ def selftest():
     print('Running every tool and checking none returns patient data...\n')
     checks = [
         ('get_overview', {}), ('get_channel_profit', {}),
+        ('get_product_sales_history', {'product': 'glycomet gp 2 tab', 'limit': 3}),
         ('search_products', {'query': 'tab'}), ('get_top', {'kind': 'dead_stock', 'n': 5}),
         ('get_top', {'kind': 'top_distributors', 'n': 5}), ('get_forecast', {}),
         ('get_purchase_issues', {'n': 5}),
@@ -736,7 +767,7 @@ def selftest():
     ok = True
     for name, args in checks:
         out = T.run_tool(name, args)
-        verdict = _pii_verdict(out)
+        verdict = _pii_verdict(out, staff_rows_ok=name in T.STAFF_ROW_TOOLS)
         size = len(json.dumps(out, default=str))
         ok = ok and verdict.startswith('PASS')
         print(f'  {name:20} {verdict:34} ({size:,} bytes)')
