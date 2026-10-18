@@ -86,9 +86,11 @@ def _handle_unexpected_error(e):
 # phone left logged in stays logged in for anyone who picks it up. This
 # replaces it with a server-issued token that expires SESSION_TIMEOUT_SECONDS
 # after the last authenticated request touches it (a sliding window, not a
-# fixed one) - both "1hr of inactivity" and "1hr after the tab closes"
+# fixed one) - both "12hrs of inactivity" and "12hrs after the tab closes"
 # fall out of that one rule, since a closed tab just stops sending requests.
-SESSION_TIMEOUT_SECONDS = 60 * 60
+# 12 hours (owner, 19 Oct 2026): a working day without logging in again.
+# mobile_dashboard.html keeps its own INACTIVITY_MS - change both together.
+SESSION_TIMEOUT_SECONDS = 12 * 60 * 60
 
 _sessions_lock = threading.Lock()
 _sessions = {}  # token -> {'username': str, 'last_active': float}
@@ -1574,7 +1576,7 @@ if __name__ == '__main__':
     for c in CONFIG['credentials']:
         print(f'Login: {c["username"]} / {c["password"]}')
     print(f'(saved in server_config.json - change it any time)')
-    print(f'Auto-logout after {SESSION_TIMEOUT_SECONDS // 60} minutes of inactivity (or after closing the tab).')
+    print(f'Auto-logout after {SESSION_TIMEOUT_SECONDS // 3600} hours of inactivity (or after closing the tab).')
     print()
     print(f'On your phone (same WiFi), open: http://{lan_ip}:8420')
     print('Press Ctrl+C to stop the server.')
