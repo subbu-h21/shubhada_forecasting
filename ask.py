@@ -45,6 +45,7 @@ be seen. `.env` is gitignored; a real environment variable always wins over it.
 import datetime
 import json
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -159,6 +160,19 @@ Rules:
   never multiply or add yourself. If 'similar' lists other products, name
   them in one short line so the owner can say if they meant another one. No
   cost, margin or selling price unless asked.
+  QUICK CODE (owner's rule, 19 Oct 2026): a product may also be named by the
+  FIRST 3 LETTERS of the brand plus the MRP printed on the pack - e.g. "ECO
+  85.50, 30" (3 letters, the exact MRP with paise, then the tablets). Pass the
+  code and MRP exactly as said as the item's "product" (e.g. "ECO 85.50"). The
+  tool uses the pack's own MRP. If matched_by is "first 3 letters + MRP": say
+  which product it found; if 'candidates' is more than 1 you MUST add a line
+  for that item - "Used the best-selling match; others with this code and MRP:"
+  then each product in 'similar' with its strip size and its mrp_total in
+  rupees (the totals differ when strip sizes differ), and say how many in all
+  from 'candidates' - never leave this out; if 'also_possible_by_name' is there (a whole-rupee number can also
+  be a strength, like "Pan 40"), mention that reading in one line too; if
+  found is false, show 'closest' and ask the owner to check the MRP on the pack,
+  paise included. The MRP must be exact - a rounded MRP will not match.
 - If the question gives a phone/mobile number, call get_patient_history with
   it and list what that patient bought (with dates and amounts).
 - If a question names a PERSON by name (not a phone number) - e.g. "tell me
@@ -355,7 +369,48 @@ Who you are and who you work for (always remember this):
 - Your name is suubbiii (spelled exactly like that). You used to be called subbi, so if
   someone says subbi, or something that sounds like your name (Suubbi, Subi, Sabbi -
   speech-to-text often garbles it), that is you.
+- GREETING (owner's rule, 19 Oct 2026): when the owner calls you by your name -
+  "subbi", "suubbiii", "subbiiiii" - that is their hello. Do NOT say hello or
+  hi. Start your answer with exactly: "Ooooooo, I am here, tell me!" (if they
+  spoke or wrote Kannada: "ಓಓಓಓಓ, ನಾನು ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!"). If the call is only your
+  name, that line is the whole answer. If a question follows the name, give that
+  line first and then answer the question.
 """
+
+# --- Being called by name (owner's greeting rule) -----------------------------
+# A message that is just the assistant's name gets the greeting instantly,
+# without a model call (free and exact); a message that STARTS with the name is
+# also known to be meant for the assistant (the voice filter relies on that).
+GREETING_EN = 'Ooooooo, I am here, tell me!'
+GREETING_KN = 'ಓಓಓಓಓ, ನಾನು ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!'
+_NAME_LATIN = re.compile(r'^s[uoa]{1,3}b{1,3}h?i{1,8}$')          # subbi, suubbiii, sabbi, subi, subbiiiii
+_NAME_KANNADA_PREFIXES = ('ಸುಬ್ಬಿ', 'ಸುಬ್ಬೀ', 'ಸಬ್ಬಿ', 'ಸುಬಿ')
+_CALL_PREFIXES = {'hey', 'hi', 'hello', 'ok', 'okay', 'oye', 'arey', 'are', 'hai', 'ey', 'o', 'oo', 'ooo', 'ooh', 'ha'}
+
+
+def _call_tokens(text):
+    return re.findall(r'[a-z]+|[ಀ-೿]+', str(text or '').lower())
+
+
+def _is_name(tok):
+    return bool(_NAME_LATIN.match(tok)) or tok.startswith(_NAME_KANNADA_PREFIXES)
+
+
+def addresses_by_name(text):
+    """True when the message starts by calling the assistant ('subbi, last month?')."""
+    toks = [t for t in _call_tokens(text)]
+    while toks and toks[0] in _CALL_PREFIXES:
+        toks.pop(0)
+    return bool(toks) and _is_name(toks[0])
+
+
+def name_call_greeting(text):
+    """The greeting when the message is ONLY a call by name, else None."""
+    toks = _call_tokens(text)
+    rest = [t for t in toks if t not in _CALL_PREFIXES]
+    if rest and all(_is_name(t) for t in rest) and len(toks) <= 6:
+        return GREETING_KN if re.search(r'[ಀ-೿]', str(text)) else GREETING_EN
+    return None
 
 IDENTITY_PEOPLE_RULES = """\
 - You do not know which of these people is asking unless they say so - never assume, and
@@ -679,6 +734,9 @@ def ask(question, verbose=False, history=None, voice=False, speak=False, cost_ou
     (short English facts for the live voice to rephrase); `speak` =
     push-to-talk mode (an answer read out word for word, in the owner's
     language). Both withhold patient-identity tools."""
+    greeting = name_call_greeting(question)
+    if greeting:                       # just the name: instant, free, exact greeting
+        return greeting
     backend = os.environ.get('ASK_BACKEND', 'openrouter')
     if backend == 'openrouter':
         return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak,

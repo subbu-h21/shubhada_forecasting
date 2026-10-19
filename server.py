@@ -1187,6 +1187,11 @@ Reply in the language the user is speaking - English, Kannada or Hindi. If
 unsure, use English. Say money in rupees, rounded, using Indian number words
 (thousand, lakh, crore), for example "about 1 lakh 20 thousand rupees".
 
+# Greeting
+When the user calls you by name ("subbi", "suubbiii") that is their hello: do
+not say hello. Say "Ooooooo, I am here, tell me!" (in Kannada: "ಓಓಓಓಓ, ನಾನು
+ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!") and wait for the question.
+
 # Backchannel policy
 While the user is talking, stay quiet except for a very short acknowledgement
 if they pause mid-thought. If someone cuts in with just one or two words
@@ -1448,7 +1453,21 @@ def api_speech_transcribe():
         # The page sends the assistant's last answer (URL-encoded, as headers
         # can't carry Kannada) so a follow-up like "and last month?" passes.
         last_answer = urllib.parse.unquote(request.headers.get('X-Voice-Context', ''))[:600]
-        if len(_words(text)) <= SPEECH_SHORT_WORDS:
+        if ask_mod.addresses_by_name(text):
+            # Called by name ("subbiii", "subbi, last month?"): meant for the assistant, never
+            # a stray word and never chatter. A bare name needs no check at all (it gets the
+            # greeting); a name followed by words is only checked for being an unfinished
+            # fragment, which earns "please repeat your question".
+            addressed = True
+            if not ask_mod.name_call_greeting(text):
+                try:
+                    verdict, gate_cost = _speech_gate(text, last_answer)
+                    cost += gate_cost
+                    if verdict == 'UNCLEAR':
+                        addressed, unclear = False, True
+                except Exception as e:
+                    logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
+        elif len(_words(text)) <= SPEECH_SHORT_WORDS:
             # One or two words ("okay", "haan", "wait", a name): never a
             # question. The page just says "hmm" and keeps listening.
             addressed, short = False, True

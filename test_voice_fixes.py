@@ -159,6 +159,26 @@ check('route: without gate=1 (push-to-talk) nothing is screened', r.get_json()['
 server._transcribe = lambda audio: (_ for _ in ()).throw(RuntimeError('both failed'))
 r = cl.post('/api/speech/transcribe', data=b'RIFF' + b'\0' * 64, headers=H)
 check('route: transcription failure -> 502 with a readable error', r.status_code == 502 and 'Could not transcribe' in r.get_json()['error'], (r.status_code, r.get_json()))
+# ---- Owner's greeting rule (19 Oct 2026): calling the name replaces "hello" ----
+import ask as _ask  # noqa: E402
+for spoken in ['subbiii', 'SUBBIIIII', 'Suubbiii!', 'subbi', 'hey subbi', 'Hi, Subbi.', 'subbi subbi', 'Sabbi', 'subi', 'okay subbiii']:
+    check(f'name only {spoken!r} -> the English greeting', _ask.name_call_greeting(spoken) == _ask.GREETING_EN, _ask.name_call_greeting(spoken))
+check('Kannada name -> the Kannada greeting', _ask.name_call_greeting('ಸುಬ್ಬಿ') == _ask.GREETING_KN and _ask.name_call_greeting('ಸುಬ್ಬಿಯೇ') == _ask.GREETING_KN)
+for notname in ['subbi what were last month sales', 'sub', 'subscribe', 'submit', 'okay', 'hello', 'sales of subbi tablets please', '', None]:
+    check(f'{notname!r} is not a name-only call', _ask.name_call_greeting(notname) is None, _ask.name_call_greeting(notname))
+check('name first + question -> addresses_by_name', _ask.addresses_by_name('subbi, last month sales?') and _ask.addresses_by_name('hey suubbiii how much did we sell'))
+check('name later in the sentence -> not a call', not _ask.addresses_by_name('last month sales subbi') and not _ask.addresses_by_name('okay'))
+check('ask() answers a bare name instantly with the greeting (no model call)', _ask.ask('subbiiiii') == _ask.GREETING_EN)
+check('the greeting rule is in the assistant identity (typed + spoken + voice prompts)', 'Ooooooo, I am here, tell me!' in _ask.identity_prompt() and 'Ooooooo, I am here, tell me!' in server.VOICE_INSTRUCTIONS)
+gate_calls.clear()
+st, body = post('subbiii', LAST)
+check('route: a lone "subbiii" is addressed, NOT a stray word, and costs no gate call',
+      body['addressed'] is True and body.get('short') is False and gate_calls == [], (body, gate_calls))
+st, body = post('subbi last month', LAST, gate_result=('NO', 0.0))
+check('route: "subbi last month" is addressed even if the chatter gate would say NO', body['addressed'] is True and body.get('unclear') is False, body)
+st, body = post('okay', LAST)
+check('route: a plain "okay" is still just a stray word (hmm)', body.get('short') is True and body['addressed'] is False, body)
+
 server._speech_gate, server._transcribe = real_gate, real_transcribe
 
 
