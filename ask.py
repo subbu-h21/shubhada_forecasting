@@ -51,6 +51,7 @@ import textwrap
 from pathlib import Path
 
 import ask_tools as T
+import mrp_basket
 import order_bridge
 
 ROOT = Path(__file__).parent
@@ -173,6 +174,15 @@ Rules:
   be a strength, like "Pan 40"), mention that reading in one line too; if
   found is false, show 'closest' and ask the owner to check the MRP on the pack,
   paise included. The MRP must be exact - a rounded MRP will not match.
+- MRP BASKET (owner's rule, 20 Oct 2026): the owner can build a bill one item at a
+  time and ask for the total at the end - "eco 65.60, 30" ... "calculate" / "lekka
+  madu". Most of those words are answered before they reach you; when one does reach
+  you, use the basket_* tools: basket_add for an item (a name or the quick code, as for
+  get_mrp_total; units = tablets/capsules, or strips), basket_remove_last,
+  basket_change_last, basket_list, basket_total, basket_clear. Speak the result's 'say'
+  line exactly - never add, multiply or total anything yourself - and give the grand
+  total only when the owner asks for it ("calculate", "total", "lekka madu"). Use
+  get_mrp_total, not the basket, for a one-off quote of several products.
 - If the question gives a phone/mobile number, call get_patient_history with
   it and list what that patient bought (with dates and amounts).
 - If a question names a PERSON by name (not a phone number) - e.g. "tell me
@@ -404,6 +414,32 @@ def addresses_by_name(text):
     return bool(toks) and _is_name(toks[0])
 
 
+def strip_name_call(text):
+    """'subbi, eco 65.60 30' -> 'eco 65.60 30': the call by name (and any 'hey/ok' before it)
+    is dropped; a message that does not start with the name is returned as it is."""
+    s = str(text or '')
+    end, called = 0, False
+    for m in re.finditer(r'[A-Za-z]+|[ಀ-೿]+', s):
+        if any(ch.isalnum() for ch in s[end:m.start()]):      # a digit or word in between: the call is over
+            break
+        tok = m.group().lower()
+        if tok in _CALL_PREFIXES or _is_name(tok):
+            end, called = m.end(), called or _is_name(tok)
+        else:
+            break
+    return s[end:].lstrip(' ,.:;-!?') if called else s
+
+
+def basket_reply(question, owner):
+    """The MRP basket's answer to the owner's words, or None if they are not a basket item
+    or command (then they go to the model as usual). Pure rules, no model call: the answer is
+    instant, free, and - being no question to the model - not counted against ask_limits.
+    `owner` is the login's session token; no token, no basket."""
+    if not owner:
+        return None
+    return mrp_basket.interpret(owner, strip_name_call(question))
+
+
 def name_call_greeting(text):
     """The greeting when the message is ONLY a call by name, else None."""
     toks = _call_tokens(text)
@@ -524,7 +560,9 @@ def _available_tools(voice=False):
     orders_* tools when dual mode is on and the order dashboard is reachable
     (they carry no patient data, so voice mode keeps them)."""
     tools = [t for t in T.TOOLS if not (voice and t['name'] in T.PII_ALLOWED_TOOLS)]
-    return tools + order_bridge.tool_specs()
+    # The basket belongs to a login, so its tools exist only for a request that has one.
+    basket = mrp_basket.tool_specs() if mrp_basket.OWNER.get() else []
+    return tools + basket + order_bridge.tool_specs()
 
 
 def _run_allowed_tool(name, args, allowed_names):
@@ -535,6 +573,8 @@ def _run_allowed_tool(name, args, allowed_names):
         return {'error': f'tool {name} is not available in this mode'}
     if order_bridge.is_order_tool(name):
         return order_bridge.run(name, args)
+    if mrp_basket.is_basket_tool(name):
+        return mrp_basket.run(name, args)
     return T.run_tool(name, args)
 
 
@@ -728,22 +768,30 @@ def usage_cost(usage):
         return 0.0
 
 
-def ask(question, verbose=False, history=None, voice=False, speak=False, cost_out=None):
+def ask(question, verbose=False, history=None, voice=False, speak=False, cost_out=None, owner=None):
     """Answer one question. `history` is earlier [{'question','answer'}] pairs
     from the same conversation (for follow-ups). `voice` = GPT-Live mode
     (short English facts for the live voice to rephrase); `speak` =
     push-to-talk mode (an answer read out word for word, in the owner's
-    language). Both withhold patient-identity tools."""
+    language). Both withhold patient-identity tools. `owner` = the login's session
+    token: it owns the MRP basket (see mrp_basket.py), which the basket_* tools work on."""
     greeting = name_call_greeting(question)
     if greeting:                       # just the name: instant, free, exact greeting
         return greeting
-    backend = os.environ.get('ASK_BACKEND', 'openrouter')
-    if backend == 'openrouter':
-        return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak,
-                                  cost_out=cost_out)
-    if backend == 'vertex':
-        return _gemini_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
-    raise RuntimeError(f"Unknown ASK_BACKEND '{backend}' - use 'openrouter' or 'vertex'.")
+    hit = basket_reply(question, owner)
+    if hit:                            # a basket item or command: answered by rules, no model call
+        return hit['say']
+    token = mrp_basket.OWNER.set(owner or None)
+    try:
+        backend = os.environ.get('ASK_BACKEND', 'openrouter')
+        if backend == 'openrouter':
+            return _openrouter_answer(question, verbose=verbose, history=history, voice=voice, speak=speak,
+                                      cost_out=cost_out)
+        if backend == 'vertex':
+            return _gemini_answer(question, verbose=verbose, history=history, voice=voice, speak=speak)
+        raise RuntimeError(f"Unknown ASK_BACKEND '{backend}' - use 'openrouter' or 'vertex'.")
+    finally:
+        mrp_basket.OWNER.reset(token)
 
 
 # ---------------------------------------------------------------------------

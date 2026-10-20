@@ -170,6 +170,29 @@
   .empty { text-align: center; padding: 40px 20px; color: var(--ink-faint); font-size: 13px; }
   .loading { text-align: center; padding: 60px 20px; color: var(--ink-faint); font-size: 13px; }
 
+  /* MRP basket */
+  .bk-help { font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; margin-bottom: 10px; }
+  .bk-help b { color: var(--ink); font-weight: 600; }
+  .bk-form { display: flex; gap: 8px; margin-bottom: 10px; }
+  .bk-form input {
+    flex: 1; min-width: 0; font-family: inherit; font-size: 16px; padding: 11px 12px;
+    border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper-raised); color: var(--ink);
+  }
+  .bk-btn {
+    flex: none; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px 14px; border-radius: 20px;
+    border: 1px solid var(--line-strong); background: var(--paper-raised); color: var(--ink);
+  }
+  .bk-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .bk-btn.rec { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .bk-btn:disabled { opacity: .5; }
+  .bk-say { display: none; font-size: 13.5px; line-height: 1.45; margin-bottom: 12px; padding: 9px 12px; border-radius: 10px; background: var(--accent-soft); }
+  .bk-say.bad { background: var(--danger-soft); color: var(--danger); }
+  .bk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  .bk-total {
+    display: none; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 14px;
+    border-radius: 10px; background: var(--accent); color: #fff; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+
   /* Bottom nav */
   nav.bottom {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
@@ -306,6 +329,7 @@
     <div class="loading" id="home-loading">Loading your data&hellip;</div>
     <div id="home-content" style="display:none">
       <button class="upload-label" style="width:100%;text-align:center;margin-bottom:14px;margin-top:0;border:none;font-family:inherit;font-size:14px" onclick="location.href='/ask'">💬 Ask the Reckoner</button>
+      <button class="upload-label" id="open-basket-btn" style="width:100%;text-align:center;margin-bottom:14px;margin-top:0;border:none;font-family:inherit;font-size:14px;background:var(--accent-soft);color:var(--accent)" onclick="showBasket()">🧺 MRP basket (lekka madu)</button>
       <div class="stat-grid" id="stat-grid"></div>
       <div class="section-title">Monthly trends vs goals</div>
       <div class="card-list" id="trend-cards" style="margin-bottom:6px"></div>
@@ -453,6 +477,31 @@
     <div class="section-title">Employee working hours (typical start/end, all history)</div>
     <div class="card-list" id="list-hours-employees"></div>
   </div>
+
+  <!-- MRP BASKET (opened from Home) -->
+  <div class="view" id="view-basket">
+    <div class="section-title" style="margin-top:0">MRP basket</div>
+    <div class="bk-help">
+      One item at a time: the <b>first 3 letters</b> of the brand, the <b>MRP on the pack</b> (with paise), then the quantity -
+      <b>eco 65.60, 30</b> (30 tablets/capsules) or <b>eco 65.60, 2 strips</b>. Then say or type <b>calculate</b>.
+      Also: <b>remove last</b>, <b>change last</b>, <b>read list</b>, <b>new bill</b>. The Ask page voice uses this same basket.
+    </div>
+    <form class="bk-form" id="bk-form" autocomplete="off">
+      <input id="bk-input" type="text" placeholder="eco 65.60, 30" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+      <button type="submit" class="bk-btn primary" id="bk-add">Add</button>
+      <button type="button" class="bk-btn" id="bk-mic" title="Tap, speak one item or command, tap again" aria-label="Speak">🎙</button>
+    </form>
+    <div class="bk-actions">
+      <button type="button" class="bk-btn primary" data-bk="total">Total</button>
+      <button type="button" class="bk-btn" data-bk="remove-last">Undo</button>
+      <button type="button" class="bk-btn" data-bk="change-last">Change last</button>
+      <button type="button" class="bk-btn" data-bk="list">Read list</button>
+      <button type="button" class="bk-btn" data-bk="clear">New bill</button>
+    </div>
+    <div class="bk-say" id="bk-say" role="status" aria-live="polite"></div>
+    <div class="card-list" id="bk-list"></div>
+    <div class="bk-total" id="bk-total"></div>
+  </div>
 </main>
 
 <nav class="bottom">
@@ -550,6 +599,7 @@ async function authFetch(url, opts) {
 function showLoginScreen(message) {
   clearTimeout(inactivityTimer);
   sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  if (typeof bkReset === 'function') bkReset();      // the next login must not see this one's basket, or keep the mic on
   document.getElementById('app-shell').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
   setLoginMessage(message);
@@ -2798,6 +2848,7 @@ document.querySelectorAll('#view-people .subtab').forEach(btn => {
 
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => {
+    bkCancelRec();      // leaving the basket panel mid-recording switches the microphone off
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     btn.classList.add('active');
@@ -2831,6 +2882,254 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
     }
   });
 });
+
+// ---------------- MRP basket ----------------
+// The running bill ("lekka madu"): one basket per login, kept on the server (mrp_basket.py) - the
+// Ask page's voice talks to the very same one. Here you type (or tap the mic and say) one item at a
+// time - "eco 65.60, 30" - then "calculate". The server works out every rupee; this panel only
+// shows what it is told and speaks the server's own line.
+const BK = { rec: null, micStarting: false, last: { items: [] }, chain: Promise.resolve() };
+
+// One request at a time, in the order you typed or tapped them - a quick second item waits its turn
+// instead of being dropped.
+function bkQueue(task) {
+  const run = BK.chain.then(task, task);
+  BK.chain = run.catch(() => {});
+  return run;
+}
+const BK_SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+const bkPlayer = new Audio();
+bkPlayer.setAttribute('playsinline', '');
+
+function bkRupees(n) {
+  return '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function bkQty(it) {
+  if (it.strip_size === 1) return `${it.units} unit${it.units === 1 ? '' : 's'}`;
+  const whole = Number.isInteger(it.strips);
+  return whole ? `${it.strips} strip${it.strips === 1 ? '' : 's'} (${it.units} tablets)` : `${it.units} tablets (${it.strips} strip)`;
+}
+
+function bkRender(out) {
+  const say = document.getElementById('bk-say');
+  if (out && out.say) {
+    say.textContent = out.say;
+    say.style.display = 'block';
+    say.classList.toggle('bad', out.ok === false);
+  }
+  const b = (out && out.basket) || BK.last;
+  BK.last = b;
+  const list = document.getElementById('bk-list');
+  list.innerHTML = b.items.length ? b.items.map(it => `
+    <div class="card">
+      <div class="row1">
+        <div class="name">${it.n}. ${escHtml(it.product)}</div>
+        <span class="pill" style="background:var(--accent-soft);color:var(--accent)">${bkRupees(it.mrp_total)}</span>
+      </div>
+      <div class="meta">${escHtml(bkQty(it))} · ${bkRupees(it.mrp_per_strip)} a strip · asked “${escHtml(it.asked)}”${
+        it.matches > 1 ? ` · match ${it.match} of ${it.matches}${it.others.length ? ` — others: ${escHtml(it.others.slice(0, 3).join(', '))}` : ''}` : ''}</div>
+    </div>`).join('')
+    : '<div class="empty">The basket is empty.<br>Type an item above, like <b>eco 65.60, 30</b>.</div>';
+  const tot = document.getElementById('bk-total');
+  if (b.totalled && b.grand_total_mrp != null) {
+    tot.style.display = 'flex';
+    tot.innerHTML = `<span>Grand total · ${b.count} item${b.count === 1 ? '' : 's'}</span><span>${bkRupees(b.grand_total_mrp)}</span>`;
+  } else {
+    tot.style.display = 'none';
+  }
+}
+
+async function bkPost(path, body) {
+  const res = await authFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) return { say: j.error || ('Server error ' + res.status), ok: false };
+  return j;
+}
+
+// Forget what is on screen and stop any recording: a logout, or leaving the panel mid-recording.
+function bkCancelRec() {
+  const r = BK.rec;
+  if (!r) return;
+  BK.rec = null;
+  clearTimeout(r.timer);
+  try { r.src.disconnect(); r.proc.disconnect(); } catch (e) { /* already disconnected */ }
+  r.stream.getTracks().forEach(t => t.stop());
+  r.ctx.close().catch(() => {});
+  const btn = document.getElementById('bk-mic');
+  btn.classList.remove('rec');
+  btn.textContent = '🎙';
+}
+function bkReset() {
+  bkCancelRec();
+  BK.last = { items: [] };
+  document.getElementById('bk-list').innerHTML = '';
+  document.getElementById('bk-say').style.display = 'none';
+  document.getElementById('bk-total').style.display = 'none';
+  document.getElementById('bk-input').value = '';
+}
+
+async function showBasket() {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-basket').classList.add('active');
+  try {
+    const res = await authFetch('/api/basket');
+    bkRender({ basket: (await res.json()).basket });
+  } catch (e) { /* a lapsed session already showed the login screen */ }
+  const inp = document.getElementById('bk-input');
+  if (inp && !('ontouchstart' in window)) inp.focus();
+}
+
+function bkSend(text, spoken) {
+  return bkQueue(async () => {
+    try {
+      const out = await bkPost('/api/basket/say', { text });
+      bkRender(out);
+      if (spoken && out.say) {
+        document.getElementById('bk-say').textContent = `Heard “${text}”. ${out.say}`;   // shown, not spoken
+        bkSpeak(out.say);
+      }
+    } catch (e) {
+      bkRender({ say: 'Could not reach the server - try again.', ok: false });
+    }
+  });
+}
+
+function bkAction(action) {
+  return bkQueue(async () => {
+    try {
+      bkRender(await bkPost('/api/basket/' + action, {}));
+    } catch (e) {
+      bkRender({ say: 'Could not reach the server - try again.', ok: false });
+    }
+  });
+}
+
+document.getElementById('bk-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const inp = document.getElementById('bk-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  await bkSend(text, false);
+});
+document.querySelectorAll('[data-bk]').forEach(b => b.addEventListener('click', () => bkAction(b.dataset.bk)));
+
+// Speak the server's own line aloud (the same cloud voice as the Ask page; the phone's voice if that fails).
+async function bkSpeak(text) {
+  try {
+    const res = await authFetch('/api/speech/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+    if (!res.ok) throw new Error('no cloud voice');
+    const url = URL.createObjectURL(await res.blob());
+    bkPlayer.onended = bkPlayer.onerror = () => URL.revokeObjectURL(url);
+    bkPlayer.src = url;
+    await bkPlayer.play();
+  } catch (e) {
+    if (window.speechSynthesis) {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = /[ಀ-೿]/.test(text) ? 'kn-IN' : 'en-IN';
+      speechSynthesis.speak(u);
+    }
+  }
+}
+
+// Tap the mic, say one item or one command, tap again: speech-to-text, then the same words as typing.
+function bkFlatten(chunks) {
+  const out = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+function bkResample(samples, from, to) {
+  if (from === to) return samples;
+  const ratio = from / to;
+  const out = new Float32Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio, i0 = Math.floor(pos), f = pos - i0;
+    out[i] = samples[i0] * (1 - f) + (samples[i0 + 1] || 0) * f;
+  }
+  return out;
+}
+function bkWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function bkMic() {
+  const btn = document.getElementById('bk-mic');
+  if (BK.rec) { return bkStopRec(); }
+  if (BK.micStarting) return;                 // a second tap while the permission prompt is still open
+  if (!(navigator.mediaDevices && window.isSecureContext)) {
+    bkRender({ say: 'The microphone works only when this page is opened on the PC itself or through an https address. You can still type.', ok: false });
+    return;
+  }
+  try { bkPlayer.src = BK_SILENT_WAV; bkPlayer.play().catch(() => {}); } catch (e) { /* lets the answer play later */ }
+  let stream;
+  BK.micStarting = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    bkRender({ say: 'The microphone was not allowed. Allow it for this page and try again.', ok: false });
+    return;
+  } finally {
+    BK.micStarting = false;
+  }
+  if (!document.getElementById('view-basket').classList.contains('active') || !getToken()) {   // left the panel / logged out meanwhile
+    stream.getTracks().forEach(t => t.stop());
+    return;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  proc.onaudioprocess = (ev) => chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+  src.connect(proc);
+  proc.connect(ctx.destination);   // silent; the processor only runs while connected
+  BK.rec = { stream, ctx, src, proc, chunks, timer: setTimeout(bkStopRec, 20000) };
+  btn.classList.add('rec');
+  btn.textContent = '■';
+  bkRender({ say: 'Listening - say one item or a command, then tap ■.', ok: true });
+}
+
+async function bkStopRec() {
+  const r = BK.rec;
+  if (!r) return;
+  BK.rec = null;
+  clearTimeout(r.timer);
+  const btn = document.getElementById('bk-mic');
+  btn.classList.remove('rec');
+  btn.textContent = '🎙';
+  try { r.src.disconnect(); r.proc.disconnect(); } catch (e) { /* already disconnected */ }
+  r.stream.getTracks().forEach(t => t.stop());
+  const rate = r.ctx.sampleRate;
+  r.ctx.close().catch(() => {});
+  const samples = bkFlatten(r.chunks);
+  if (samples.length < rate * 0.4) { bkRender({ say: 'That was too short - tap the mic and try again.', ok: false }); return; }
+  bkRender({ say: 'Understanding…', ok: true });
+  try {
+    const res = await authFetch('/api/speech/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: bkWav(bkResample(samples, rate, 16000), 16000) });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { bkRender({ say: j.error || 'Could not understand the recording.', ok: false }); return; }
+    const text = (j.text || '').trim();
+    if (!text) { bkRender({ say: "Didn't catch that - try again.", ok: false }); return; }
+    document.getElementById('bk-input').value = '';
+    await bkSend(text, true);
+  } catch (e) {
+    bkRender({ say: 'Could not reach the server - try again.', ok: false });
+  }
+}
+document.getElementById('bk-mic').addEventListener('click', bkMic);
 
 if (getToken()) {
   showApp();

@@ -29,8 +29,10 @@ manually exported and dropped in data/employee_targets/.
 import difflib
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from pathlib import Path
 
@@ -118,6 +120,8 @@ def warm_cache():
     """Compute the slow shared rollups ahead of the first question (the
     server runs this in the background), so a question doesn't wait on them."""
     _load()
+    _code_catalog()      # the MRP basket's quick-code lookups: first, they take seconds
+    _latest_mrp()
     _forecast()
     _profit()
     _over_under()
@@ -1861,13 +1865,101 @@ def _code_candidates(code, mrp):
     return hits, near
 
 
+def _mrp_exact_total(mrp_per_strip, units, strip_size):
+    """MRP per strip x units / strip size, to the paisa the way a bill rounds it (half up, in exact
+    decimal arithmetic). Python's round() on floats is half-even on binary numbers, which came out
+    1 paisa low on about 2% of real lines (41.25 x 1 / 10 = 4.125 gave 4.12; it is 4.13)."""
+    d = Decimal(repr(float(mrp_per_strip))) * Decimal(repr(float(units))) / Decimal(repr(float(strip_size)))
+    return float(d.quantize(Decimal('0.01'), ROUND_HALF_UP))
+
+
 def _mrp_line(name, mrp_per_strip, strip_size, units, date, source):
     strips = units / strip_size
     return {'product': str(name).strip(), 'mrp_per_strip': round(mrp_per_strip, 2),
             'strip_size': int(strip_size) if strip_size == int(strip_size) else strip_size,
             'mrp_per_unit': round(mrp_per_strip / strip_size, 4), 'units': units if units != int(units) else int(units),
             'strips': int(strips) if strips == int(strips) else round(strips, 2),
-            'mrp_total': round(mrp_per_strip * units / strip_size, 2), 'mrp_date': date, 'mrp_from': source}
+            'mrp_total': _mrp_exact_total(mrp_per_strip, units, strip_size), 'mrp_date': date, 'mrp_from': source}
+
+
+def _mrp_name_candidates(said, fuzzy=True):
+    """Products whose name fits what the owner said (every word of it appears in the
+    name), closest first: exact (ignoring spaces/dots), then the fewest extra letters,
+    then the most recently bought. With nothing found and fuzzy=True, the nearest
+    spelling."""
+    mrp = _latest_mrp()
+    q = _compact(said)
+    tokens = [t for t in re.split(r'[^A-Z0-9]+', said.upper()) if t]
+    if not tokens:
+        return []
+    cands = [n for n in mrp if not _compact(n).startswith('XXX')
+             and all(t in _compact(n) for t in tokens)]
+    if not cands and fuzzy:
+        close = difflib.get_close_matches(said.upper(), [str(n).upper() for n in mrp], n=1, cutoff=0.6)
+        cands = [n for n in mrp if str(n).upper() in close]
+    cands.sort(key=lambda n: (_compact(n) != q, len(_compact(n)) - len(q), [-ord(c) for c in mrp[n][2]]))
+    return cands
+
+
+def mrp_resolve(said, fuzzy=True):
+    """Which product did the owner mean by `said`? The one place that turns what was
+    typed or spoken - a NAME ("Ecosprin AV 75") or the quick code, the first 3 letters of
+    the brand + the pack's exact MRP ("ECO 65.60") - into products with their pack MRP and
+    strip size. get_mrp_total and the MRP basket (mrp_basket.py) both use it, and so can a
+    future sale-bill screen. No quantity here: pricing a quantity is _mrp_line(). fuzzy=False: a name
+    must match exactly (every word of it inside a product name) - no nearest-spelling guess.
+
+    -> {'asked', 'found', 'matched_by' ('first 3 letters + MRP', or None for a name),
+        'candidates': [{'product', 'mrp_per_strip', 'strip_size', 'date', 'source', 'by'}]
+        best first (code: most-sold first, all priced at the MRP typed; name: closest name
+        first), 'also_possible_by_name' (a whole-rupee code like "Pan 40" can also be a name
+        + strength: that reading, else None), 'closest' (code not found: nearby MRPs for
+        those letters), 'reason' (not found)}"""
+    mrp = _latest_mrp()
+    fm = _factor_map()
+    said = str(said or '').strip()
+    out = {'asked': said, 'found': False, 'matched_by': None, 'candidates': [], 'also_possible_by_name': None,
+           'closest': [], 'reason': None}
+
+    def by_name(n):
+        m, f, dt, src = mrp[n]
+        return {'product': n, 'mrp_per_strip': m, 'strip_size': f, 'date': dt, 'source': src, 'by': 'name'}
+
+    if not re.search(r'[A-Za-z0-9]', said):
+        out['reason'] = 'no product named'
+        return out
+    code_m = _CODE_RE.match(said)
+    if code_m and len(code_m.group(2).split('.')[0]) > 9:
+        out['matched_by'] = 'first 3 letters + MRP'
+        out['reason'] = 'that is not a real MRP - check the MRP on the pack (paise too)'
+        return out
+    if code_m:
+        code, typed = code_m.group(1).upper(), float(code_m.group(2))
+        out['matched_by'] = 'first 3 letters + MRP'
+        hits, near = _code_candidates(code, typed)
+        if hits:
+            out['found'] = True
+            out['candidates'] = [{'product': n, 'mrp_per_strip': typed, 'strip_size': float(fm.get(n, 1) or 1), 'date': None,
+                                  'source': 'the MRP typed (the pack)', 'by': 'code'} for n in hits]
+            if '.' not in code_m.group(2):
+                # a whole-rupee number could just as well be a strength ("Pan 40"): keep the by-name reading too
+                alt = [n for n in _mrp_name_candidates(said, fuzzy=False) if str(n).strip() != str(hits[0]).strip()]
+                if alt:
+                    out['also_possible_by_name'] = by_name(alt[0])
+            return out
+        if '.' in code_m.group(2) or not _mrp_name_candidates(said, fuzzy=False):
+            out['reason'] = f'no product starting {code} has had the MRP {typed:.2f} - check the MRP on the pack (paise too)'
+            out['closest'] = near
+            return out
+        # a whole number that is not a known MRP for those letters: read it as a name + strength below
+        out['matched_by'] = None
+    cands = _mrp_name_candidates(said, fuzzy=fuzzy)
+    if not cands:
+        out['reason'] = 'no product with that name - try search_products'
+        return out
+    out['found'] = True
+    out['candidates'] = [by_name(n) for n in cands]
+    return out
 
 
 def get_mrp_total(items):
@@ -1883,69 +1975,41 @@ def get_mrp_total(items):
     by the units is all done here - read the totals out exactly, never recompute
     them. When several products have a similar name, the closest name is used
     and the others are listed in 'similar'."""
-    mrp = _latest_mrp()
-    fm = _factor_map()
     rows, grand = [], 0.0
-
-    def name_candidates(said, fuzzy=True):
-        q = _compact(said)
-        tokens = [t for t in re.split(r'[^A-Z0-9]+', said.upper()) if t]
-        cands = [n for n in mrp if not _compact(n).startswith('XXX')
-                 and all(t in _compact(n) for t in tokens)]
-        if not cands and fuzzy:
-            close = difflib.get_close_matches(said.upper(), [str(n).upper() for n in mrp], n=1, cutoff=0.6)
-            cands = [n for n in mrp if str(n).upper() in close]
-        # closest name first: exact (ignoring spaces/dots), then the fewest
-        # extra letters, then the most recently bought
-        cands.sort(key=lambda n: (_compact(n) != q, len(_compact(n)) - len(q), [-ord(c) for c in mrp[n][2]]))
-        return cands
-
-    def line(n, units):
-        m, f, dt, src = mrp[n]
-        return _mrp_line(n, m, f, units, dt, src)
-
-    def f_of(n):
-        return float(fm.get(n, 1) or 1)
-
     brief = ('product', 'mrp_per_strip', 'strip_size', 'mrp_total')
+
+    def priced(c, units):
+        return _mrp_line(c['product'], c['mrp_per_strip'], c['strip_size'], units, c['date'], c['source'])
+
     for it in items or []:
         said = str((it or {}).get('product', '')).strip()
         try:
             units = float((it or {}).get('units'))
+            if not math.isfinite(units):
+                raise ValueError(units)
         except (TypeError, ValueError):
             rows.append({'asked': said, 'found': False, 'reason': 'number of tablets/capsules missing'})
             continue
-        code_m = _CODE_RE.match(said)
-        if code_m:
-            code, typed = code_m.group(1).upper(), float(code_m.group(2))
-            hits, near = _code_candidates(code, typed)
-            if hits:
-                best = _mrp_line(hits[0], typed, f_of(hits[0]), units, None, 'the MRP typed (the pack)')
-                best.update({'asked': said, 'found': True, 'matched_by': 'first 3 letters + MRP', 'candidates': len(hits),
-                             'similar': [{k: v for k, v in _mrp_line(n, typed, f_of(n), units, None, '').items() if k in brief}
-                                         for n in hits[1:5]]})
-                if '.' not in code_m.group(2):
-                    # a whole-rupee number could just as well be a strength ("Pan 40"): show the by-name reading too
-                    alt = [n for n in name_candidates(said, fuzzy=False) if str(n).strip() != str(hits[0]).strip()]
-                    if alt:
-                        best['also_possible_by_name'] = {k: v for k, v in line(alt[0], units).items() if k in brief}
-                grand += best['mrp_total']
-                rows.append(best)
-                continue
-            if '.' in code_m.group(2) or not name_candidates(said, fuzzy=False):
-                rows.append({'asked': said, 'found': False, 'matched_by': 'first 3 letters + MRP',
-                             'reason': f'no product starting {code} has had the MRP {typed:.2f} - check the MRP on the pack (paise too)',
-                             'closest': near})
-                continue
-            # a whole number that is not a known MRP for those letters: read it as a name + strength below
-        cands = name_candidates(said)
-        if not cands:
-            rows.append({'asked': said, 'found': False, 'reason': 'no product with that name - try search_products'})
+        r = mrp_resolve(said)
+        if not r['found']:
+            row = {'asked': said, 'found': False}
+            if r['matched_by']:
+                row['matched_by'] = r['matched_by']
+            row['reason'] = r['reason']
+            if r['matched_by']:
+                row['closest'] = r['closest']
+            rows.append(row)
             continue
-        best = line(cands[0], units)
+        cands = r['candidates']
+        best = priced(cands[0], units)
         best['asked'] = said
         best['found'] = True
-        best['similar'] = [{k: v for k, v in line(n, units).items() if k in brief} for n in cands[1:5]]
+        if r['matched_by']:
+            best['matched_by'] = r['matched_by']
+            best['candidates'] = len(cands)
+        best['similar'] = [{k: v for k, v in priced(c, units).items() if k in brief} for c in cands[1:5]]
+        if r['also_possible_by_name']:
+            best['also_possible_by_name'] = {k: v for k, v in priced(r['also_possible_by_name'], units).items() if k in brief}
         grand += best['mrp_total']
         rows.append(best)
     return {'items': rows, 'grand_total_mrp': round(grand, 2),

@@ -33,6 +33,7 @@ from werkzeug.utils import secure_filename
 
 import ask as ask_mod
 import ask_limits
+import mrp_basket
 import run_reckoner as rk
 import salary as salary_mod
 import vault
@@ -112,6 +113,7 @@ def _touch_session(token):
             return False
         if time.time() - sess['last_active'] > SESSION_TIMEOUT_SECONDS:
             del _sessions[token]
+            mrp_basket.drop(token)      # an expired login takes its MRP basket with it
             return False
         sess['last_active'] = time.time()
         return True
@@ -120,6 +122,7 @@ def _touch_session(token):
 def _drop_session(token):
     with _sessions_lock:
         _sessions.pop(token, None)
+    mrp_basket.drop(token)              # ...and so does a logout
 
 # compute_all() takes real time (branch-wise forecast alone runs the
 # per-product forecast 3x). Recomputing it on every page load makes the
@@ -1104,6 +1107,13 @@ def api_ask():
     question = (body.get('question') or '').strip()[:4000]
     if not question:
         return jsonify({'error': 'question is required'}), 400
+    token = request.headers.get('X-Session-Token')
+    # An MRP-basket item or command ("eco 65.60, 30", "calculate", "lekka madu") is answered by
+    # rules in mrp_basket.py: instant, free, and not a "question" for the daily/burst cap - a
+    # 15-item bill would otherwise use up the 20-per-10-minutes cap on its own.
+    hit = ask_mod.basket_reply(question, token)
+    if hit:
+        return jsonify({'answer': hit['say'], 'cost': 0, 'basket': hit['basket']})
     try:
         ask_limits.check()   # daily + burst cap; this page is also the front door for order questions
     except ask_limits.LimitReached as e:
@@ -1118,7 +1128,7 @@ def api_ask():
     speak = body.get('speak') is True  # push-to-talk: answer is read aloud as-is
     cost = {}  # filled with OpenRouter's reported charge for this answer (USD)
     try:
-        answer = ask_mod.ask(question, history=history, voice=voice, speak=speak, cost_out=cost)
+        answer = ask_mod.ask(question, history=history, voice=voice, speak=speak, cost_out=cost, owner=token)
     except Exception as e:
         # Missing/bad API key, no network, model provider error, etc. - not a
         # bug in this server, so log it quietly and hand the reason to the
@@ -1126,6 +1136,57 @@ def api_ask():
         logger.warning('Ask failed for "%s": %s: %s', question, type(e).__name__, e)
         return jsonify({'error': f'Could not reach the model ({type(e).__name__}: {e}).'}), 502
     return jsonify({'answer': answer, 'cost': cost.get('usd')})
+
+
+# --- MRP basket (mrp_basket.py) ------------------------------------------------------
+# The Ready Reckoner's basket panel. One basket per login session token - the token is
+# the only key, so there is no way to name (or leak) another login's basket. The Ask
+# page's voice reaches the same basket through /api/ask (ask.basket_reply).
+def _json_body():
+    """The request's JSON as a dict - anything else (a list, a string, junk) counts as empty."""
+    body = request.get_json(force=True, silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+@app.route('/api/basket')
+@requires_auth
+def api_basket():
+    return jsonify({'basket': mrp_basket.snapshot(request.headers.get('X-Session-Token'))})
+
+
+@app.route('/api/basket/say', methods=['POST'])
+@requires_auth
+def api_basket_say():
+    """Typed (or spoken, once transcribed) basket words: "eco 65.60, 30", "calculate", "undo"..."""
+    token = request.headers.get('X-Session-Token')
+    body = _json_body()
+    text = str(body.get('text') or '').strip()[:300]
+    lang = body.get('lang') if body.get('lang') in ('en', 'kn') else None
+    hit = mrp_basket.interpret(token, ask_mod.strip_name_call(text), lang=lang, explicit_add=True) if text else None
+    if hit is None:
+        lang = mrp_basket.detect_lang(text) or lang or mrp_basket.snapshot(token)['lang']
+        return jsonify({'ok': False, 'action': 'help', 'say': mrp_basket.MSG[lang]['help'], 'basket': mrp_basket.snapshot(token)})
+    return jsonify(hit)
+
+
+@app.route('/api/basket/add', methods=['POST'])
+@requires_auth
+def api_basket_add():
+    body = _json_body()
+    lang = body.get('lang') if body.get('lang') in ('en', 'kn') else None
+    return jsonify(mrp_basket.basket_add(request.headers.get('X-Session-Token'), str(body.get('product') or '')[:200],
+                                         units=body.get('units'), strips=body.get('strips'), lang=lang))
+
+
+@app.route('/api/basket/<action>', methods=['POST'])
+@requires_auth
+def api_basket_action(action):
+    fn = {'remove-last': mrp_basket.basket_remove_last, 'change-last': mrp_basket.basket_change_last,
+          'total': mrp_basket.basket_total, 'list': mrp_basket.basket_list, 'clear': mrp_basket.basket_clear}.get(action)
+    if fn is None:
+        return jsonify({'error': 'unknown basket action'}), 404
+    body = _json_body()
+    return jsonify(fn(request.headers.get('X-Session-Token'), lang=body.get('lang') if body.get('lang') in ('en', 'kn') else None))
 
 
 # The assistant's slow shared rollups (next-month forecast ~80s, profit,
@@ -1453,7 +1514,16 @@ def api_speech_transcribe():
         # The page sends the assistant's last answer (URL-encoded, as headers
         # can't carry Kannada) so a follow-up like "and last month?" passes.
         last_answer = urllib.parse.unquote(request.headers.get('X-Voice-Context', ''))[:600]
-        if ask_mod.addresses_by_name(text):
+        # An MRP-basket item or command ("eco 65.60, 30", "calculate", "lekka madu", "undo"): meant
+        # for the assistant even when it is only one or two words and no business question, so it
+        # skips the stray-word and chatter filters - but not the echo guard (the phone hearing its
+        # own "Removed ... 3 items left").
+        basket_kind = None if _echo_of_last_answer(text, last_answer) else \
+            mrp_basket.classify(request.headers.get('X-Session-Token'), ask_mod.strip_name_call(text))
+        if basket_kind:
+            if basket_kind == 'unclear':           # a half-said command: "please repeat"
+                addressed, unclear = False, True
+        elif ask_mod.addresses_by_name(text):
             # Called by name ("subbiii", "subbi, last month?"): meant for the assistant, never
             # a stray word and never chatter. A bare name needs no check at all (it gets the
             # greeting); a name followed by words is only checked for being an unfinished
