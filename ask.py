@@ -53,6 +53,7 @@ from pathlib import Path
 import ask_tools as T
 import mrp_basket
 import order_bridge
+import rack_bridge
 
 ROOT = Path(__file__).parent
 
@@ -507,6 +508,28 @@ question is about; the owner never has to say which.
   now, and answer whatever part you can from sales history.
 """
 
+# Rack & bin lookups (see rack_bridge.py): added to the system prompt ONLY while the rack tools are configured,
+# so with RACK_ASK_PIN unset the prompt - and every answer - is exactly what it was before.
+RACK_PROMPT = """
+
+RACK & BIN - tools whose names start with rack_ read the Rack Management app (read-only): where each
+product is kept in each shop, and how many bins and racks there are.
+- The app holds a PLAN (built from sales history) and a record of what staff have actually PLACED so far.
+  Never mix them up: say "planned for ..." unless placed_by_staff is true, and when it is false say that
+  staff have not recorded placing it yet (the roll-out is still going on).
+- Places: a BIN is a plastic bin for slow sellers ("ALLO A-BIN3" = Allopathic, letter A, bin 3; AYUR =
+  Ayurvedic). A RACK is for fast sellers ("A-RACK2"; LIQ / TOP / RESP / OTH racks hold syrups, creams,
+  respiratory and others; H1-RACK = Schedule H1, supervised - no sale without a valid prescription). An
+  EXTRA rack is a fast mover's second home. PARK codes are only a virtual holding list for products with
+  no sale - not a physical place.
+- "Plastic box" or "bin" in a question means a plastic bin. For "how many bins / racks in total" use
+  rack_counts and give each branch and the total; do not add the virtual parking bins to the physical
+  bins (mention them separately if useful). Herur and Sidhapur have no rack plan yet.
+- "Which rack / bin is X in", "where is X kept" -> rack_find_product (name the branch; if the owner named
+  none, give both). "What is in bin A-3" -> rack_contents. Say places exactly as the tool gives them -
+  never invent a place or a count.
+"""
+
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
 MAX_HISTORY_TURNS = 4  # earlier question/answer pairs kept for follow-up questions
 
@@ -537,6 +560,8 @@ def _build_system_prompt(voice=False, speak=False):
     rather than trusting an old note at face value. Voice / push-to-talk mode
     appends its prompt last, so its formatting rules win."""
     prompt = identity_prompt() + SYSTEM_PROMPT + _date_context()
+    if rack_bridge.tool_specs():
+        prompt += RACK_PROMPT
     if order_bridge.tool_specs():
         prompt += DUAL_PROMPT
         facts = order_bridge.context()
@@ -562,7 +587,7 @@ def _available_tools(voice=False):
     tools = [t for t in T.TOOLS if not (voice and t['name'] in T.PII_ALLOWED_TOOLS)]
     # The basket belongs to a login, so its tools exist only for a request that has one.
     basket = mrp_basket.tool_specs() if mrp_basket.OWNER.get() else []
-    return tools + basket + order_bridge.tool_specs()
+    return tools + basket + order_bridge.tool_specs() + rack_bridge.tool_specs()
 
 
 def _run_allowed_tool(name, args, allowed_names):
@@ -575,6 +600,8 @@ def _run_allowed_tool(name, args, allowed_names):
         return order_bridge.run(name, args)
     if mrp_basket.is_basket_tool(name):
         return mrp_basket.run(name, args)
+    if rack_bridge.is_rack_tool(name):
+        return rack_bridge.run(name, args)
     return T.run_tool(name, args)
 
 

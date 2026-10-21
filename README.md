@@ -235,6 +235,40 @@ sales questions only and tells you order tracking is offline if you ask about or
 - **Tests.** `venv/Scripts/python.exe test_dual_ask.py` (offline - a stub order dashboard
   and a scripted model).
 
+## Rack & bin questions on the Ask page
+
+The Ask page can also answer from **Rack Management** (the separate rack app on port
+8765): "which rack or bin is Ecosprin AV 75 in?", "how many plastic bins do we have?",
+"what is in bin A-3?", "what is on the H1 rack?". Three tools in `rack_bridge.py`
+(`rack_find_product`, `rack_counts`, `rack_contents`) read that app's own Find, branch
+and Rack & Bin plan screens, so an answer is exactly what staff see there - none of its
+rules are copied here.
+
+To switch it on:
+
+1. In Rack Management: **Staff** > add a staff member (for example "Reckoner Ask") >
+   **Set PIN**.
+2. Put that PIN in this project's `.env`:
+
+        RACK_ASK_PIN=<that PIN>
+
+   (`RACK_ASK_URL` is only needed if the rack app is not at `http://127.0.0.1:8765`.)
+3. Restart the reckoner server.
+
+Without `RACK_ASK_PIN` nothing changes. If the rack app is off the page tells you it is
+not reachable and keeps answering everything else.
+
+- **Read-only, in code.** The only requests ever sent are the rack app's read screens
+  plus the login and the branch switch; assigning, moving, renaming, the staff list and
+  the audit log are refused before anything is sent. The PIN is never logged or shown.
+  It is a normal staff PIN, so keep it in `.env` (git-ignored) and nowhere else.
+- **Plan vs placed.** The rack app holds a plan (where each product should live) and what
+  staff have actually placed so far. Answers say "planned for ..." unless staff have
+  recorded placing it, and a `PARK ...` code is only a virtual holding list.
+- **Branches.** Shivaji Chowk and Hospet Road have a plan; Herur and Sidhapur do not yet.
+- **Tests.** `venv/Scripts/python.exe test_rack_bridge.py` (offline - a fake rack app
+  inside the test, no live data).
+
 ## Backups & recovery
 
 Every time `run_reckoner.py` (directly, via a `.bat` file, or through a mobile
