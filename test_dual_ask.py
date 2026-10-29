@@ -128,6 +128,26 @@ check('order tool description is marked and keeps its schema', spec['description
 prompt = ask._build_system_prompt()
 check('dual mode on: prompt has the DUAL MODE section', 'DUAL MODE' in prompt and 'orders_' in prompt)
 check("dual mode on: prompt carries the order system's own facts", 'OVERDUE means placed and late' in prompt)
+# the distributors' scheme list: its prompt section exists only while the order dashboard offers the tool
+check('no scheme tool offered: no SCHEME LIST section (an order dashboard that has not loaded it changes nothing)',
+      'SCHEME LIST' not in prompt and ask.SCHEME_TOOL not in {t['name'] for t in tools})
+STUB_TOOLS.append({'name': 'find_product_scheme', 'description': 'The product scheme list.',
+                   'parameters': {'type': 'object', 'properties': {'product': {'type': 'string'}}, 'required': ['product']}})
+order_bridge.reset_cache()
+scheme_prompt = ask._build_system_prompt()
+check('scheme tool offered: it appears as orders_find_product_scheme', ask.SCHEME_TOOL == 'orders_find_product_scheme'
+      and ask.SCHEME_TOOL in {t['name'] for t in ask._available_tools()})
+check('scheme tool offered: the prompt sends "what is the scheme of X" to it, not to purchase history',
+      'SCHEME LIST' in scheme_prompt and 'orders_find_product_scheme' in scheme_prompt and 'what is the scheme of x' in scheme_prompt.lower()
+      and 'Do not answer these from purchase history' in scheme_prompt)
+check('scheme tool offered: what the shop GOT on bills stays with the purchase tools', 'stay with the purchase tools' in scheme_prompt)
+STUB['calls'].clear()
+res = ask._run_allowed_tool('orders_find_product_scheme', {'product': 'dolo 650'}, {t['name'] for t in ask._available_tools()})
+check('a scheme call reaches the bridge with the PREFIX STRIPPED', STUB['calls'] == [{'name': 'find_product_scheme', 'args': {'product': 'dolo 650'}}], STUB['calls'])
+STUB_TOOLS.pop()
+order_bridge.reset_cache()
+ask._available_tools()          # refill the cache so the cache check below measures only its own calls
+STUB['calls'].clear()
 check('the original reckoner prompt is untouched, right after the identity block', prompt.startswith(ask.identity_prompt() + ask.SYSTEM_PROMPT))
 before = STUB['tools_hits']
 for _ in range(5):

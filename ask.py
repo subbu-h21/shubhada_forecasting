@@ -1,5 +1,5 @@
 r"""
-Ask the Reckoner - a conversational BI over your pharmacy data
+Ask Subbii Shubhada - a conversational BI over your pharmacy data
 ==============================================================
 Type a question in plain English; a model answers by calling the local report
 tools in ask_tools.py - it never touches the raw tables directly. Product,
@@ -386,6 +386,10 @@ Who you are and who you work for (always remember this):
   spoke or wrote Kannada: "ಓಓಓಓಓ, ನಾನು ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!"). If the call is only your
   name, that line is the whole answer. If a question follows the name, give that
   line first and then answer the question.
+  That line is ONLY for a message that contains your name. A plain "hello", "hi",
+  "hey" or "good morning" WITHOUT your name is not a call by name (owner, 29 Oct
+  2026): never answer it with that line - greet back normally and briefly, for
+  example "Hello! What would you like to know?", in the language they used.
 """
 
 # --- Being called by name (owner's greeting rule) -----------------------------
@@ -508,6 +512,29 @@ question is about; the owner never has to say which.
   now, and answer whatever part you can from sales history.
 """
 
+# The distributors' scheme list (Project 7's product scheme list, through the order bridge): added ONLY while the
+# tool orders_find_product_scheme is actually offered, so an order dashboard that has not loaded it changes nothing.
+SCHEME_TOOL = order_bridge.PREFIX + 'find_product_scheme'
+SCHEME_PROMPT = """
+
+SCHEME LIST - the tool orders_find_product_scheme reads the distributors' scheme list: every product a
+distributor is listing WITH a scheme right now, per distributor ("5+1" = buy 5, get 1 free; "3+1,5+2" = quantity
+slabs), with their pack and last-seen prices.
+- "What is the scheme of X", "any offer on X", "who gives the best scheme on X", "what scheme does DRK give on X":
+  call orders_find_product_scheme with the distinctive words of the product (and the distributor, if one was named).
+  Do not answer these from purchase history - that only shows what past bills gave.
+- Give each distributor's scheme as the tool gives it and say the list was refreshed on list_refreshed. Say the
+  source is "the distributors' scheme list" - never "order tracking" for these figures. Quote a pack only when it
+  reads like a real pack ("15'S", "30 IN TABLET", "60ML"); the distributors' own pack text is sometimes
+  meaningless ("0 IN PC", "1 IN TABLET") - then leave the pack out. A listing marked stale was not seen for over a
+  month. If products_found is more than the few shown, list the ones shown and ask which is meant;
+  similar_names_not_shown are look-alike products (DOLOPAR for DOLO) - mention them in one line only if useful.
+- If nothing is found, say no distributor is listing a scheme on that product right now (the list only holds
+  products with a scheme) - and offer to try the brand word alone before giving up.
+- Questions about what scheme the shop actually GOT on its purchases (supplier bills, scheme gaps) are NOT this
+  list: they stay with the purchase tools.
+"""
+
 # Rack & bin lookups (see rack_bridge.py): added to the system prompt ONLY while the rack tools are configured,
 # so with RACK_ASK_PIN unset the prompt - and every answer - is exactly what it was before.
 RACK_PROMPT = """
@@ -568,6 +595,8 @@ def _build_system_prompt(voice=False, speak=False):
         if facts:
             prompt += ('\nFacts about the order-tracking system (use them to read the orders_ '
                        'results correctly):\n' + facts)
+        if any(t['name'] == SCHEME_TOOL for t in order_bridge.tool_specs()):
+            prompt += SCHEME_PROMPT
     notes = T.get_notes(n=30).get('notes') or []
     if notes:
         notes_text = '\n'.join(f"- [{n['timestamp']}] {n['note']}" for n in notes)

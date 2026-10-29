@@ -151,8 +151,8 @@ any it can't match are listed there for you to link once.
 
 ## Voice (trial)
 
-The Ask page has two voice buttons. Both answer from the same Ask the
-Reckoner assistant as typed questions, with patient lookups switched off.
+The Ask page has two voice buttons. Both answer from the same Ask
+Subbii Shubhada assistant as typed questions, with patient lookups switched off.
 
 ### 🗣 Hands-free conversation (the cheaper alternative to 🎤)
 
@@ -182,6 +182,27 @@ utterance. Uses the existing `OPENROUTER_API_KEY`:
   `.env`. This OpenRouter account has zero-data-retention on, which blocks
   some models (e.g. Gemini 3.8 TTS) - pick ones it allows.
 
+**Free reading-out.** `SPEECH_TTS_MODEL=phone` (also `device`, `browser`, `free`,
+`off`, `none`) calls no cloud voice at all: the page reads answers with the
+device's own voice (Kannada text in `kn-IN`, otherwise `en-IN`). Android's
+Google voice reads Kannada; this PC's Windows voices do not. Restart the server
+after changing it.
+
+**Free listening (optional, per device).** The "Listening" menu above the
+question box chooses how 🗣 listens: *Best quality* (the paid speech-to-text
+above - the default) or *Free* in English, Kannada (ಕನ್ನಡ) or Hindi. Free uses
+the browser's own speech recognition (`SpeechRecognition`: Chrome or Edge, also
+Chrome on Android; https or localhost; needs the internet - the browser sends
+the audio to its own speech service, Google's for Chrome, not to OpenRouter), so
+there is no speech-to-text charge. It listens in one language at a time, so
+Kannada mixed with English is better left to *Best quality*. The words go to
+`/api/speech/heard`, which does the same "said to me?" screening as
+`/api/speech/transcribe` (echo guard, stray words, name call, basket commands),
+then `/api/ask` as usual. Same rules as the paid listening: a word or two over a
+playing answer is ignored; a real sentence (4+ words) interrupts it. The menu
+choice is remembered in the browser (`ask_listen_mode`); it is hidden where the
+browser has no speech recognition (Firefox) and the paid listening is used.
+
 ### 🎤 Live conversation (GPT-Live-1) - optional, off by default
 
 Controlled by `VOICE_LIVE_ENABLED` in `.env` (`1` = show the 🎤 button,
@@ -190,7 +211,7 @@ after changing it.
 
 Ask your question out loud and hear the answer.
 OpenAI's GPT-Live-1 does the talking; every business question it hears is
-handed to the same Ask the Reckoner assistant as a typed question, so the
+handed to the same Ask Subbii Shubhada assistant as a typed question, so the
 numbers are identical. Patient lookups are switched off in voice mode.
 
 - Needs `OPENAI_API_KEY=...` in `.env` (the key stays on the PC).
@@ -232,6 +253,13 @@ sales questions only and tells you order tracking is offline if you ask about or
   (default 200 a day) and `ASK_PER_10_MIN` (default 20); `0` turns a limit off. It exists
   because every question can trigger several paid model calls, and a question asked here
   never passes the order dashboard's own spending cap.
+- **Scheme list.** "What is the scheme of Dolo 650?", "who gives the best scheme on X?",
+  "what does DRK give on X?" are answered from the order project's **product scheme list**
+  (what each distributor is listing with a scheme right now, e.g. `5+1`), through the same
+  bridge: the tool is `orders_find_product_scheme`. It is not the scheme on past purchase
+  bills (those stay with the purchase tools). A product missing from the list simply has no
+  scheme listed by any distributor. The list is refreshed on the order side, and the order
+  backend has to be restarted once to load the tool (it restarts itself every morning).
 - **Tests.** `venv/Scripts/python.exe test_dual_ask.py` (offline - a stub order dashboard
   and a scripted model).
 

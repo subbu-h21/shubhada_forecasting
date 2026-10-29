@@ -1236,8 +1236,8 @@ VOICE_MAX_MINUTES = 10  # the page ends a session after this, to cap spend
 VOICE_ALLOWED_CLIENT_EVENTS = ['session.commentary.append', 'session.thinking.append', 'session.close']
 VOICE_INSTRUCTIONS = """\
 # Personality
-Your name is suubbiii (also called subbi). You are the voice of "Ask the
-Reckoner", the business analyst for Shubhada Pharma in Karnataka, India:
+Your name is suubbiii (also called subbi). You are the voice of "Ask
+Subbii Shubhada", the business analyst for Shubhada Pharma in Karnataka, India:
 retail branches in Sirsi (Shivaji Chowk and Hospet Road), a small Herur
 counter, and a B2B / wholesale channel. You do not know who is speaking
 unless they say so - never assume. Be warm, calm and brief, like a trusted
@@ -1251,7 +1251,9 @@ unsure, use English. Say money in rupees, rounded, using Indian number words
 # Greeting
 When the user calls you by name ("subbi", "suubbiii") that is their hello: do
 not say hello. Say "Ooooooo, I am here, tell me!" (in Kannada: "ಓಓಓಓಓ, ನಾನು
-ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!") and wait for the question.
+ಇಲ್ಲಿದ್ದೇನೆ, ಹೇಳಿ!") and wait for the question. That line is only for a call by
+name: a plain "hello" or "hi" without your name gets a normal short greeting back
+("Hello! What would you like to know?"), never that line.
 
 # Backchannel policy
 While the user is talking, stay quiet except for a very short acknowledgement
@@ -1509,6 +1511,14 @@ def api_speech_transcribe():
     except Exception as e:
         logger.warning('Speech-to-text failed: %s: %s', type(e).__name__, e)
         return jsonify({'error': f'Could not transcribe ({type(e).__name__}).'}), 502
+    return jsonify(_screen_speech(text, cost))
+
+
+def _screen_speech(text, cost):
+    """What the page needs to know about a heard utterance: was it said TO the assistant (and not an echo of its
+    own answer, a stray word or two, or an unfinished fragment). Shared by the recording route above and the
+    text route below, so a question screens the same whichever way it was heard. `cost` is what hearing it
+    already cost; the screening adds to it. Only screens when the page asks (?gate=1)."""
     addressed, echo, short, unclear = True, False, False, False
     if request.args.get('gate') == '1' and text:
         # The page sends the assistant's last answer (URL-encoded, as headers
@@ -1554,7 +1564,23 @@ def api_speech_transcribe():
                 unclear = verdict == 'UNCLEAR'
             except Exception as e:
                 logger.warning('Speech check failed (treating as a question): %s: %s', type(e).__name__, e)
-    return jsonify({'text': text, 'addressed': addressed, 'echo': echo, 'short': short, 'unclear': unclear, 'cost': cost})
+    return {'text': text, 'addressed': addressed, 'echo': echo, 'short': short, 'unclear': unclear, 'cost': cost}
+
+
+# Free listening (optional, chosen on the Ask page): the browser's own speech recognition has already turned the
+# speech into text, so there is no speech-to-text charge - only the same screening as above.
+SPEECH_MAX_HEARD_CHARS = 600
+
+
+@app.route('/api/speech/heard', methods=['POST'])
+@requires_auth
+def api_speech_heard():
+    body = request.get_json(force=True, silent=True) or {}
+    text = ' '.join(str(body.get('text') or '').split())[:SPEECH_MAX_HEARD_CHARS]
+    if not text:
+        return jsonify({'error': 'text is required'}), 400
+    warm_ask_cache_in_background()
+    return jsonify(_screen_speech(text, 0.0))
 
 
 def _synthesize(text):

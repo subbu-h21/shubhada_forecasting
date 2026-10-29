@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault('OPENROUTER_API_KEY', 'sk-test-not-real')
 os.environ['OPENROUTER_MODEL_FAST'] = 'fake/fast-model'
 os.environ['OPENROUTER_MODEL_REASONING'] = 'fake/reasoning-model'
+os.environ['SPEECH_TTS_MODEL'] = 'google/gemini-3.8-flash-lite-tts'      # the cloud voice is what these tests exercise, whatever .env says
+os.environ['SPEECH_TTS_FALLBACK_MODEL'] = 'google/gemini-3.8-flash-tts'
 for v in ('ORDER_ASK_URL', 'ORDER_ASK_KEY'):
     os.environ.pop(v, None)
 
@@ -170,6 +172,8 @@ check('name first + question -> addresses_by_name', _ask.addresses_by_name('subb
 check('name later in the sentence -> not a call', not _ask.addresses_by_name('last month sales subbi') and not _ask.addresses_by_name('okay'))
 check('ask() answers a bare name instantly with the greeting (no model call)', _ask.ask('subbiiiii') == _ask.GREETING_EN)
 check('the greeting rule is in the assistant identity (typed + spoken + voice prompts)', 'Ooooooo, I am here, tell me!' in _ask.identity_prompt() and 'Ooooooo, I am here, tell me!' in server.VOICE_INSTRUCTIONS)
+check('a plain hello/hi without the name is NOT answered with the greeting line (typed + voice prompts say so)',
+      'ONLY for a message that contains your name' in _ask.identity_prompt() and 'only for a call by' in server.VOICE_INSTRUCTIONS and 'never that line' in server.VOICE_INSTRUCTIONS)
 gate_calls.clear()
 st, body = post('subbiii', LAST)
 check('route: a lone "subbiii" is addressed, NOT a stray word, and costs no gate call',
@@ -178,6 +182,54 @@ st, body = post('subbi last month', LAST, gate_result=('NO', 0.0))
 check('route: "subbi last month" is addressed even if the chatter gate would say NO', body['addressed'] is True and body.get('unclear') is False, body)
 st, body = post('okay', LAST)
 check('route: a plain "okay" is still just a stray word (hmm)', body.get('short') is True and body['addressed'] is False, body)
+
+# --- 3b. free listening: the browser already has the words, /api/speech/heard only screens them ------------
+def heard(text, last_answer='', gate_result=('YES', 0.0), gate='1', raw=None):
+    import urllib.parse
+    server._speech_gate = lambda t, la: (gate_calls.append((t, la)), gate_result)[1]
+    h = {'X-Session-Token': tok, 'Content-Type': 'application/json', 'X-Voice-Context': urllib.parse.quote(last_answer)}
+    r = cl.post('/api/speech/heard' + (f'?gate={gate}' if gate else ''), data=json.dumps({'text': text}) if raw is None else raw, headers=h)
+    return r.status_code, r.get_json()
+
+
+gate_calls.clear()
+st, body = heard('where is my dolo order', LAST)
+check('heard: a real question is screened by the same gate and passes', st == 200 and body['addressed'] is True and len(gate_calls) == 1, (st, body, gate_calls))
+check('heard: it costs nothing to hear (no speech-to-text charge) - cost 0 plus the gate', body['cost'] == 0.0 and body['text'] == 'where is my dolo order', body)
+check('heard: the gate receives the last answer, so a follow-up passes', gate_calls and gate_calls[0][1] == LAST)
+gate_calls.clear()
+st, body = heard('the total sales revenue for last month was about one crore thirty lakh rupees', LAST)
+check('heard: the phone hearing its own answer -> echo, no gate call', body['addressed'] is False and body.get('echo') is True and gate_calls == [], (body, gate_calls))
+st, body = heard('haan haan', LAST)
+check('heard: one or two stray words -> short, no gate call', body.get('short') is True and body['addressed'] is False and gate_calls == [], (body, gate_calls))
+st, body = heard('two strips of dolo please', LAST, gate_result=('NO', 0.0))
+check('heard: counter chatter the gate rejects -> not addressed', body['addressed'] is False and body.get('echo') is False, body)
+st, body = heard('subbi the thing about', LAST, gate_result=('UNCLEAR', 0.0))
+check('heard: an unfinished fragment -> unclear ("please repeat your question")', body.get('unclear') is True and body['addressed'] is False, body)
+gate_calls.clear()
+st, body = heard('subbiii', LAST)
+check('heard: a lone "subbiii" is addressed and costs no gate call', body['addressed'] is True and body.get('short') is False and gate_calls == [], (body, gate_calls))
+st, body = heard('ಸುಬ್ಬಿ', LAST)
+check('heard: the name written in Kannada (what Kannada recognition returns) is addressed too', body['addressed'] is True and gate_calls == [], (body, gate_calls))
+st, body = heard('where is my dolo order', LAST, gate=None)
+check('heard: without gate=1 nothing is screened', body['addressed'] is True)
+st, body = heard('', LAST)
+check('heard: no text -> 400', st == 400, (st, body))
+st, body = heard('', LAST, raw=b'not json')
+check('heard: a body that is not JSON -> 400, not a crash', st == 400, (st, body))
+st, body = heard('word ' * 400, LAST)
+check('heard: a runaway transcript is cut to the limit', len(body['text']) <= server.SPEECH_MAX_HEARD_CHARS, len(body['text']))
+st, body = heard('  where   is\n my dolo   order ', LAST)
+check('heard: stray spaces and line breaks are tidied', body['text'] == 'where is my dolo order', body['text'])
+r = cl.post('/api/speech/heard?gate=1', data=json.dumps({'text': 'hello there friend'}), headers={'Content-Type': 'application/json'})
+check('heard: needs a login like every other route', r.status_code == 401, r.status_code)
+
+# the phone voice (SPEECH_TTS_MODEL=phone) answers the TTS route with the "use the device voice" signal
+saved_tts = server.SPEECH_TTS_MODEL
+server.SPEECH_TTS_MODEL = 'phone'
+r = cl.post('/api/speech/tts', data=json.dumps({'text': 'hello'}), headers={'X-Session-Token': tok, 'Content-Type': 'application/json'})
+check('tts: SPEECH_TTS_MODEL=phone -> no cloud call, the page is told to use the device voice', r.status_code == 404 and r.get_json().get('phone_voice') is True, (r.status_code, r.get_json()))
+server.SPEECH_TTS_MODEL = saved_tts
 
 server._speech_gate, server._transcribe = real_gate, real_transcribe
 
@@ -313,6 +365,10 @@ html = (ROOT / 'ask_dashboard.html').read_text(encoding='utf-8')
 check('page: interrupt threshold while an answer plays is now 800 ms', 'const TALK_START_MS_OVER_ANSWER = 800;' in html)
 check('page: normal start threshold unchanged (200 ms)', 'const TALK_START_MS = 200;' in html)
 check('page: the 3-quiet-minute end is unchanged (owner: keep it)', 'const TALK_IDLE_END_MS = 3 * 60000;' in html)
+check('page: free listening is optional - the menu defaults to the paid listening', '<option value="paid">Best quality' in html and "m = localStorage.getItem(LISTEN_KEY) || 'paid'" in html)
+check('page: free listening sends the words to /api/speech/heard, the paid path still to /api/speech/transcribe',
+      "'/api/speech/heard?gate=1'" in html and "'/api/speech/transcribe?gate=1'" in html)
+check('page: the same interrupt rule in words (4) and the same echo test (85%)', 'const FREE_BARGE_MIN_WORDS = 4;' in html and '>= 0.85;' in html)
 
 print()
 print(f'{len(FAILS)} FAILED: {FAILS}' if FAILS else 'ALL PASSED')
