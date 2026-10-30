@@ -52,6 +52,11 @@ backups/
 # WhatsApp session (anyone with it can read and send the owner's messages).
 .whatsapp_profile/
 
+# The CRM reader's own Chrome profile (crm_reader.py): a logged-in shubhadahealth.com session -
+# and the reports it downloads (GST registers etc.): real business figures, never committed.
+.crm_profile/
+data/crm_downloads/
+
 # Separate WhatsApp Web profiles for the Ask-by-WhatsApp listeners (whatsapp_ask.py: one per
 # person, _2, _3 ...) - same warning: each is a logged-in WhatsApp session.
 .whatsapp_ask_profile*/

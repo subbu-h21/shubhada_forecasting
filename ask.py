@@ -51,8 +51,10 @@ import textwrap
 from pathlib import Path
 
 import ask_tools as T
+import crm_reader
 import mrp_basket
 import order_bridge
+import payment_ledger
 import rack_bridge
 
 ROOT = Path(__file__).parent
@@ -557,6 +559,49 @@ product is kept in each shop, and how many bins and racks there are.
   never invent a place or a count.
 """
 
+# Payments received (see payment_ledger.py): added to the system prompt ONLY while the payment dashboard's
+# ledger file has payments, so without it the prompt - and every answer - is exactly what it was before.
+PAYMENTS_PROMPT = """
+
+PAYMENTS RECEIVED - tools whose names start with payments_ read the payment dashboard's ledger (read-only):
+every UPI / bank credit alert from Karnataka Bank (KBL) and Axis that the dashboard has read since 22 Sep 2026.
+- It is money RECEIVED into the shop's bank accounts (credits only: no debits, and cash or card machines
+  only if they pay into those accounts). It is NOT sales. Never call it sales; when it is set beside sales,
+  say it is only the UPI part of the takings and that a bank alert and a bill can fall on different days.
+- Times are when the alert reached the mailbox (India time), within a minute or two of the payment. A day
+  means the calendar day in India. The ledger starts 22 Sep 2026: for earlier dates say there is no data.
+- Some alerts could not be read; the tools say how many (unreadable_alerts...). They are not in the totals -
+  mention it when the number is not tiny.
+- Totals, days, hours, accounts and largest payments carry no names. Only payments_find_payer returns who
+  paid (the UPI payer name, often shortened) - use it only when the owner asks about a person by name, and
+  never list payers unasked.
+- A bank balance is the one printed in the latest alert for that account, as of the time shown - say "as of
+  <time>", never "the balance is" as if it were live.
+- For "today / yesterday / this month" use the dates in the date line above; groups are in India time.
+"""
+
+# CRM reports (see crm_reader.py): added to the system prompt ONLY while the CRM tools are on (the vault holds the
+# shubhadahealth login and CRM_ENABLED is not 0), so otherwise the prompt - and every answer - is unchanged.
+CRM_PROMPT = """
+
+CRM REPORTS - tools whose names start with crm_ read the shop's CRM (shubhadahealth.com) through a hidden browser
+signed in from the owner's saved login. They are READ-ONLY and each takes one to two minutes - say nothing
+about waiting, just call the tool once and use its answer. Never promise or claim any change in the CRM.
+- crm_gst_report(month YYYY-MM): "October GST report", "GST for last month", "send the GST file". Work the month
+  out from today's date (a bare month name = that month of the current year, or of last year if it has not
+  started). It returns net GST payable and the tax totals for purchases, sales, credit notes and wholesale, and
+  the Excel file is sent to the requester on WhatsApp automatically: say so ONLY when file_delivery says it is
+  being sent, never "attached". Net GST payable is what the CRM page shows (output tax on sales, wholesale less
+  credit notes, minus input tax on purchases): positive = to be paid, negative = a credit. The month may still
+  be running - say so for the current month.
+- crm_outstanding_payable: what the shop owes suppliers now, party by party ("outstanding payable", "who do we
+  owe the most"). crm_party_last_paid(party): one supplier's last payments (date, amount, bank), the balance
+  and what was bought since ("when did we last pay <supplier>"). Several suppliers can share a word in their
+  name (two firms both starting "ABC" are different parties): when the tool lists several, ask which one.
+- Amounts are rupees, from the CRM at the moment of the request. The ledger balance and the sum of the pending
+  bills can differ by a few hundred rupees; mention it only if asked.
+"""
+
 MAX_STEPS = 6  # tool-call rounds before we force a final answer
 MAX_HISTORY_TURNS = 4  # earlier question/answer pairs kept for follow-up questions
 
@@ -589,6 +634,10 @@ def _build_system_prompt(voice=False, speak=False):
     prompt = identity_prompt() + SYSTEM_PROMPT + _date_context()
     if rack_bridge.tool_specs():
         prompt += RACK_PROMPT
+    if payment_ledger.tool_specs():
+        prompt += PAYMENTS_PROMPT
+    if crm_reader.tool_specs():
+        prompt += CRM_PROMPT
     if order_bridge.tool_specs():
         prompt += DUAL_PROMPT
         facts = order_bridge.context()
@@ -616,7 +665,8 @@ def _available_tools(voice=False):
     tools = [t for t in T.TOOLS if not (voice and t['name'] in T.PII_ALLOWED_TOOLS)]
     # The basket belongs to a login, so its tools exist only for a request that has one.
     basket = mrp_basket.tool_specs() if mrp_basket.OWNER.get() else []
-    return tools + basket + order_bridge.tool_specs() + rack_bridge.tool_specs()
+    return (tools + basket + order_bridge.tool_specs() + rack_bridge.tool_specs() + payment_ledger.tool_specs(voice)
+            + crm_reader.tool_specs(voice))
 
 
 def _run_allowed_tool(name, args, allowed_names):
@@ -631,6 +681,10 @@ def _run_allowed_tool(name, args, allowed_names):
         return mrp_basket.run(name, args)
     if rack_bridge.is_rack_tool(name):
         return rack_bridge.run(name, args)
+    if payment_ledger.is_payment_tool(name):
+        return payment_ledger.run(name, args)
+    if crm_reader.is_crm_tool(name):
+        return crm_reader.run(name, args)
     return T.run_tool(name, args)
 
 

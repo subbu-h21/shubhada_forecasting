@@ -705,6 +705,266 @@ line1 = 'chrome.exe --user-data-dir=' + str(W.profile_dir_for(1)) + ' --flag'
 check('cleaning up the first window\'s leftover Chrome never touches the second window\'s',
       _re.search(pat0, line0) and _re.search(pat0, line0q) and not _re.search(pat0, line1), pat0)
 
+# --- sending a file ------------------------------------------------------------------------------------------
+class AttachPage:
+    """Just enough of WhatsApp Web for send_file: the Attach button, the Document item, the file chooser,
+    the preview's Send button and the conversation rows."""
+
+    def __init__(self, no_attach=False, no_preview=False, sees_row=True, preview_closes=True, caption_fails=False, no_caption_box=False):
+        self.log = []
+        self.no_attach, self.no_preview, self.sees_row, self.preview_closes, self.caption_fails = no_attach, no_preview, sees_row, preview_closes, caption_fails
+        self.no_caption_box = no_caption_box
+        self.preview_open = False
+        self.confirm_open = False
+        self.file = None
+        self.rows = ['an older message']
+        outer = self
+
+        class Keyboard:
+            def insert_text(self, t):
+                if outer.caption_fails:
+                    raise RuntimeError('no caption box')
+                outer.log.append('caption:' + t[:20])
+
+            def press(self, k):
+                outer.log.append('key:' + k)        # Escape does NOT close the preview on the real page
+
+        self.keyboard = Keyboard()
+
+        class Loc:
+            def __init__(self, kind):
+                self.kind = kind
+
+            @property
+            def first(self_):
+                return self_
+
+            @property
+            def last(self_):
+                return self_
+
+            def count(self_):
+                if self_.kind == 'attach':
+                    return 0 if outer.no_attach else 1
+                if self_.kind == 'send':
+                    return 1 if outer.preview_open else 0
+                if self_.kind == 'rows':
+                    return len(outer.rows)
+                if self_.kind == 'close':
+                    return 1 if outer.preview_open else 0
+                if self_.kind == 'discard':
+                    return 1 if outer.confirm_open else 0
+                return 0
+
+            def is_visible(self_):
+                return outer.preview_open
+
+            def click(self_, timeout=0):
+                if self_.kind == 'attach':
+                    if outer.no_attach:
+                        raise TimeoutError('no attach button')
+                    outer.log.append('attach')
+                elif self_.kind == 'close':
+                    outer.log.append('close')
+                    outer.confirm_open = True        # "Discard selection?" appears
+                elif self_.kind == 'discard':
+                    outer.log.append('discard')
+                    outer.confirm_open = False
+                    outer.preview_open = False
+                elif self_.kind == 'send':
+                    outer.log.append('send')
+                    if outer.preview_closes:
+                        outer.preview_open = False
+                    if outer.sees_row:
+                        outer.rows.append('%s 31 KB 3:50 pm' % Path(outer.file).name)
+
+            def nth(self_, i):
+                class R:
+                    def inner_text(s):
+                        return outer.rows[i]
+                return R()
+
+        self._Loc = Loc
+
+    def locator(self, sel):
+        if sel == W._ATTACH_BUTTON:
+            return self._Loc('attach')
+        if sel == W._PREVIEW_SEND:
+            return self._Loc('send')
+        if sel == W.wa._MESSAGE_ROW:
+            return self._Loc('rows')
+        if sel == W._PREVIEW_CLOSE:
+            return self._Loc('close')
+        return self._Loc('other')
+
+    def get_by_role(self, role, name='', exact=False):
+        return self._Loc('discard') if (role, name) == ('button', 'Discard') else self._Loc('other')
+
+    def get_by_text(self, text, exact=False):
+        outer = self
+
+        class Item:
+            @property
+            def first(s):
+                return s
+
+            def click(s, timeout=0):
+                outer.log.append('item:' + text)
+        return Item()
+
+    def expect_file_chooser(self, timeout=0):
+        outer = self
+
+        class CM:
+            def __enter__(s):
+                class V:
+                    def set_files(v, path):
+                        outer.file = path
+                        outer.log.append('files')
+                        if not outer.no_preview:
+                            outer.preview_open = True
+                s.value = V()
+                return s
+
+            def __exit__(s, *a):
+                return False
+        return CM()
+
+    def evaluate(self, js):
+        if js == W._FOCUS_CAPTION_JS:
+            self.log.append('focus')
+            return not self.no_caption_box
+        return ['footer:button:Attach', 'footer:button:Emoji']
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+rep = Path(tempfile.mkdtemp()) / 'GST Report From 1-10-2026 To 31-10-2026.xlsx'
+rep.write_bytes(b'x' * 2048)
+msgs_log = []
+ap = AttachPage()
+out = W.send_file(ap, rep, 'GST report 2026-10', on_progress=msgs_log.append)
+check('a file is attached as a document, captioned, sent, and seen in the conversation',
+      out == {'sent': True, 'reason': 'seen in the conversation'} and ap.log == ['attach', 'item:Document', 'files', 'focus', 'caption:GST report 2026-10', 'send'], (out, ap.log))
+check('the file that went into the chooser is the one asked for', ap.file == str(rep))
+check('a missing file is refused before any click', W.send_file(AttachPage(), rep.with_name('nothing.xlsx'))['reason'] == 'file_missing')
+orig_max, W.MAX_FILE_BYTES = W.MAX_FILE_BYTES, 100
+check('a file over the size limit is refused', W.send_file(AttachPage(), rep)['reason'] == 'file_too_big')
+W.MAX_FILE_BYTES = orig_max
+ap = AttachPage()
+out = W.send_file(ap, rep, 'x', dry_run=True)
+check('a dry run attaches, then closes the preview through Close and Discard, without sending',
+      out['dry_run'] and 'send' not in ap.log and 'close' in ap.log and 'discard' in ap.log and not ap.preview_open, ap.log)
+ap, lg = AttachPage(no_attach=True), []
+out = W.send_file(ap, rep, on_progress=lg.append)
+check('no Attach button: nothing is sent, the screen labels are logged (never message text), and the Attach menu is dismissed',
+      out['reason'] == 'attach_failed' and any('footer:button:Attach' in m for m in lg) and ap.log[-1] == 'key:Escape', (out, lg))
+ap = AttachPage(no_preview=True)
+orig_time = W.time.time
+t = [1000.0]
+W.time.time = lambda: (t.__setitem__(0, t[0] + 3) or t[0])      # the clock runs fast: the 20-second wait ends at once
+out = W.send_file(ap, rep, on_progress=lambda m: None)
+W.time.time = orig_time
+check('a preview that never appears fails cleanly instead of pressing Send into the void', out['reason'] == 'attach_failed' and 'send' not in ap.log, (out, ap.log))
+ap = AttachPage()
+ap.preview_open = True
+W._close_preview(ap)
+check('closing a preview that is open takes Close then Discard and leaves nothing open over the chat', not ap.preview_open and ap.log[:2] == ['close', 'discard'], ap.log)
+ap = AttachPage()
+W._close_preview(ap)
+check('closing when nothing is open does nothing but dismiss a menu', ap.log == ['key:Escape'], ap.log)
+ap = AttachPage(caption_fails=True)
+check('a caption that cannot be typed does not stop the file', W.send_file(ap, rep, 'caption')['sent'] is True and 'send' in ap.log)
+ap = AttachPage(no_caption_box=True)
+check('no caption box in the preview: nothing is typed anywhere (never into the message box underneath), and the file still goes',
+      W.send_file(ap, rep, 'caption')['sent'] is True and not any(l.startswith('caption:') for l in ap.log) and 'send' in ap.log, ap.log)
+check('the preview Send is found by its own "Send N selected" label, never the plain "Send" of the message box',
+      W._PREVIEW_SEND == '[role="button"][aria-label^="Send"][aria-label$="selected"]')
+ap = AttachPage(sees_row=False, preview_closes=True)
+out = W.send_file(ap, rep)
+check('sent but not seen, with the preview closed: reported as sent, with the weaker reason', out['sent'] is True and 'not seen' in out['reason'], out)
+ap = AttachPage(sees_row=False, preview_closes=False)
+orig_time = W.time.time
+t = [1000.0]
+W.time.time = lambda: (t.__setitem__(0, t[0] + 3) or t[0])      # the clock runs fast: the 25-second wait ends at once
+out = W.send_file(ap, rep)
+W.time.time = orig_time
+check('sent, not seen and the preview still open: NOT reported as sent (the owner is told to check, never a blind retry)',
+      out == {'sent': False, 'reason': 'unconfirmed'}, out)
+
+# the listener sends queued files right after the text answer
+holder = {}
+file_calls = []
+
+
+def fake_send_file(page, path, caption='', dry_run=False, on_progress=None):
+    file_calls.append((path, caption, dry_run))
+    events.append('FILE')
+    return {'sent': True, 'reason': 'seen'}
+
+
+def asks_for_a_report(q, history):
+    holder['ln'].queue_file(rep, 'GST report 2026-10')        # what the CRM tool does, from the worker thread
+    return 'Here is the report.'
+
+
+ln = new_listener([msgs(('AC01', 'october gst report'))], answer_fn=asks_for_a_report)
+holder['ln'] = ln
+ln.send_file_fn = fake_send_file
+ln.step(ln.page)
+check('the report goes out after the text answer, not before',
+      [e if e in ('ack', 'FILE') else 'answer' for e in events] == ['ack', 'answer', 'FILE'] and file_calls == [(str(rep), 'GST report 2026-10', False)], events)
+check('files sent are counted apart from answers', ln.status().get('files_sent') == 1 and ln.status()['answered'] == 1)
+ln.step(ln.page)
+check('a sent file is not sent again', len(file_calls) == 1)
+
+ln = new_listener([msgs()])
+ln.send_file_fn = lambda page, path, caption='', dry_run=False, on_progress=None: {'sent': False, 'reason': 'attach_failed'}
+ln.queue_file(rep, 'x')
+ln.step(ln.page)
+check('a file that could not be sent is said so in the chat (never silence), and the answer count is unchanged',
+      len(sent) == 1 and 'could not send the file' in sent[0][0] and 'attach_failed' in sent[0][0] and 'saved on the shop PC' in sent[0][0] and ln.status()['answered'] == 0, sent)
+
+
+def raising(page, path, caption='', dry_run=False, on_progress=None):
+    raise RuntimeError('chrome died')
+
+
+ln = new_listener([msgs()])
+ln.send_file_fn = raising
+ln.queue_file(rep, 'x')
+ln.step(ln.page)
+check('a crash while sending is caught, reported in the chat, and the listener carries on', len(sent) == 1 and 'RuntimeError' in sent[0][0])
+ln = new_listener([msgs()], dry_run=True)
+ln.send_file_fn = lambda page, path, caption='', dry_run=False, on_progress=None: {'sent': False, 'dry_run': True, 'reason': 'dry_run'}
+ln.queue_file(rep, 'x')
+ln.step(ln.page)
+check('a dry run says nothing in the chat', sent == [])
+
+# delivery: only the CRM download folder, and to the right chat
+import crm_reader
+orig_dir = crm_reader.DOWNLOAD_DIR
+crm_reader.DOWNLOAD_DIR = rep.parent
+os.environ['WHATSAPP_ASK_NUMBER'] = '9000000001,9000000002'
+cfg2 = dict(W.settings(), enabled=True)
+two = W.build_listeners(cfg2)
+W._listeners = two
+check('a report in the download folder is queued for the person who asked',
+      W.deliver_file('whatsapp-owner-2', rep, 'cap') is True and len(two[1].file_queue) == 1 and len(two[0].file_queue) == 0)
+check('...the owner\'s own question to the owner\'s chat', W.deliver_file(W.WA_OWNER, rep, 'cap') is True and len(two[0].file_queue) == 1)
+check('...and a question from the Ask web page (a session token) to the owner\'s chat', W.deliver_file('some-session-token', rep, 'cap') is True and len(two[0].file_queue) == 2)
+other = Path(tempfile.mkdtemp()) / 'secret.txt'
+other.write_text('private', encoding='utf-8')
+check('a file anywhere else on the PC is refused, so the hook cannot be used to send it', W.deliver_file(W.WA_OWNER, other, 'x') is False and len(two[0].file_queue) == 2)
+sneaky = rep.parent / '..' / other.parent.name / 'secret.txt'
+check('a path that climbs out of the folder is refused too', W.deliver_file(W.WA_OWNER, sneaky, 'x') is False)
+check('a file that does not exist is refused', W.deliver_file(W.WA_OWNER, rep.with_name('gone.xlsx'), 'x') is False)
+W._listeners = []
+check('with no WhatsApp listeners running nothing is queued', W.deliver_file(W.WA_OWNER, rep, 'x') is False)
+crm_reader.DOWNLOAD_DIR = orig_dir
+os.environ.pop('WHATSAPP_ASK_NUMBER', None)
+
 # --- Ask answers like the Ask page ------------------------------------------------------------
 import ask as ask_mod
 import ask_limits

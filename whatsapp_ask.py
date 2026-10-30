@@ -576,6 +576,139 @@ def fetch_voice(page, row_id):
 
 
 # ---------------------------------------------------------------------------
+# Sending a file (a report the CRM reader downloaded) to the chat
+# ---------------------------------------------------------------------------
+MAX_FILE_BYTES = 90_000_000          # WhatsApp's limit is 100 MB
+_ATTACH_BUTTON = ('button[aria-label="Attach"], [aria-label="Attach"], [data-icon="plus-rounded"], '
+                  '[data-icon="attach-menu-plus"], [data-icon="clip"], [data-icon="plus"]')
+# Read off the live page (2026-10-30): choosing a file opens a "preview sheet" over the chat with a caption box, a
+# "Close" button and a Send button labelled "Send 1 selected" (the message box's own Send is just "Send"). Escape does
+# NOT close the preview; Close does, after a "Discard selection?" prompt.
+_PREVIEW_SEND = '[role="button"][aria-label^="Send"][aria-label$="selected"]'
+_PREVIEW_CLOSE = 'div[role="button"][aria-label="Close"]'
+# The preview has its own caption box, but the keyboard focus stays in the chat's message box underneath it - a
+# caption typed without moving focus lands in THAT box and puts a second Send button on the page. So the caption
+# box that shares a container with the preview's Send button is focused first.
+_FOCUS_CAPTION_JS = r"""() => {
+  const send = document.querySelector('[role="button"][aria-label^="Send"][aria-label$="selected"]');
+  for (let node = send, i = 0; node && i < 12; node = node.parentElement, i++) {
+    const box = node.querySelector('[role="textbox"]');
+    if (box) { box.focus(); return true; }
+  }
+  return false;
+}"""
+_DIAG_JS = r"""() => {
+  // Labels only - never message text: what could be clicked near the message box, in a menu or in a dialog.
+  const scopes = ['footer', '[role="dialog"]', '[role="menu"]', '[role="application"] ul', 'div[data-animate-dropdown-item]'];
+  const out = [];
+  for (const sel of scopes) for (const root of document.querySelectorAll(sel)) {
+    for (const e of root.querySelectorAll('[aria-label], [data-icon], [role="menuitem"], li, button')) {
+      const t = (e.getAttribute('aria-label') || e.getAttribute('data-icon') || (e.innerText || '')).trim().replace(/\s+/g, ' ').slice(0, 30);
+      if (t) out.push(sel.split(' ')[0] + ':' + e.tagName.toLowerCase() + ':' + t);
+    }
+  }
+  return [...new Set(out)].slice(0, 60);
+}"""
+
+
+def _diagnose(page):
+    try:
+        return page.evaluate(_DIAG_JS)
+    except Exception:
+        return []
+
+
+def _close_preview(page):
+    """Leaves no file preview or menu open over the chat: an open preview would swallow the next text answer.
+    Escape does not close the preview. Its Close button asks "Discard selection?" - Discard drops only the
+    pending attachment choice (the file itself is untouched)."""
+    for _ in range(3):
+        try:
+            if not page.locator(_PREVIEW_SEND).count():
+                break
+            close = page.locator(_PREVIEW_CLOSE)
+            if close.count():
+                close.first.click(timeout=3000)
+                page.wait_for_timeout(600)
+            discard = page.get_by_role('button', name='Discard')
+            if discard.count():
+                discard.first.click(timeout=3000)
+                page.wait_for_timeout(600)
+        except Exception:
+            break
+    try:
+        page.keyboard.press('Escape')               # closes the Attach menu if that is what is open
+    except Exception:
+        pass
+
+
+def send_file(page, path, caption='', dry_run=False, on_progress=None):
+    """Attaches one file to the open chat as a DOCUMENT and sends it. -> {'sent': bool, 'reason': str}.
+    Only the shop's own report files are ever passed in (deliver_file checks the folder). On a failure the
+    labels of what was on screen are logged (no message text) so the page change can be seen and fixed."""
+    def log(message):
+        if on_progress:
+            on_progress(message)
+
+    p = Path(path)
+    if not p.is_file():
+        return {'sent': False, 'reason': 'file_missing'}
+    if p.stat().st_size > MAX_FILE_BYTES:
+        return {'sent': False, 'reason': 'file_too_big'}
+    try:
+        page.locator(_ATTACH_BUTTON).first.click(timeout=10000)
+        page.wait_for_timeout(700)
+        with page.expect_file_chooser(timeout=10000) as chooser:
+            page.get_by_text('Document', exact=True).first.click(timeout=8000)
+        chooser.value.set_files(str(p))
+        send = page.locator(_PREVIEW_SEND)
+        deadline = time.time() + 20
+        while time.time() < deadline and not (send.count() and send.last.is_visible()):
+            page.wait_for_timeout(500)
+        if not (send.count() and send.last.is_visible()):
+            raise RuntimeError('the file preview did not appear')
+        if caption:
+            try:                                    # a caption that cannot be placed is not fatal: the file name says what it is
+                if page.evaluate(_FOCUS_CAPTION_JS):
+                    page.keyboard.insert_text(caption[:900])
+            except Exception:
+                pass
+        if dry_run:
+            _close_preview(page)
+            log('Dry run: the file was attached and the preview closed without sending.')
+            return {'sent': False, 'dry_run': True, 'reason': 'dry_run'}
+        log('Sending %s (%d KB) - a WhatsApp message cannot be recalled.' % (p.name, p.stat().st_size // 1024))
+        send.last.click(timeout=8000)
+    except Exception as exc:
+        log('Could not attach the file (%s: %s). On screen: %s' % (type(exc).__name__, str(exc).splitlines()[0][:120], _diagnose(page)))
+        _close_preview(page)
+        return {'sent': False, 'reason': 'attach_failed'}
+    # nothing below may raise: failing to read the outcome must never read as failing to send (a retry would send twice)
+    seen = False
+    try:
+        wanted = p.name[:24].casefold()
+        end = time.time() + 25
+        while time.time() < end and not seen:
+            rows = page.locator(wa._MESSAGE_ROW)
+            count = rows.count()
+            for i in range(max(0, count - wa._ROWS_TO_CHECK), count):
+                if wanted in (rows.nth(i).inner_text() or '').casefold():
+                    seen = True
+                    break
+            if not seen:
+                page.wait_for_timeout(700)
+        if not seen and not (send.count() and send.last.is_visible()):
+            return {'sent': True, 'reason': 'the preview closed, but the file was not seen in the conversation'}
+    except Exception:
+        pass
+    if seen:
+        log('Sent (seen in the conversation).')
+        return {'sent': True, 'reason': 'seen in the conversation'}
+    log('Pressed Send but could not confirm the file went - CHECK WHATSAPP BEFORE RETRYING.')
+    return {'sent': False, 'reason': 'unconfirmed'}
+
+
+# ---------------------------------------------------------------------------
 # The listener
 # ---------------------------------------------------------------------------
 def stale_chrome_command(profile_dir):
@@ -622,6 +755,8 @@ class Listener:
         self.now = now
         self.history = []                 # [{'question','answer','at'}]
         self.pending = deque()            # messages seen (and, when it helps, acknowledged) but not answered yet
+        self.file_queue = deque()         # (path, caption) of reports to send to this chat after the text answer
+        self.send_file_fn = send_file
         self.last_lang = 'en'             # the language of the last words heard, for the "got it" on a voice note / photo
         self._ack_open = False            # a "got it" has gone out and no answer has followed yet
         self._ack_n = 0
@@ -762,6 +897,28 @@ class Listener:
         self._scan(page)
         while self.pending and not self._stop.is_set():
             self._answer(page, self.pending.popleft())
+            self._flush_files(page)         # a report asked for in that answer goes out right after the text
+        self._flush_files(page)
+
+    def queue_file(self, path, caption=''):
+        """Called from any thread: the file is sent to this chat by the listener's own thread, which alone touches the page."""
+        self.file_queue.append((str(path), str(caption or '')))
+
+    def _flush_files(self, page):
+        while self.file_queue and not self._stop.is_set():
+            path, caption = self.file_queue.popleft()
+            try:
+                out = self.send_file_fn(page, path, caption, dry_run=self.dry_run,
+                                        on_progress=lambda m: logger.info('[whatsapp-ask] %s: %s', self.label, m))
+            except Exception as exc:
+                logger.error('[whatsapp-ask] %s: sending a file failed: %s: %s', self.label, type(exc).__name__, exc)
+                out = {'sent': False, 'reason': type(exc).__name__}
+            if out.get('sent'):
+                with self._lock:
+                    self._status['files_sent'] = self._status.get('files_sent', 0) + 1
+            elif not out.get('dry_run'):
+                # say so in the chat: a silent failure would leave the owner waiting for a file that is not coming
+                self._send(page, REPLY_MARK + 'I could not send the file on WhatsApp just now (%s). It is saved on the shop PC.' % out.get('reason'), count=False)
 
     def _acknowledge(self, page, msg):
         """The instant "got it": one pre-decided gentle line, no model call. At most one is outstanding at a time
@@ -904,6 +1061,30 @@ def build_listeners(cfg, transcribe_fn=None):
     return out
 
 
+def deliver_file(owner_key, path, caption=''):
+    """Queues a CRM report for WhatsApp: to the chat of whoever asked (their basket key names their listener), or,
+    for a question from the Ask web page, to the owner's chat. ONLY files inside the CRM reader's download folder
+    are ever sent - this hook cannot be used to send anything else from the PC. -> True when queued."""
+    try:
+        import crm_reader
+        folder = Path(crm_reader.DOWNLOAD_DIR).resolve()
+        target = Path(path).resolve()
+        if folder not in target.parents or not target.is_file():
+            logger.warning('[whatsapp-ask] refused to queue a file outside the CRM download folder')
+            return False
+    except Exception:
+        return False
+    listeners = [l for l in _listeners if l.status().get('state') in ('running', 'starting', 'error')] or list(_listeners)
+    if not listeners:
+        return False
+    mine = [l for l in listeners if l.owner_key == owner_key]
+    owner = [l for l in listeners if l.label == 'owner']
+    chosen = (mine or owner or listeners)[0]
+    chosen.queue_file(target, caption)
+    logger.info('[whatsapp-ask] a report file is queued for the %s chat', chosen.label)
+    return True
+
+
 def start_from_env(transcribe_fn=None):
     """Starts a listener per number when WHATSAPP_ASK_ENABLED=1 and WHATSAPP_ASK_NUMBER holds at least one valid
     number. Returns the list of listeners, or None. transcribe_fn (wav bytes -> text) switches voice notes on;
@@ -916,6 +1097,11 @@ def start_from_env(transcribe_fn=None):
         logger.warning('[whatsapp-ask] switched on, but WHATSAPP_ASK_NUMBER in .env is missing or not a valid number')
         return None
     _listeners = build_listeners(cfg, transcribe_fn)
+    try:
+        import crm_reader
+        crm_reader.set_deliver(deliver_file)        # CRM report files reach the requester's chat through this hook
+    except Exception as exc:
+        logger.warning('[whatsapp-ask] the CRM reader could not be linked: %s', exc)
     for i, listener in enumerate(_listeners):
         if i:
             threading.Timer(START_STAGGER_S * i, listener.start).start()

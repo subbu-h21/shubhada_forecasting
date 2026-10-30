@@ -297,6 +297,57 @@ not reachable and keeps answering everything else.
 - **Tests.** `venv/Scripts/python.exe test_rack_bridge.py` (offline - a fake rack app
   inside the test, no live data).
 
+## Payments received on the Ask page
+
+Ask can answer "how much UPI came in today / this month", "daily payments this week", "which hour
+do most payments arrive", "biggest payments", "payments from <name>" and "what is the bank balance"
+from the payment dashboard's ledger (`payment_ledger.py`, tools `payments_*`).
+
+- **Read-only and separate.** It reads that app's `backend/.gmail_transactions.json` directly (set
+  `PAYMENT_LEDGER_PATH` in `.env` if it ever moves). It never writes to the file, never calls that
+  server, and needs no change in it. With no file there are no tools and the Ask prompt is unchanged.
+- **What the numbers are.** Money RECEIVED into the shop's bank accounts (credits only - not sales),
+  since the dashboard started reading on 22 Sep 2026. A KBL alert carries no transaction date, so
+  its time is when the alert reached the mailbox; an Axis alert has its own. Alerts the dashboard
+  could not read are not in the totals - every answer's data says how many (683 at the time of writing).
+- **Privacy.** Totals, days, hours, accounts and "largest payments" never carry a payer's name or UPI
+  id. Only `payments_find_payer` returns who paid (the UPI payer name), like the patient lookups it
+  is withheld from voice conversations - and even it never returns the UPI id, reference or narration.
+  Everything Ask returns goes to the AI provider, as with every other Ask answer.
+- **Balance.** `payments_ledger_info` gives the balance printed in an account's latest alert, with its
+  time - not a live bank balance.
+- **Tests.** `venv/Scripts/python.exe test_payment_ledger.py` (offline - a made-up ledger).
+
+## CRM reports on the Ask page (and the GST file on WhatsApp)
+
+Ask can read the shop's CRM (shubhadahealth.com) for you - `crm_reader.py`, tools `crm_*`:
+"October GST report" (net GST payable, tax totals, **and the Excel file sent to your WhatsApp**),
+"outstanding payable" (what is owed, party by party) and "when did we last pay <supplier>".
+
+- **One saved login.** It uses the shubhadahealth login already in the vault (Salary > Edit > Vault).
+  The program signs in by itself whenever a question needs it, in its own hidden Chrome profile
+  (`.crm_profile/`, git-ignored). The password is read only by that code - never printed, logged or
+  sent to the AI - and Claude never types it. Change it in the vault box; nothing else to update.
+- **Read-only, by construction.** Every click goes through an allow-list (menus, the report's
+  Generate / Excel buttons, View Ledger, Next page); anything that looks like a change - Set Already
+  Paid, voucher, create, alter, delete, save - is refused in code. Pages are reached by clicking
+  through the menus (the site refuses direct addresses).
+- **The GST route.** Dashboard > Reports > Procurement > Consolidated GST Report > calendar (year, then
+  month) > Generate > wait until every section has stopped saying "Please wait fetching data..." > Excel.
+  The download goes to `data/crm_downloads/` (git-ignored, kept 30 days) and is queued for the chat of
+  whoever asked (a question from the Ask web page goes to the owner's chat). Only files in that folder
+  can ever be queued, so the hook cannot send anything else from the PC.
+- **Speed.** A report takes 20 to 90 seconds (the GST page loads section by section); the WhatsApp
+  "got it" goes out first. Results are kept 10-15 minutes. One browser job at a time; a second request
+  waits for the first. Not offered in voice conversations.
+- **Switches.** `CRM_ENABLED=0` turns it off; `CRM_HEADLESS=0` shows the Chrome window (the default
+  is hidden). A saved login the site rejects gives a plain "check the vault" message.
+- **WhatsApp file sending** (`send_file` in `whatsapp_ask.py`): Attach > Document > the file > Send,
+  confirmed by seeing the file in the conversation. The preview is closed with Close + "Discard
+  selection?" if anything fails (Escape does not close it), and a failed file says so in the chat.
+- **Tests.** `venv/Scripts/python.exe test_crm_reader.py` (offline - made-up pages and a scripted
+  fake browser) and `test_whatsapp_ask.py`.
+
 ## Ask by WhatsApp
 
 The owner texts the shop's WhatsApp and Ask answers in the same chat, as if the question
