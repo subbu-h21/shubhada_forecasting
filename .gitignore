@@ -52,6 +52,10 @@ backups/
 # WhatsApp session (anyone with it can read and send the owner's messages).
 .whatsapp_profile/
 
+# Separate WhatsApp Web profiles for the Ask-by-WhatsApp listeners (whatsapp_ask.py: one per
+# person, _2, _3 ...) - same warning: each is a logged-in WhatsApp session.
+.whatsapp_ask_profile*/
+
 # --- Logs ---
 server.log
 *.log

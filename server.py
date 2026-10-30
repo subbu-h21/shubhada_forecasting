@@ -40,6 +40,7 @@ import vault
 import shubhada_fetch
 import leave_notify
 import leave_app
+import whatsapp_ask
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -1100,6 +1101,13 @@ def api_salary_chart():
     return jsonify(_salary_payload(month))
 
 
+@app.route('/api/whatsapp-ask/status')
+@requires_auth
+def api_whatsapp_ask_status():
+    """Is Ask by WhatsApp listening? (state: off / starting / needs_scan / running / error / stopped)"""
+    return jsonify(whatsapp_ask.status())
+
+
 @app.route('/api/ask', methods=['POST'])
 @requires_auth
 def api_ask():
@@ -1702,6 +1710,9 @@ if __name__ == '__main__':
     warm_ask_cache_in_background()  # Ask / voice answers: forecast etc., in the background
     print('Ready.')
     print()
+    # Ask by WhatsApp: only when WHATSAPP_ASK_ENABLED=1 and WHATSAPP_ASK_NUMBER are in .env
+    if whatsapp_ask.start_from_env(transcribe_fn=lambda wav: _transcribe(wav)[0]):
+        print('Ask by WhatsApp: starting (its own Chrome window opens).')
     logger.info('Server starting on http://%s:8420', lan_ip)
     from waitress import serve
     serve(app, host='0.0.0.0', port=8420)
