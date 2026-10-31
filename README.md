@@ -342,65 +342,22 @@ Ask can read the shop's CRM (shubhadahealth.com) for you - `crm_reader.py`, tool
   waits for the first. Not offered in voice conversations.
 - **Switches.** `CRM_ENABLED=0` turns it off; `CRM_HEADLESS=0` shows the Chrome window (the default
   is hidden). A saved login the site rejects gives a plain "check the vault" message.
-- **WhatsApp file sending** (`send_file` in `whatsapp_ask.py`): Attach > Document > the file > Send,
-  confirmed by seeing the file in the conversation. The preview is closed with Close + "Discard
-  selection?" if anything fails (Escape does not close it), and a failed file says so in the chat.
+- **WhatsApp.** Sending the GST file on WhatsApp is done by the Shop Assistant (project-15) now; a report
+  asked for on this Ask page is saved in `data/crm_downloads/` only.
 - **Tests.** `venv/Scripts/python.exe test_crm_reader.py` (offline - made-up pages and a scripted
-  fake browser) and `test_whatsapp_ask.py`.
+  fake browser).
 
-## Ask by WhatsApp
+## WhatsApp, sales bills and the Shop Assistant
 
-The owner texts the shop's WhatsApp and Ask answers in the same chat, as if the question
-had been typed on the Ask page (same tools, same daily / burst limits, same MRP basket;
-follow-ups like "and last month?" work for 30 minutes).
+Ask by WhatsApp and the sales bill by WhatsApp moved out of the reckoner on 31 Oct 2026, into their own project:
+**`D:\claude projects\project-15 shop assistant`** (its own server on port 8030, registered in Server Manager). Its
+README describes them. `WHATSAPP_ASK_ENABLED` in this `.env` is 0: two bots must never answer the same chat.
 
-- **Switch on** in `.env` (git-ignored - the number must never be committed):
-  `WHATSAPP_ASK_ENABLED=1` and `WHATSAPP_ASK_NUMBER=<the owner's mobile>`. Restart the
-  server; a Chrome window opens on this PC and **must stay open**.
-- **More than one person.** List the numbers, comma separated - the first is the owner:
-  `WHATSAPP_ASK_NUMBER=<owner>,<second person>`. Each person gets their own Chrome window
-  (profile `.whatsapp_ask_profile`, `_2`, ...), remembered state, conversation and MRP
-  basket, and everyone has the same access to Ask as the owner. WhatsApp Web allows only
-  one open page per linked device, which is why each window is its own linked device
-  (WhatsApp allows four) and each needs one QR scan.
-- **Link once.** Each listener uses its own Chrome profile (git-ignored: it is a logged-in
-  WhatsApp session), as a linked device - separate from the salary-slip sender's profile
-  so the two never fight over one. If a window shows a QR code: phone > WhatsApp >
-  Linked devices > Link a device.
-- **Instant "got it".** Within about two seconds of a new text, voice note or picture a
-  short gentle line goes out ("Namaste. I have received your message - please give me a
-  moment ..."), decided locally with no model call; Kannada text gets Kannada. The answer
-  follows. No "got it" for what Ask answers instantly by rules (a call by name, a basket
-  line), and only one is outstanding at a time. The wording is the `ACKS` table at the top
-  of `whatsapp_ask.py`.
-- **Only that one chat is opened** (by number). A message counts only when the chat's
-  contact sent it; the shop's own messages in that chat (CCTV clips, slips) and
-  documents and videos are never answered. Messages older than
-  `WHATSAPP_ASK_MAX_AGE_MIN` (30) when the server starts are skipped, so a restart never
-  replays old questions. Replies start with `*Subbii:*`.
-- **Pictures.** A vision model (`WHATSAPP_ASK_VISION_MODEL`, default
-  `google/gemini-2.5-flash`) reads the photo - product, MRP, batch and expiry for a strip,
-  the lines of a bill, only the medicines of a prescription (never patient details) - and
-  that reading plus any caption goes to Ask as a normal question. The reply starts with
-  "Photo read as: ..." so a misreading shows. About a third of a cent per photo; the photo
-  itself goes to the model provider.
-- **Voice notes.** Played silently in the page (the window runs with `--mute-audio`),
-  converted to a 16 kHz WAV there, and transcribed by the same speech-to-text as the Ask
-  page's microphone (Kannada, English, Hindi). Up to 2 minutes. The reply starts with
-  "I heard: ..." and then answers as text. WhatsApp keeps the audio encrypted until
-  Play is pressed, so pressing Play (which marks the note as played for the sender) is
-  how it is read.
-- **Status:** `GET /api/whatsapp-ask/status` (needs a login): off / starting / needs_scan /
-  running / error. `WHATSAPP_ASK_DRY_RUN=1` types each reply into the box without sending.
-  `WHATSAPP_ASK_DEBUG_PORT` (development only, leave it unset) opens Chrome's local
-  debugging port so a developer can inspect the page - anyone on this PC could use it to
-  drive the linked WhatsApp.
-- **Rough edges.** It reads WhatsApp Web with a program, which WhatsApp does not officially
-  allow (same as the slip sender, but this one runs all day). If WhatsApp changes its page
-  the listener stops with an error rather than guessing - the selectors are listed at the
-  top of `whatsapp_ask.py`.
-- **Tests.** `venv/Scripts/python.exe test_whatsapp_ask.py` (offline - a scripted fake
-  page shaped like the live one).
+The assistant reaches the reckoner's data through a small keyed API (`assistant_bridge.py`):
+`/api/assistant/ping`, `/tools`, `/context`, `/run`, `/basket`. It answers only a program on this PC (127.0.0.1)
+that sends `ASSISTANT_BRIDGE_KEY` (the same 32+ character secret in both projects' `.env`); without the key every
+route answers 503. The tools are the Ask page's own (read-only, plus `save_note`). Tests:
+`venv/Scripts/python.exe test_assistant_bridge.py`.
 
 ## Backups & recovery
 

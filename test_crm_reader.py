@@ -169,6 +169,101 @@ except C.CrmError as e:
 check('a report that never finishes is reported, not waited on forever', ok and time.time() - t0 < 5)
 
 
+# --- the payables route: asking again when the list stays empty ----------------------------------------------------------
+EMPTY_PAGE = ' | '.join(['menu', 'OutStanding Payables', 'Search Name', 'Total= 0', 'Sl.No   Entity Name   Amount'])
+
+
+class PayPage:
+    """A page whose payables list is empty until the route has been walked `empty_walks` times."""
+
+    def __init__(self, empty_walks):
+        self.empty_walks = empty_walks
+        self.clicks = []
+
+    def wait_for_selector(self, sel, timeout=0):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def get_by_text(self, text, exact=False):
+        outer = self
+
+        class L:
+            @property
+            def first(s):
+                return s
+
+            def click(s, timeout=0):
+                outer.clicks.append(text)
+        return L()
+
+    def inner_text(self, sel):
+        walks = self.clicks.count('Out Standing - Payable')
+        return EMPTY_PAGE if walks <= self.empty_walks else PAY
+
+
+orig_wait, orig_tries, orig_settle = C.LIST_WAIT_S, C.LIST_TRIES, C.SETTLE_S
+C.LIST_WAIT_S, C.LIST_TRIES, C.SETTLE_S = 0.05, 2, 0
+pp = PayPage(empty_walks=0)
+got = C._open_payables(pp)
+check('a list that arrives at once is read after one walk of the menus',
+      got['total'] == 1500.0 and pp.clicks == ['menu', 'Accounts', 'Statement Of Accounts', 'Out Standing - Payable'], pp.clicks)
+pp = PayPage(empty_walks=1)
+got = C._open_payables(pp)
+check('a list that stays empty is asked for again: back to the dashboard, then the same route',
+      got['total'] == 1500.0 and pp.clicks == ['menu', 'Accounts', 'Statement Of Accounts', 'Out Standing - Payable', 'Dashboard',
+                                              'menu', 'Accounts', 'Statement Of Accounts', 'Out Standing - Payable'], pp.clicks)
+pp = PayPage(empty_walks=99)
+try:
+    C._open_payables(pp); ok = False
+except C.CrmError as e:
+    ok = 'did not load' in str(e)
+check('a list that never arrives gives up after the set number of tries with a plain message',
+      ok and pp.clicks.count('Out Standing - Payable') == 2 and pp.clicks.count('Dashboard') == 1, pp.clicks)
+PARTIAL = '\r\n'.join(l for l in PAY.split('\r\n') if not l.startswith('3\t'))      # two of the three rows have arrived
+
+
+class FillingPage(PayPage):
+    """The first `partial_looks` looks show a half-filled table, then the full one."""
+
+    def __init__(self, partial_looks, final=None):
+        super().__init__(empty_walks=0)
+        self.looks, self.partial_looks, self.final = 0, partial_looks, final or PAY
+
+    def inner_text(self, sel):
+        self.looks += 1
+        return PARTIAL if self.looks <= self.partial_looks else self.final
+
+
+C.LIST_WAIT_S = 5
+fp = FillingPage(partial_looks=3)
+got = C._open_payables(fp)
+check('a table that is still filling is not accepted: the rows must add up to the page\'s own total',
+      len(got['parties']) == 3 and got['complete'] is True and C._rows_add_up(got), (len(got['parties']), got.get('complete')))
+check('the half-filled table itself does not add up (so the check can tell)', not C._rows_add_up(C.parse_payables(PARTIAL)) and C._rows_add_up(C.parse_payables(PAY)))
+fp = FillingPage(partial_looks=10 ** 9)
+t0 = time.time()
+C.LIST_WAIT_S = 30
+got = C._open_payables(fp)
+check('rows that never add up but have stopped changing are returned after three identical looks, marked incomplete',
+      got['complete'] is False and len(got['parties']) == 2 and fp.looks <= 6 and time.time() - t0 < 5, (got.get('complete'), fp.looks))
+import vault
+os.environ.pop('CRM_ENABLED', None)
+vault_summary_backup = vault.summary
+vault.summary = lambda: {'shubhadahealth': {'label': 'x', 'configured': True, 'username_masked': 'ab***cd'}}
+C._cache.clear()
+orig_job = C._run_job
+C._run_job = lambda fn, *a: dict(C.parse_payables(PARTIAL), complete=False)
+warned = C.run('crm_outstanding_payable', {})
+C._run_job = orig_job
+vault.summary = vault_summary_backup
+check('an incomplete list is flagged to the model so it says so', 'warning' in warned and 'incomplete' in warned['warning'], warned)
+C._cache.clear()
+C.LIST_WAIT_S, C.LIST_TRIES, C.SETTLE_S = orig_wait, orig_tries, orig_settle
+check('the hidden browser is given Indian region settings, not its US default (the shop pages are dd/mm/yyyy)',
+      "locale='en-IN'" in open(C.__file__, encoding='utf-8').read() and "timezone_id='Asia/Kolkata'" in open(C.__file__, encoding='utf-8').read())
+
 # --- choosing the month in the calendar -------------------------------------------------------------------------------------------------
 class Cal:
     """Just enough of the page: Open calendar, a year list, then the month cells; the box shows the pick."""
@@ -314,7 +409,40 @@ C._cache.clear()
 failed = C.run('crm_outstanding_payable', {})
 check('an unexpected failure becomes a short message naming only its kind - no traceback, no detail',
       failed['error'] == 'the CRM report could not be fetched (RuntimeError)', failed)
+check('a failure tells the model not to try again (each try takes minutes)', 'Do not call this tool again' in failed.get('note', ''), failed)
+
+
+def plain_problem(fn, *a):
+    raise C.CrmError('shubhadahealth did not accept the saved login. Please check it in the vault (Salary > Edit).')
+
+
+C._run_job = plain_problem
+C._cache.clear()
+failed2 = C.run('crm_gst_report', {'month': '2026-10'})
+check('a plain CRM problem is passed on as written, with the same no-retry note',
+      failed2['error'].startswith('shubhadahealth did not accept') and 'Do not call this tool again' in failed2['note'], failed2)
 C._run_job = fake_job
+
+
+class ShotPage:
+    url = 'https://shubhadahealth.com:7007/accledger?secret=1#frag'
+
+    def __init__(self, fails=False):
+        self.fails = fails
+
+    def screenshot(self, path):
+        if self.fails:
+            raise RuntimeError('no screen')
+        Path(path).write_bytes(b'png')
+
+
+orig_dl, C.DOWNLOAD_DIR = C.DOWNLOAD_DIR, Path(tempfile.mkdtemp())
+C._save_debug(ShotPage(), 'something broke (first line only is logged)')
+check('a failed job keeps its last screen on the shop PC', (C.DOWNLOAD_DIR / 'last_failure.png').read_bytes() == b'png')
+C._save_debug(ShotPage(fails=True), 'x')
+check('a screenshot that cannot be taken never hides the original failure', True)
+check('only the path of the page is ever logged, never its query', C._where(ShotPage()) == 'https://shubhadahealth.com:7007/accledger' and 'secret' not in C._where(ShotPage()))
+C.DOWNLOAD_DIR = orig_dl
 
 # --- gating ----------------------------------------------------------------------------------------------------------------------------------------
 check('the tools are offered when the vault holds the login', {t['name'] for t in C.tool_specs()} == {'crm_gst_report', 'crm_outstanding_payable', 'crm_party_last_paid'})

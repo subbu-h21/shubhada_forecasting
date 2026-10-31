@@ -46,6 +46,11 @@ def _settings():
     return url, key
 
 
+def configured():
+    """True when dual mode is set up in .env - whether or not the order dashboard answers right now."""
+    return bool(_settings()[0])
+
+
 def _http(method, path, payload=None, timeout=LIST_TIMEOUT_S):
     url, key = _settings()
     if not url:

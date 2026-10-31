@@ -44,6 +44,7 @@ be seen. `.env` is gitignored; a real environment variable always wins over it.
 """
 import datetime
 import json
+import logging
 import os
 import re
 import sys
@@ -537,6 +538,19 @@ slabs), with their pack and last-seen prices.
   list: they stay with the purchase tools.
 """
 
+# Added instead of the two sections above while dual mode is set up but the order dashboard does not answer -
+# it is switched off every night (Project 7's schedule, 10:30 PM to 10:30 AM). Without it, the 2026-10-30
+# night test showed every model hunting through up to 14 purchase-tool calls for a scheme it could not find.
+ORDERS_OFFLINE_PROMPT = """
+
+ORDER DASHBOARD OFF - the order dashboard (order tracking and the distributors' scheme list) cannot be reached
+right now; it is normally switched off overnight, 10:30 PM to 10:30 AM. For "what is the scheme / offer on X",
+"who gives the best scheme on X" or "where is my order", say in one short line that the scheme list (or order
+tracking) is offline until about 10:30 AM, and answer nothing more from other tools - purchase history shows
+only what past bills gave, not the distributors' current schemes. Questions about what the shop actually GOT on
+its purchase bills (scheme gaps, free goods received) still go to the purchase tools as usual.
+"""
+
 # Rack & bin lookups (see rack_bridge.py): added to the system prompt ONLY while the rack tools are configured,
 # so with RACK_ASK_PIN unset the prompt - and every answer - is exactly what it was before.
 RACK_PROMPT = """
@@ -646,6 +660,8 @@ def _build_system_prompt(voice=False, speak=False):
                        'results correctly):\n' + facts)
         if any(t['name'] == SCHEME_TOOL for t in order_bridge.tool_specs()):
             prompt += SCHEME_PROMPT
+    elif order_bridge.configured():
+        prompt += ORDERS_OFFLINE_PROMPT
     notes = T.get_notes(n=30).get('notes') or []
     if notes:
         notes_text = '\n'.join(f"- [{n['timestamp']}] {n['note']}" for n in notes)
@@ -756,7 +772,7 @@ def _gemini_answer(question, verbose=False, history=None, voice=False, speak=Fal
 # OpenAI's. Default backend.
 # ---------------------------------------------------------------------------
 def _openrouter_answer(question, verbose=False, history=None, voice=False, speak=False, cost_out=None):
-    from openai import APIStatusError, OpenAI
+    from openai import APIConnectionError, APIStatusError, OpenAI
 
     api_key = os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
@@ -796,14 +812,44 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
         messages.append({'role': 'assistant', 'content': a})
     messages.append({'role': 'user', 'content': T.scrub_question(question)})
 
+    # A busy or unreachable model (OpenRouter's "rate-limited upstream" 429 hit
+    # 6 of 24 Google calls in the 2026-10-30 model test) is asked once more on
+    # OPENROUTER_MODEL_BACKUP - a model from another provider - so the owner gets
+    # an answer instead of an error. A bad key, an empty balance or a malformed
+    # request (400/401/402/403) would fail the same way there, so those are not retried.
+    backup_model = os.environ.get('OPENROUTER_MODEL_BACKUP', '').strip()
+    # The same model can be fast or painfully slow depending on which company
+    # serves it: Nemotron took 26-76 s on Together but 1-4 s on Crusoe/CoreWeave/
+    # DeepInfra (2026-10-31 test). OPENROUTER_BACKUP_PROVIDERS lists the companies
+    # to try first, in order; OpenRouter still falls back to the others after them.
+    backup_providers = [p.strip() for p in os.environ.get('OPENROUTER_BACKUP_PROVIDERS', '').split(',') if p.strip()]
+
+    def body_for(model):
+        body = {'usage': {'include': True}}
+        if model == backup_model and backup_providers:
+            body['provider'] = {'order': backup_providers}
+        return body
+
     def complete(model, with_tools):
         # usage.include makes OpenRouter report each call's actual charge,
         # summed into cost_out so a voice conversation can show what it cost.
-        kwargs = {'model': model, 'messages': messages, 'extra_body': {'usage': {'include': True}}}
+        kwargs = {'model': model, 'messages': messages, 'extra_body': body_for(model)}
         if with_tools:
             kwargs['tools'] = tools
         try:
-            resp = client.chat.completions.create(**kwargs)
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except (APIStatusError, APIConnectionError) as e:
+                status = getattr(e, 'status_code', None)
+                if not (backup_model and backup_model != model
+                        and (status is None or status in (408, 409) or status == 429 or status >= 500)):
+                    raise
+                logging.getLogger('reckoner_server').warning(
+                    'Ask: %s gave %s - asking %s instead', model, status or type(e).__name__, backup_model)
+                if verbose:
+                    print(f'  → [{model}] failed ({status or type(e).__name__}), retrying with [{backup_model}]')
+                kwargs['model'], kwargs['extra_body'] = backup_model, body_for(backup_model)
+                resp = client.chat.completions.create(**kwargs)
         except APIStatusError as e:
             detail = e.body if getattr(e, 'body', None) is not None else str(e)
             raise RuntimeError(f'OpenRouter API error {e.status_code}: {detail}') from None
@@ -859,9 +905,13 @@ def _openrouter_answer(question, verbose=False, history=None, voice=False, speak
     # with a "-preview" model) - rather than show the user a blank/"(no
     # answer)" response, fall back to the fast model for one attempt, which
     # has already proven able to answer directly when it skips tool calls.
+    # When the fast model itself wrote the empty answer (spoken mode - Mercury 3
+    # left 1 of 12 blank in the 2026-10-30 test), asking it again is no use: the
+    # backup model gets the attempt instead.
+    retry_model = backup_model if (final_model == fast_model and backup_model) else fast_model
     if verbose:
-        print(f'  → [{final_model}] returned empty, retrying with [{fast_model}]')
-    resp = complete(fast_model, with_tools=False)
+        print(f'  → [{final_model}] returned empty, retrying with [{retry_model}]')
+    resp = complete(retry_model, with_tools=False)
     answer = resp.choices[0].message.content
     return answer or "Sorry, I couldn't generate an answer for that - try rephrasing the question."
 

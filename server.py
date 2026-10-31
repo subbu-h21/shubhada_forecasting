@@ -33,6 +33,7 @@ from werkzeug.utils import secure_filename
 
 import ask as ask_mod
 import ask_limits
+import assistant_bridge
 import mrp_basket
 import run_reckoner as rk
 import salary as salary_mod
@@ -40,7 +41,6 @@ import vault
 import shubhada_fetch
 import leave_notify
 import leave_app
-import whatsapp_ask
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -1101,11 +1101,50 @@ def api_salary_chart():
     return jsonify(_salary_payload(month))
 
 
-@app.route('/api/whatsapp-ask/status')
-@requires_auth
-def api_whatsapp_ask_status():
-    """Is Ask by WhatsApp listening? (state: off / starting / needs_scan / running / error / stopped)"""
-    return jsonify(whatsapp_ask.status())
+# --- The Shop Assistant's connector (see assistant_bridge.py) ------------------------------------------------------
+# Not behind the login: the assistant is a program, not a person. assistant_bridge.authorised() lets in only a
+# caller on this PC that holds the shared ASSISTANT_BRIDGE_KEY.
+def _assistant_gate():
+    ok, status, message = assistant_bridge.authorised(request.remote_addr, request.headers.get('X-Assistant-Key'))
+    return None if ok else (jsonify({'error': message}), status)
+
+
+@app.route('/api/assistant/ping')
+def api_assistant_ping():
+    return _assistant_gate() or jsonify({'ok': True, 'app': 'reckoner'})
+
+
+@app.route('/api/assistant/tools')
+def api_assistant_tools():
+    return _assistant_gate() or jsonify(assistant_bridge.describe())
+
+
+@app.route('/api/assistant/context')
+def api_assistant_context():
+    return _assistant_gate() or jsonify(assistant_bridge.context())
+
+
+@app.route('/api/assistant/run', methods=['POST'])
+def api_assistant_run():
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        result = assistant_bridge.run(str(b.get('name', '')), b.get('args') or {}, b.get('owner'))
+    except Exception as e:
+        logger.warning('Assistant tool %s failed: %s: %s', b.get('name'), type(e).__name__, e)
+        result = {'error': f'{type(e).__name__}: {str(e)[:200]}'}
+    return Response(json.dumps(result, default=str), mimetype='application/json')
+
+
+@app.route('/api/assistant/basket', methods=['POST'])
+def api_assistant_basket():
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    b = request.get_json(force=True, silent=True) or {}
+    return jsonify(assistant_bridge.basket(str(b.get('action', '')), b.get('owner'), b.get('text')))
 
 
 @app.route('/api/ask', methods=['POST'])
@@ -1710,9 +1749,8 @@ if __name__ == '__main__':
     warm_ask_cache_in_background()  # Ask / voice answers: forecast etc., in the background
     print('Ready.')
     print()
-    # Ask by WhatsApp: only when WHATSAPP_ASK_ENABLED=1 and WHATSAPP_ASK_NUMBER are in .env
-    if whatsapp_ask.start_from_env(transcribe_fn=lambda wav: _transcribe(wav)[0]):
-        print('Ask by WhatsApp: starting (its own Chrome window opens).')
+    # Ask by WhatsApp moved to the Shop Assistant (project-15 shop assistant, 31 Oct 2026); it reaches this
+    # server through /api/assistant/* (assistant_bridge.py).
     logger.info('Server starting on http://%s:8420', lan_ip)
     from waitress import serve
     serve(app, host='0.0.0.0', port=8420)

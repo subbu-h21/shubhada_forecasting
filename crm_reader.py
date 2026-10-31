@@ -41,6 +41,9 @@ CACHE_TTL_S = 600                 # a repeated question inside ten minutes is an
 GST_TTL_S = 900
 KEEP_DOWNLOADS_DAYS = 30
 LOCK_WAIT_S = 240                 # a second request waits for the first browser job instead of failing
+LIST_WAIT_S = 45                  # a list that is still empty after this long is asked for again ...
+LIST_TRIES = 2                    # ... this many times in all
+SETTLE_S = 6                      # after signing in the page needs a few seconds to open its live connection
 MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October',
           'November', 'December']
 SECTIONS = {'PURCHASE DETAILS': 'purchases', 'SALES DETAILS': 'sales', 'CREDIT NOTE DETAILS': 'credit_notes',
@@ -242,6 +245,7 @@ def _ensure_login(page, creds):
     page.goto(BASE + '/', wait_until='domcontentloaded', timeout=60000)
     page.wait_for_timeout(4000)
     if not _is_login_page(page):
+        page.wait_for_timeout(SETTLE_S * 1000)
         return
     logger.info('[crm] signing in with the saved login')
     page.wait_for_selector('input[name="user"]', timeout=20000)
@@ -256,7 +260,25 @@ def _ensure_login(page, creds):
         page.wait_for_timeout(1000)
     if _is_login_page(page):
         raise CrmError('shubhadahealth did not accept the saved login. Please check it in the vault (Salary > Edit).')
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(SETTLE_S * 1000)
+
+
+def _where(page):
+    try:
+        return re.sub(r'[?#].*$', '', page.url or '')[-60:]
+    except Exception:
+        return '?'
+
+
+def _save_debug(page, why):
+    """A failed job leaves its last screen (local, git-ignored, overwritten each time) and one log line saying where
+    and why - page text is never logged."""
+    try:
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(DOWNLOAD_DIR / 'last_failure.png'))
+    except Exception:
+        pass
+    logger.warning('[crm] job failed at %s: %s', _where(page), str(why).splitlines()[0][:200] if str(why) else '?')
 
 
 def _run_job(fn, *args):
@@ -273,16 +295,24 @@ def _run_job(fn, *args):
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=str(PROFILE_DIR), channel='chrome', headless=_headless(),
-                viewport={'width': 1600, 'height': 900}, accept_downloads=True)
+                viewport={'width': 1600, 'height': 900}, accept_downloads=True,
+                locale='en-IN', timezone_id='Asia/Kolkata')
             try:
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 page.set_default_timeout(30000)
                 try:
                     _ensure_login(page, creds)
+                    logger.info('[crm] signed in (%s)', _where(page))
                     return fn(page, *args)
                 except PWTimeout as exc:
-                    logger.warning('[crm] timed out: %s', str(exc).splitlines()[0][:120])
+                    _save_debug(page, 'timed out: ' + str(exc))
                     raise CrmError('shubhadahealth did not answer in time - please try again in a minute.')
+                except CrmError as exc:
+                    _save_debug(page, exc)
+                    raise
+                except Exception as exc:
+                    _save_debug(page, '%s: %s' % (type(exc).__name__, exc))
+                    raise
             finally:
                 try:
                     ctx.close()
@@ -337,6 +367,7 @@ def _clean_downloads():
 # The reports
 # ---------------------------------------------------------------------------
 def _gst_job(page, year, month):
+    logger.info('[crm] GST: opening Reports')
     _click(page, 'Reports')
     page.wait_for_selector('text=Procurement', timeout=20000)
     _click(page, 'Procurement')
@@ -344,9 +375,16 @@ def _gst_job(page, year, month):
     _click(page, 'Consolidated GST Report')
     page.wait_for_selector('text=Generate', timeout=20000)
     _pick_month(page, year, month)
+    logger.info('[crm] GST: month set, generating')
     _click(page, 'Generate')
     waited = _wait_report_done(page)
     parsed = parse_gst_text(page.inner_text('body') or '')
+    if not parsed['sections']:
+        logger.info('[crm] GST: the report came back empty - asking for it once more')
+        _click(page, 'Generate')
+        waited += _wait_report_done(page)
+        parsed = parse_gst_text(page.inner_text('body') or '')
+    logger.info('[crm] GST: report loaded after %.0fs', waited)
     if not parsed['sections'] or parsed['net_gst_payable'] is None:
         raise CrmError('The GST report page did not show its figures - please try again.')
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -357,12 +395,13 @@ def _gst_job(page, year, month):
     name = re.sub(r'[\\/:*?"<>|]+', '_', download.suggested_filename or 'GST Report %04d-%02d.xlsx' % (year, month))
     path = DOWNLOAD_DIR / name
     download.save_as(str(path))
+    logger.info('[crm] GST: file saved (%d KB)', path.stat().st_size // 1024)
     parsed.update({'month': '%04d-%02d' % (year, month), 'file': str(path), 'file_name': path.name,
                    'file_size_kb': round(path.stat().st_size / 1024), 'seconds': round(waited)})
     return parsed
 
 
-def _open_payables(page):
+def _to_payables(page):
     _click(page, 'menu')
     page.wait_for_selector('text=Accounts', timeout=20000)
     _click(page, 'Accounts')
@@ -370,12 +409,38 @@ def _open_payables(page):
     _click(page, 'Statement Of Accounts')
     page.wait_for_selector('text=Out Standing - Payable', timeout=20000)
     _click(page, 'Out Standing - Payable')
-    t0 = time.time()
-    while time.time() - t0 < 120:
-        page.wait_for_timeout(2000)
-        parsed = parse_payables(page.inner_text('body') or '')
-        if parsed['total'] is not None and parsed['parties']:
-            return parsed
+
+
+def _rows_add_up(parsed):
+    """The page prints its own total; a table that is still filling does not add up to it."""
+    return parsed['total'] is not None and abs(sum(p['amount'] for p in parsed['parties']) - parsed['total']) < 1.0
+
+
+def _open_payables(page):
+    """The list arrives over the site's live connection a moment after the page opens - and fills in as it arrives
+    (a first look once showed 19 of 61 parties). It is read only when two looks in a row agree AND the rows add up
+    to the page's own total. If it stays empty ("Total= 0") for LIST_WAIT_S the route is walked again."""
+    for attempt in range(1, LIST_TRIES + 1):
+        logger.info('[crm] opening Accounts > Statement Of Accounts > Out Standing - Payable (try %d)', attempt)
+        _to_payables(page)
+        t0, last, same = time.time(), None, 0
+        while time.time() - t0 < LIST_WAIT_S:
+            page.wait_for_timeout(2000)
+            parsed = parse_payables(page.inner_text('body') or '')
+            if parsed['total'] is None or not parsed['parties']:
+                continue                                    # still empty
+            state = (parsed['total'], len(parsed['parties']))
+            same = same + 1 if state == last else 0
+            last = state
+            complete = _rows_add_up(parsed)
+            if (complete and same >= 1) or same >= 3:
+                parsed['complete'] = complete
+                logger.info('[crm] payables loaded (%d parties%s)', len(parsed['parties']), '' if complete else ', rows do not add up to the page total')
+                return parsed
+        logger.info('[crm] the payables list stayed empty or kept changing for %ds (try %d)', LIST_WAIT_S, attempt)
+        if attempt < LIST_TRIES:
+            _click(page, 'Dashboard')
+            page.wait_for_timeout(SETTLE_S * 1000)
     raise CrmError('The payables list did not load - please try again.')
 
 
@@ -486,8 +551,11 @@ def tool_crm_outstanding_payable(top=15):
     except (TypeError, ValueError):
         top = 15
     ranked = sorted(r['parties'], key=lambda p: -p['amount'])
-    return {'total_outstanding_rupees': r['total'], 'parties_owed': len(r['parties']), 'top': ranked[:top],
-            'source': 'shubhadahealth.com > Accounts > Statement Of Accounts > Out Standing - Payable, as it stands now'}
+    out = {'total_outstanding_rupees': r['total'], 'parties_owed': len(r['parties']), 'top': ranked[:top],
+           'source': 'shubhadahealth.com > Accounts > Statement Of Accounts > Out Standing - Payable, as it stands now'}
+    if not r.get('complete', True):
+        out['warning'] = 'the party amounts did not add up to the page total, so the list may be incomplete - say so'
+    return out
 
 
 def tool_crm_party_last_paid(party):
@@ -533,6 +601,10 @@ def is_crm_tool(name):
     return name in _BY_NAME
 
 
+_NO_RETRY = ('Do not call this tool again for this question - each try takes minutes. Tell the owner plainly what went '
+             'wrong and that they can ask again in a little while.')
+
+
 def run(name, args):
     spec = _BY_NAME.get(name)
     if spec is None:
@@ -540,9 +612,10 @@ def run(name, args):
     try:
         return spec['fn'](**(args if isinstance(args, dict) else {}))
     except CrmError as exc:
-        return {'error': str(exc)}
+        logger.warning('[crm] %s: %s', name, exc)
+        return {'error': str(exc), 'note': _NO_RETRY}
     except TypeError as exc:
         return {'error': 'bad arguments: %s' % exc}
     except Exception as exc:
         logger.error('[crm] %s failed: %s: %s', name, type(exc).__name__, exc)
-        return {'error': 'the CRM report could not be fetched (%s)' % type(exc).__name__}
+        return {'error': 'the CRM report could not be fetched (%s)' % type(exc).__name__, 'note': _NO_RETRY}

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault('OPENROUTER_API_KEY', 'sk-test-not-real')
 os.environ['OPENROUTER_MODEL_FAST'] = 'fake/fast-model'
 os.environ['OPENROUTER_MODEL_REASONING'] = 'fake/reasoning-model'
+os.environ['OPENROUTER_MODEL_BACKUP'] = 'fake/backup-model'
 os.environ['SPEECH_TTS_MODEL'] = 'google/gemini-3.8-flash-lite-tts'      # the cloud voice is what these tests exercise, whatever .env says
 os.environ['SPEECH_TTS_FALLBACK_MODEL'] = 'google/gemini-3.8-flash-tts'
 for v in ('ORDER_ASK_URL', 'ORDER_ASK_KEY'):
@@ -28,6 +29,7 @@ for v in ('ORDER_ASK_URL', 'ORDER_ASK_KEY'):
 import openai  # noqa: E402
 import ask  # noqa: E402
 import server  # noqa: E402
+os.environ.pop('OPENROUTER_BACKUP_PROVIDERS', None)   # ask.py loaded .env at import; the tests set their own
 
 print('testing:', ROOT)
 print('  server from', server.__file__)
@@ -241,7 +243,16 @@ class FakeCompletions:
 
     def create(self, **kw):
         self.requests.append(copy.deepcopy(kw))
-        return self.script.pop(0)
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def api_error(status):
+    import httpx2 as httpx  # the openai SDK 3.x ships on httpx2
+    resp = httpx.Response(status, request=httpx.Request('POST', 'https://openrouter.ai/api/v1/chat/completions'))
+    return openai.APIStatusError(f'status {status}', response=resp, body={'message': f'status {status}'})
 
 
 def reply(content=None, calls=None):
@@ -279,6 +290,58 @@ try:
     check('live voice (delegated): the FAST model writes the final answer', answer == 'Live answer.' and models[-1] == 'fake/fast-model' and len(models) == 3, models)
     sysmsg = fake.requests[0]['messages'][0]['content']
     check('live voice: the delegated question still carries the identity and the live-voice rules', 'suubbiii' in sysmsg and 'LIVE VOICE conversation' in sysmsg)
+    # --- the backup model (OPENROUTER_MODEL_BACKUP, 2026-10-30) ---
+    answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), reply(''), reply('Backup answer.')], speak=True)
+    models = [r['model'] for r in fake.requests]
+    check('spoken: an empty answer from the fast model is retried on the BACKUP model, not the same one',
+          answer == 'Backup answer.' and models[-2:] == ['fake/fast-model', 'fake/backup-model'], models)
+    answer, fake = run([api_error(429), reply(calls=[('get_overview', {})]), reply('(ready)'), reply('Spoken answer.')], speak=True)
+    models = [r['model'] for r in fake.requests]
+    check('a busy model (429) is asked once more on the backup model, and the answer still comes',
+          answer == 'Spoken answer.' and models[:2] == ['fake/fast-model', 'fake/backup-model'], models)
+    check('no backup providers set: no provider preference is sent', all('provider' not in r['extra_body'] for r in fake.requests))
+    os.environ['OPENROUTER_BACKUP_PROVIDERS'] = 'crusoe/bf16, coreweave/nvfp4'
+    try:
+        answer, fake = run([api_error(429), reply(calls=[('get_overview', {})]), reply('(ready)'), reply('Spoken answer.')], speak=True)
+        provs = [(r['model'], r['extra_body'].get('provider')) for r in fake.requests]
+        check('backup providers set: the backup call asks for those companies first, in order',
+              provs[1] == ('fake/backup-model', {'order': ['crusoe/bf16', 'coreweave/nvfp4']}), provs)
+        check('...and the fast model\'s own calls carry no provider preference',
+              all(p is None for m, p in provs if m == 'fake/fast-model'), provs)
+        check('...and usage reporting is still asked for on every call', all(r['extra_body'].get('usage') == {'include': True} for r in fake.requests))
+        answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), reply(''), reply('Backup answer.')], speak=True)
+        check('an empty spoken answer\'s retry on the backup also uses the chosen companies',
+              fake.requests[-1]['model'] == 'fake/backup-model' and fake.requests[-1]['extra_body'].get('provider') == {'order': ['crusoe/bf16', 'coreweave/nvfp4']},
+              fake.requests[-1]['extra_body'])
+    finally:
+        os.environ.pop('OPENROUTER_BACKUP_PROVIDERS', None)
+    answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), api_error(503), reply('Typed answer.')])
+    models = [r['model'] for r in fake.requests]
+    check('typed: a down reasoning model (503) hands the answer to the backup model',
+          answer == 'Typed answer.' and models[-2:] == ['fake/reasoning-model', 'fake/backup-model'], models)
+    try:
+        answer, fake = run([api_error(401), reply('never used')], speak=True)
+        check('a bad key (401) is not retried on the backup - it would fail the same way', False, answer)
+    except RuntimeError as e:
+        check('a bad key (401) is not retried on the backup - it would fail the same way', '401' in str(e), e)
+    try:
+        answer, fake = run([api_error(429), api_error(429)], speak=True)
+        check('both models busy -> a clear error, not a hang or a third call', False, answer)
+    except RuntimeError as e:
+        check('both models busy -> a clear error, not a hang or a third call', '429' in str(e), e)
+    saved_backup = os.environ.pop('OPENROUTER_MODEL_BACKUP')
+    try:
+        answer, fake = run([reply(calls=[('get_overview', {})]), reply('(ready)'), reply(''), reply('Retried answer.')], speak=True)
+        models = [r['model'] for r in fake.requests]
+        check('no backup set: an empty spoken answer is retried on the fast model, as before',
+              answer == 'Retried answer.' and models[-2:] == ['fake/fast-model', 'fake/fast-model'], models)
+        try:
+            run([api_error(429), reply('never used')], speak=True)
+            check('no backup set: a 429 is reported as before', False)
+        except RuntimeError as e:
+            check('no backup set: a 429 is reported as before', '429' in str(e), e)
+    finally:
+        os.environ['OPENROUTER_MODEL_BACKUP'] = saved_backup
 finally:
     ask.T.run_tool, ask.T.get_notes = real_run_tool, real_notes
 

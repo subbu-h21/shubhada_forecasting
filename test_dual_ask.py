@@ -197,6 +197,13 @@ os.environ['ORDER_ASK_URL'] = 'http://127.0.0.1:1'      # nothing listens there
 order_bridge.reset_cache()
 check('dashboard unreachable: no order tools, no exception', not any(t['name'].startswith('orders_') for t in ask._available_tools()))
 check('dashboard unreachable: a call still returns an error dict', 'not reachable' in order_bridge.run('orders_get_held_carts', {}).get('error', ''))
+offline_prompt = ask._build_system_prompt()
+check('dashboard unreachable (its nightly 10:30 PM stop): the prompt says the scheme list is offline instead of letting the model hunt',
+      'ORDER DASHBOARD OFF' in offline_prompt and '10:30 AM' in offline_prompt and 'DUAL MODE' not in offline_prompt and 'SCHEME LIST' not in offline_prompt)
+dual_on()
+check('dashboard back: the offline note is gone again', 'ORDER DASHBOARD OFF' not in ask._build_system_prompt())
+dual_off()
+check('dual mode not set up at all: no offline note either (nothing to be offline)', 'ORDER DASHBOARD OFF' not in ask._build_system_prompt())
 dual_on()
 
 # --- 7. the whole loop with a scripted model ---------------------------------------------------
