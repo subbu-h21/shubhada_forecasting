@@ -41,6 +41,7 @@ import pandas as pd
 
 import run_reckoner as rk
 import salary as salary_mod
+import leave_app
 
 # Column names that must never appear in anything handed to the model.
 PII_COLUMNS = {
@@ -1130,8 +1131,12 @@ def get_salary_slips(name=None, month=None, n=40):
     against the timings the owner agreed with that person (agreed_timings),
     or their own usual pattern if none are set. Targets earn a bonus share
     each when reached. A month under 10 active days is not scored. Until
-    trial_until, nobody is paid below their base. discipline_cut_pct is the
-    share of the DISCIPLINE part lost (never the performance part).
+    trial_until, nobody is paid below their base - except loss-of-pay days,
+    which are cut even then. discipline_cut_pct is the share of the
+    DISCIPLINE part lost (never the performance part). 'leave' counts that
+    month's approved leave, sick days, loss-of-pay days (leave not approved,
+    no paid days left, or absent without applying - each costs base / 30)
+    and Sunday sessions worked, from the shop's leave app.
 
     Use weak_items, missed targets and discipline to advise how someone can
     earn more next month (lowest marks with the biggest group weight first).
@@ -1228,6 +1233,52 @@ def get_salary_slips(name=None, month=None, n=40):
 # ---------------------------------------------------------------------------
 EMPLOYEE_TARGETS_DIR = Path(__file__).parent / 'data' / 'employee_targets'
 _TARGET_FILENAME_RE = re.compile(r'^Performance Chart of (.+)\.xlsx$', re.IGNORECASE)
+
+
+def get_employee_leave(name=None):
+    """LEAVE from the shop's leave app, as of today: each employee's group
+    (A = senior, B = new), paid days left of 15 and sick days left of 5 for
+    the leave year (October-September), loss-of-pay days this leave year,
+    leave in the last 31 days and the next 60 days (date, type regular/sick,
+    granted or waiting for the admin, paid or loss_of_pay), Sunday sessions
+    they chose, and every request waiting for the admin. Leave rules: each
+    day the first applicant from Group A and from Group B are granted at
+    once; later ones wait for the admin (approved = paid, not approved =
+    loss of pay); sick leave is same-day and outside that limit. No reasons
+    and no rupees are included.
+
+    Use it for "who is on leave today/tomorrow/this week", "how many leave
+    days does X have left", "is anyone waiting for approval", and together
+    with get_salary_slips / get_employee_scorecard for an employee's full
+    picture (performance + discipline + leave). With `name` (contains-match
+    on the reckoner's spelling or the leave app's): that person only."""
+    try:
+        data = leave_app.fetch_status(timeout=4)
+    except Exception as exc:
+        return {'available': False, 'reason': str(exc)}
+    names = salary_mod.match_site_names(sorted({e['name'] for e in data['employees']}))
+    rows = []
+    for e in data['employees']:
+        rk_name = names.get(e['name']) or ''
+        if rk_name == '-':
+            continue
+        row = {'employee': rk_name or e['name'], **{k: v for k, v in e.items() if k not in ('emp_code', 'name')}}
+        if rk_name and rk_name.lower() != e['name'].lower():
+            row['leave_app_name'] = e['name']
+        rows.append(row)
+    if name:
+        q = name.strip().lower()
+        rows = [r for r in rows if q in r['employee'].lower() or q in r.get('leave_app_name', '').lower()]
+    today = data['today']
+    on_leave_today = [r['employee'] for r in rows for d in r['upcoming'] if d['date'] == today and d['status'] == 'granted']
+    waiting = [dict(w, employee=names.get(w['name']) or w['name']) for w in data['waiting_for_admin']]
+    for w in waiting:
+        w.pop('name', None)
+        w.pop('emp_code', None)
+    return {'available': True, 'today': today, 'leave_year': data['leaveYear'],
+            'on_leave_today': on_leave_today, 'waiting_for_admin': waiting,
+            'sunday_pay_per_session_note': 'Sunday work pays extra per session (amount on the dashboard)',
+            'employees': rows}
 
 
 def get_employee_targets(name=None):
@@ -2075,6 +2126,9 @@ TOOLS = [
     {'name': 'get_salary_slips', 'fn': get_salary_slips,
      'description': get_salary_slips.__doc__,
      'parameters': _schema({'name': {'type': 'string'}, 'month': {'type': 'string'}, 'n': {'type': 'integer'}})},
+    {'name': 'get_employee_leave', 'fn': get_employee_leave,
+     'description': get_employee_leave.__doc__,
+     'parameters': _schema({'name': {'type': 'string'}})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,
      'parameters': _schema({'name': {'type': 'string'}})},

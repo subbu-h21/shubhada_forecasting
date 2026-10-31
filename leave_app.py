@@ -45,3 +45,21 @@ def fetch(month, timeout=5):
     if data.get('month') != month or not isinstance(data.get('leaveDays'), list):
         raise RuntimeError('The leave app sent something unexpected.')
     return data
+
+
+def fetch_status(timeout=5):
+    """Today's leave picture (balances, who is off, upcoming and waiting leave)
+    for the Ask page. Same guards and errors as fetch()."""
+    token = leave_notify.token(create=False)
+    if not token:
+        raise RuntimeError('The leave app link is not set up (no LEAVE_NOTIFY_TOKEN in .env).')
+    req = urllib.request.Request(f"{url()}/api/export/status", headers={'X-Notify-Token': token})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return json.loads(res.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError('The leave app is an older version without the leave status - restart it with the new code.') from None
+        raise RuntimeError(f'The leave app refused ({e.code}).') from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RuntimeError(f'The leave app is not running at {url()}. Start it with its start.bat.') from None

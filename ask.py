@@ -294,6 +294,14 @@ Rules:
   figure - say the amounts are on the dashboard (People > Salary) and answer
   in percentages, marks and counts. For "how to earn more", point to their
   weakest items, missed targets and discipline.
+- If a question is about an employee's LEAVE - who is on leave today,
+  tomorrow or this week, how many leave or sick days someone has left, loss
+  of pay, leave waiting for approval, or who works which Sunday session -
+  use get_employee_leave (with their name for one person). For an
+  employee's full picture ("how is X doing", performance + discipline +
+  leave), call get_employee_leave AND get_salary_slips (and
+  get_employee_scorecard for the month-by-month trend) and combine them.
+  Leave counts are days, never rupees; leave reasons are not available.
 - If a question asks which customers are due/overdue for a refill, or about
   repeat-purchase/reorder patterns for a product, use get_refill_due.
   Customers there are pseudonymous codes, same privacy rule as
