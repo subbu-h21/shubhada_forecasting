@@ -349,18 +349,82 @@ def save_manifest(m):
     _atomic_write_text(MANIFEST_PATH, json.dumps(m, indent=2))
 
 
+SWAP_COVERED_MIN_ROWS = 50       # a month with this many rows in a file is one the file really covers ...
+SWAP_COVERED_SHARE = 0.02        # ... or with this share of its rows - its dates are never swapped
+
+
 def fix_date_column(df, dominant_year, dominant_month):
     """Sales/purchase registers occasionally have a stray row keyed in
     MM/DD/YYYY instead of DD/MM/YYYY. Parse normally, then for any row whose
-    month doesn't match the file's dominant month, try swapping day/month and
-    keep the swap only if it lands in the dominant month."""
+    month doesn't match the file's dominant month, swap its day and month and
+    keep the swap only if it lands in the dominant month.
+
+    The swap is done on the parsed date's own parts, not by parsing the text
+    again with dayfirst=False: pandas picks ONE format for a whole column from
+    its first value, so re-parsing ['29/06/2026', '07/11/2026'] read both as
+    day-first and the real month-first row was never swapped - 94 purchase
+    lines (~Rs 80,000, 12 bills) sat in the wrong months, two of them in the
+    future (7 Nov and 5 Dec 2026), until 1 Nov 2026. Swapping the parts also
+    works for a date Excel stored as a real date.
+
+    Only a RARE month is a candidate: many exports also carry hundreds of real
+    bills from the month before (an October file with 1,134 September rows),
+    and a real "10/09" there must stay 10 September - not become 9 October."""
     parsed = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-    bad_idx = parsed.index[parsed.dt.month != dominant_month]
-    if len(bad_idx) > 0:
-        alt = pd.to_datetime(df.loc[bad_idx, 'Date'], dayfirst=False, errors='coerce')
-        use_alt = alt.index[(alt.dt.month == dominant_month) & (alt.dt.year == dominant_year)]
-        parsed.loc[use_alt] = alt.loc[use_alt]
+    in_month = (parsed.dt.month == dominant_month) & (parsed.dt.year == dominant_year)
+    period = parsed.dt.to_period('M')
+    counts = period.value_counts()
+    covered = set(counts.index[(counts >= SWAP_COVERED_MIN_ROWS) | (counts / max(len(df), 1) >= SWAP_COVERED_SHARE)])
+    stray = parsed.notna() & ~in_month & (parsed.dt.day <= 12) & ~period.isin(covered)
+    if stray.any():
+        parts = pd.DataFrame({'year': parsed.dt.year, 'month': parsed.dt.day, 'day': parsed.dt.month})
+        swapped = pd.to_datetime(parts.where(stray), errors='coerce') + (parsed - parsed.dt.normalize())
+        use = stray & (swapped.dt.month == dominant_month) & (swapped.dt.year == dominant_year)
+        parsed.loc[use] = swapped.loc[use]
     return parsed
+
+
+def redate_active_files(dry_run=False):
+    """One-off repair for rows already stored before fix_date_column was
+    corrected (1 Nov 2026): every active file whose rows come out with
+    different dates under the current fix_date_column is processed again, and
+    its rows in the master are replaced (_append_rows works per Source_File +
+    Source_Month, exactly as a re-upload of that file would). Files that are
+    missing or changed since they were ingested are left alone. Backs the
+    data up first. -> [(file, kind, rows whose date changed)]"""
+    master_for = {'sale': SALES_MASTER, 'purchase': PURCH_MASTER}
+    out = []
+    with _FileLock('ingest'):
+        manifest = load_manifest()
+        work = []
+        for name, meta in sorted(manifest['files'].items()):
+            path = RAW_DIR / name
+            if meta.get('status') != 'active' or not path.exists() or file_hash(path) != meta.get('hash'):
+                continue
+            master = master_for.get(meta.get('kind'))
+            if master is None or not master.exists():
+                continue
+            kind, df, coverage = detect_type_and_load(path)
+            stored = pd.read_csv(master, usecols=['Date', 'Source_File', 'Source_Month'])
+            stored = stored[(stored['Source_File'] == name) & (stored['Source_Month'] == df['Source_Month'].iloc[0])]
+            if len(stored) != len(df):
+                print(f'Skipped {name}: {len(stored)} stored rows vs {len(df)} in the file - re-upload it instead.')
+                continue
+            moved = int((pd.to_datetime(stored['Date'].values, format='mixed') != df['Date'].values).sum())
+            if moved:
+                work.append((name, kind, df, coverage, moved))
+                out.append((name, kind, moved))
+        if dry_run or not work:
+            return out
+        backup_processed_data()
+        for name, kind, df, coverage, moved in work:
+            if kind == 'sale':
+                df = normalize_sale_units(df)
+            _append_rows(master_for[kind], df)
+            manifest['files'][name].update(coverage)
+            print(f'Re-dated {name}: {moved} rows now carry their real date.')
+        save_manifest(manifest)
+    return out
 
 
 # Source_Month tags an entire uploaded FILE with its one dominant month, for
