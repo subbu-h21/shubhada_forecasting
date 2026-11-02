@@ -697,6 +697,21 @@ def load_leave(month):
     return _load(LEAVE_DIR / f'{month}.json', None)
 
 
+# The owner's thumb rules (2 Nov 2026): a Sunday session worked pays 1.2 x half a day's pay on top; a day (or half day) the boss marks as away
+# with no notice at all costs 1.5 x the day's pay. The leave app sends its own values; these are the defaults.
+SUNDAY_FACTOR = 1.2
+UNNOTICED_FACTOR = 1.5
+
+
+def thumb_rule_money(base, lop_divisor, sunday_sessions, unnoticed_weight, sunday_factor=SUNDAY_FACTOR, unnoticed_factor=UNNOTICED_FACTOR):
+    """-> (sunday_pay, unnoticed_amount). A day's pay is base / lop_divisor (30), as for loss of pay. One Sunday session is half a day."""
+    day = base / lop_divisor
+    return sunday_sessions * 0.5 * sunday_factor * day, unnoticed_weight * unnoticed_factor * day
+
+
+SLIP_SUNDAY_X, SLIP_UNNOTICED_X = SUNDAY_FACTOR, UNNOTICED_FACTOR           # the factors printed on a slip (the leave app's own are used for the money)
+
+
 def leave_for_month(month):
     """{reckoner name: {'paid': [dates], 'sick': [...], 'lop': [...], 'sunday': {...}}}
     from the saved leave-app export, and info (fetched_at, unmatched names)."""
@@ -706,7 +721,11 @@ def leave_for_month(month):
     names = match_site_names(sorted({e['name'] for e in data.get('employees', [])}))
     code_to = {e['emp_code']: names.get(e['name']) for e in data.get('employees', [])}
     out = {}
-    blank = lambda: {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}}
+    blank = lambda: {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}, 'unnoticed': {'weight': 0, 'items': []}, 'left': None}
+    for e in data.get('employees', []):                 # what each person has left this leave year (shown on the slip)
+        emp = code_to.get(e['emp_code'])
+        if emp and emp != '-' and e.get('leaveLeft'):
+            out.setdefault(emp, blank())['left'] = e['leaveLeft']
     for d in data.get('leaveDays', []):
         emp = code_to.get(d['emp_code'])
         if not emp or emp == '-':
@@ -717,7 +736,14 @@ def leave_for_month(month):
         emp = code_to.get(w['emp_code'])
         if emp and emp != '-':
             out.setdefault(emp, blank())['sunday'] = {'sessions': w['sessions'], 'amount': w['amount'], 'dates': w['dates']}
+    for u in data.get('unnoticed', []):                  # days the boss marked as away with no notice at all (full or half day)
+        emp = code_to.get(u['emp_code'])
+        if emp and emp != '-':
+            row = out.setdefault(emp, blank())['unnoticed']
+            row['items'].append({'date': u['date'], 'portion': u.get('portion', 'full'), 'weight': u.get('weight', 1)})
+            row['weight'] += u.get('weight', 1)
     return out, {'fetched': True, 'fetched_at': data.get('fetched_at'), 'pay': data.get('sundaySessionPay'),
+                 'sunday_factor': data.get('sundayPayFactor', SUNDAY_FACTOR), 'unnoticed_factor': data.get('unnoticedFactor', UNNOTICED_FACTOR),
                  'unmatched': sorted(n for n, e in names.items() if not e)}
 
 
@@ -736,7 +762,7 @@ def _open_days(punches, month):
 def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_days):
     """One person's leave for the slip: loss-of-pay days with the reason for each,
     paid and sick days, Sunday work."""
-    lv = leave_by_emp.get(emp) or {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}}
+    lv = leave_by_emp.get(emp) or {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}, 'unnoticed': {'weight': 0, 'items': []}, 'left': None}
     reasons = {d: 'leave not approved / no paid days left' for d in lv['lop']}
     for r in logged:
         if r['type'] == 'unplanned_leave' and r.get('date', '').startswith(month):
@@ -761,13 +787,20 @@ def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_
                          f"(shop open, no punch-in, no bill, no leave applied) - loss of pay.")
     elif info.get('fetched'):
         notes.append('No punch-ins this month, so days absent without leave are not checked.')
+    # A day the boss marked as unnoticed replaces any other loss of pay for that day (never two cuts for one day).
+    un_dates = {i['date'] for i in lv['unnoticed']['items']}
+    for x in un_dates:
+        reasons.pop(x, None)
+    if un_dates:
+        n = lv['unnoticed']['weight']
+        notes.append(f"Away with no notice or permission: {n:g} day{'s' if n != 1 else ''} (marked by the boss) - cut at {info.get('unnoticed_factor', UNNOTICED_FACTOR):g} x the day's pay.")
     lop = sorted(reasons)
     if lv['paid'] or lv['sick']:
         notes.append(f"Approved leave: {len(lv['paid'])} paid day{'s' if len(lv['paid']) != 1 else ''}"
                      + (f", {len(lv['sick'])} sick" if lv['sick'] else '') + ' - no cut.')
     return {'paid': sorted(lv['paid']), 'sick': sorted(lv['sick']),
             'lop': [{'date': x, 'why': reasons[x]} for x in lop],
-            'sunday': lv['sunday'], 'notes': notes}
+            'sunday': lv['sunday'], 'unnoticed': lv['unnoticed'], 'left': lv.get('left'), 'notes': notes}
 
 
 def compute_slips(inputs, month):
@@ -1001,13 +1034,14 @@ def compute_slips(inputs, month):
             # The trial protects the new scoring, not loss of pay (owner's choice A).
             lop_per_day = base / rules['lop_divisor']
             lop_amount = lop_per_day * len(leave['lop'])
-            sunday_pay = leave['sunday']['amount']
-            payable = max(0, (max(calculated, base) if in_trial else calculated) - lop_amount + sunday_pay)
+            sunday_pay, unnoticed_amount = thumb_rule_money(base, rules['lop_divisor'], leave['sunday']['sessions'], leave['unnoticed']['weight'],
+                                                            leave_info.get('sunday_factor', SUNDAY_FACTOR), leave_info.get('unnoticed_factor', UNNOTICED_FACTOR))
+            payable = max(0, (max(calculated, base) if in_trial else calculated) - lop_amount - unnoticed_amount + sunday_pay)
             money = {k: round(v) for k, v in dict(
                 base=base, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
                 disc_deduction=disc_ded, disc_pay=disc_pay,
                 commit_bonus=commit_bonus, commit_max=commit_max,
-                calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, sunday_pay=sunday_pay,
+                calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, unnoticed_amount=unnoticed_amount, sunday_pay=sunday_pay,
                 payable=payable, vs_base=calculated - base).items()}
         slips.append({
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
@@ -1322,9 +1356,12 @@ def slip_message(x, rules):
         if m.get('lop_amount'):
             n = len(lv['lop'])
             L.append(f"Loss of pay ({n} day{'s' if n != 1 else ''} x {_rs(m['lop_per_day'])}): minus {_rs(m['lop_amount'])}")
+        if m.get('unnoticed_amount'):
+            w = lv['unnoticed']['weight']
+            L.append(f"Away with no notice or permission ({w:g} day{'s' if w != 1 else ''} x {SLIP_UNNOTICED_X:g} x {_rs(m['lop_per_day'])}): minus {_rs(m['unnoticed_amount'])}")
         if m.get('sunday_pay'):
-            L.append(f"Sunday work ({lv['sunday']['sessions']} session{'s' if lv['sunday']['sessions'] != 1 else ''}): plus {_rs(m['sunday_pay'])}")
-        if x['trial'] or m.get('lop_amount') or m.get('sunday_pay'):
+            L.append(f"Sunday work ({lv['sunday']['sessions']} session{'s' if lv['sunday']['sessions'] != 1 else ''} x half a day x {SLIP_SUNDAY_X:g}): plus {_rs(m['sunday_pay'])}")
+        if x['trial'] or m.get('lop_amount') or m.get('unnoticed_amount') or m.get('sunday_pay'):
             L.append(f"*To be paid: {_rs(m['payable'])}*")
 
     perf = x['perf_score']
@@ -1360,14 +1397,18 @@ def slip_message(x, rules):
                  + (f" x {rules['pct_per_incident']:g}% = minus {_rs(m['disc_deduction'])}" if m else ''))
     else:
         L.append('No late / break / exit counted this month.')
-    if lv['paid'] or lv['sick'] or lv['lop'] or lv['sunday']['sessions']:
+    if lv['paid'] or lv['sick'] or lv['lop'] or lv['sunday']['sessions'] or lv['unnoticed']['items'] or lv.get('left'):
         L += ['', '*Leave / ರಜೆ*']
         if lv['paid'] or lv['sick']:
             L.append(f"Approved leave: {len(lv['paid']) + len(lv['sick'])} day{'s' if len(lv['paid']) + len(lv['sick']) != 1 else ''} (no cut)")
         if lv['lop']:
             L.append('Loss of pay: ' + ', '.join(f"{int(i['date'][8:])} {_MONTHS[int(i['date'][5:7]) - 1]}" for i in lv['lop']))
+        if lv['unnoticed']['items']:
+            L.append('Away with no notice: ' + ', '.join(f"{int(i['date'][8:])} {_MONTHS[int(i['date'][5:7]) - 1]}" + (' (half day)' if i['portion'] == 'half' else '') for i in lv['unnoticed']['items']))
         if lv['sunday']['sessions']:
             L.append(f"Sunday sessions worked: {lv['sunday']['sessions']}")
+        if lv.get('left'):
+            L.append(f"Leave left this year ({lv['left']['label']}): {lv['left']['paid']} paid, {lv['left']['sick']} sick")
 
     c = x.get('commitment')
     if c and not c['counted']:
@@ -1457,6 +1498,13 @@ def action_plan(x, rules, limit=4):
              f"Absent without leave on {absent} day{'s' if absent != 1 else ''}: {_rs(m['lop_per_day'] * absent)} loss of pay. "
              f"Apply in the leave app first - approved leave is paid.",
              f"ತಿಳಿಸದೆ ರಜೆ {absent} ದಿನ: {_rs(m['lop_per_day'] * absent)} ಸಂಬಳ ಕಡಿತ. ಮೊದಲೇ ರಜೆ ಆ್ಯಪ್‌ನಲ್ಲಿ ಅರ್ಜಿ ಹಾಕಿ - ಮಂಜೂರಾದ ರಜೆಗೆ ಕಡಿತವಿಲ್ಲ.")
+
+    if x['leave']['unnoticed']['items'] and m and m.get('unnoticed_amount'):
+        w = x['leave']['unnoticed']['weight']
+        step(m['unnoticed_amount'],
+             f"Away with no notice or permission on {w:g} day{'s' if w != 1 else ''}: {_rs(m['unnoticed_amount'])} ({SLIP_UNNOTICED_X:g} x the day's pay). "
+             f"Apply for leave in the leave app first, or tell the boss before you are away.",
+             f"ಯಾರಿಗೂ ತಿಳಿಸದೆ, ಅನುಮತಿ ಇಲ್ಲದೆ ಗೈರು {w:g} ದಿನ: {_rs(m['unnoticed_amount'])} ಕಡಿತ ({SLIP_UNNOTICED_X:g} ಪಟ್ಟು). ಮೊದಲೇ ರಜೆ ಆ್ಯಪ್‌ನಲ್ಲಿ ಅರ್ಜಿ ಹಾಕಿ ಅಥವಾ ಬಾಸ್‌ಗೆ ತಿಳಿಸಿ.")
 
     if not short and m:
         if x['floor_hit']:
@@ -1687,6 +1735,8 @@ def summary(result):
         'lop_total': sum(s['money']['lop_amount'] for s in sl),
         'lop_days': sum(len(s['leave']['lop']) for s in result['slips']),
         'sunday_total': sum(s['money']['sunday_pay'] for s in sl),
+        'unnoticed_total': sum(s['money'].get('unnoticed_amount', 0) for s in sl),
+        'unnoticed_days': sum(s['leave']['unnoticed']['weight'] for s in result['slips']),
         'below_floor': sum(1 for s in result['slips'] if s['floor_hit']),
         'not_rated': sum(1 for s in result['slips'] if not s['rated']),
         'commit_bonus': sum(s['money'].get('commit_bonus', 0) for s in sl),

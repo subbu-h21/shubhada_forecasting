@@ -19,7 +19,7 @@ import urllib.request
 
 import leave_notify
 
-DEFAULT_URL = 'http://127.0.0.1:3001'
+DEFAULT_URL = 'http://127.0.0.1:3010'      # the leave app's port (it was 3001 until the DC Entry app took that port)
 
 
 def url():
