@@ -1,5 +1,5 @@
 """The owner's thumb rules of 2 Nov 2026 in the salary calculator: a Sunday session worked pays 1.2 x half a day's pay on top, a day (or half day)
-the boss marks as away with no notice costs 1.5 x the day's pay (and replaces any other cut for that day), and the slip says how many leave
+the admin marks as away with no notice costs 1.5 x the day's pay (and replaces any other cut for that day), and the slip says how many leave
 days are left this year. Reads a made-up leave-app export from a throwaway folder; never the real data.
 
     venv/Scripts/python.exe test_salary_rules.py

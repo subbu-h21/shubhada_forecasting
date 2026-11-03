@@ -697,7 +697,7 @@ def load_leave(month):
     return _load(LEAVE_DIR / f'{month}.json', None)
 
 
-# The owner's thumb rules (2 Nov 2026): a Sunday session worked pays 1.2 x half a day's pay on top; a day (or half day) the boss marks as away
+# The owner's thumb rules (2 Nov 2026): a Sunday session worked pays 1.2 x half a day's pay on top; a day (or half day) the admin marks as away
 # with no notice at all costs 1.5 x the day's pay. The leave app sends its own values; these are the defaults.
 SUNDAY_FACTOR = 1.2
 UNNOTICED_FACTOR = 1.5
@@ -736,7 +736,7 @@ def leave_for_month(month):
         emp = code_to.get(w['emp_code'])
         if emp and emp != '-':
             out.setdefault(emp, blank())['sunday'] = {'sessions': w['sessions'], 'amount': w['amount'], 'dates': w['dates']}
-    for u in data.get('unnoticed', []):                  # days the boss marked as away with no notice at all (full or half day)
+    for u in data.get('unnoticed', []):                  # days the admin marked as away with no notice at all (full or half day)
         emp = code_to.get(u['emp_code'])
         if emp and emp != '-':
             row = out.setdefault(emp, blank())['unnoticed']
@@ -787,13 +787,13 @@ def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_
                          f"(shop open, no punch-in, no bill, no leave applied) - loss of pay.")
     elif info.get('fetched'):
         notes.append('No punch-ins this month, so days absent without leave are not checked.')
-    # A day the boss marked as unnoticed replaces any other loss of pay for that day (never two cuts for one day).
+    # A day the admin marked as unnoticed replaces any other loss of pay for that day (never two cuts for one day).
     un_dates = {i['date'] for i in lv['unnoticed']['items']}
     for x in un_dates:
         reasons.pop(x, None)
     if un_dates:
         n = lv['unnoticed']['weight']
-        notes.append(f"Away with no notice or permission: {n:g} day{'s' if n != 1 else ''} (marked by the boss) - cut at {info.get('unnoticed_factor', UNNOTICED_FACTOR):g} x the day's pay.")
+        notes.append(f"Away with no notice or permission: {n:g} day{'s' if n != 1 else ''} (marked by the admin) - cut at {info.get('unnoticed_factor', UNNOTICED_FACTOR):g} x the day's pay.")
     lop = sorted(reasons)
     if lv['paid'] or lv['sick']:
         notes.append(f"Approved leave: {len(lv['paid'])} paid day{'s' if len(lv['paid']) != 1 else ''}"
@@ -1503,8 +1503,8 @@ def action_plan(x, rules, limit=4):
         w = x['leave']['unnoticed']['weight']
         step(m['unnoticed_amount'],
              f"Away with no notice or permission on {w:g} day{'s' if w != 1 else ''}: {_rs(m['unnoticed_amount'])} ({SLIP_UNNOTICED_X:g} x the day's pay). "
-             f"Apply for leave in the leave app first, or tell the boss before you are away.",
-             f"ಯಾರಿಗೂ ತಿಳಿಸದೆ, ಅನುಮತಿ ಇಲ್ಲದೆ ಗೈರು {w:g} ದಿನ: {_rs(m['unnoticed_amount'])} ಕಡಿತ ({SLIP_UNNOTICED_X:g} ಪಟ್ಟು). ಮೊದಲೇ ರಜೆ ಆ್ಯಪ್‌ನಲ್ಲಿ ಅರ್ಜಿ ಹಾಕಿ ಅಥವಾ ಬಾಸ್‌ಗೆ ತಿಳಿಸಿ.")
+             f"Apply for leave in the leave app first, or tell the admin before you are away.",
+             f"ಯಾರಿಗೂ ತಿಳಿಸದೆ, ಅನುಮತಿ ಇಲ್ಲದೆ ಗೈರು {w:g} ದಿನ: {_rs(m['unnoticed_amount'])} ಕಡಿತ ({SLIP_UNNOTICED_X:g} ಪಟ್ಟು). ಮೊದಲೇ ರಜೆ ಆ್ಯಪ್‌ನಲ್ಲಿ ಅರ್ಜಿ ಹಾಕಿ ಅಥವಾ ಅಡ್ಮಿನ್‌ಗೆ ತಿಳಿಸಿ.")
 
     if not short and m:
         if x['floor_hit']:
