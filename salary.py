@@ -744,19 +744,27 @@ def leave_for_month(month):
             row['weight'] += u.get('weight', 1)
     return out, {'fetched': True, 'fetched_at': data.get('fetched_at'), 'pay': data.get('sundaySessionPay'),
                  'sunday_factor': data.get('sundayPayFactor', SUNDAY_FACTOR), 'unnoticed_factor': data.get('unnoticedFactor', UNNOTICED_FACTOR),
+                 'holidays': [h['date'] for h in data.get('holidays', []) if h.get('date')],
                  'unmatched': sorted(n for n, e in names.items() if not e)}
 
 
-def _open_days(punches, month):
-    """Weekdays of the month, up to yesterday, when the shop was open (enough punch-ins)."""
+# National holidays are kept like Sundays (the owner, 3 Nov 2026): the few who book holiday work punch in, but nobody else is absent
+# that day. The leave app sends its own list (the admin can add days); these three count even when it has not been fetched.
+NATIONAL_HOLIDAYS = ('01-26', '08-15', '10-02')
+
+
+def _open_days(punches, month, holidays=()):
+    """Weekdays of the month, up to yesterday, when the shop was open (enough punch-ins) - not Sundays or holidays."""
     per_day = {}
     for days in (punches or {}).values():
         for d in days:
             if d.startswith(month):
                 per_day[d] = per_day.get(d, 0) + 1
     yesterday = (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    off = set(holidays)
     return sorted(d for d, n in per_day.items()
-                  if n >= SHOP_OPEN_MIN_PUNCHES and d <= yesterday and pd.Timestamp(d).dayofweek != 6)
+                  if n >= SHOP_OPEN_MIN_PUNCHES and d <= yesterday and pd.Timestamp(d).dayofweek != 6
+                  and d not in off and d[5:] not in NATIONAL_HOLIDAYS)
 
 
 def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_days):
@@ -821,7 +829,7 @@ def compute_slips(inputs, month):
     br = inputs['branch_daily']
     in_trial = bool(rules['trial_until']) and month <= rules['trial_until']
     leave_by_emp, leave_info = leave_for_month(month)
-    open_days = [d for d in _open_days(punches, month) if rules['absent_from'] and d >= rules['absent_from']]
+    open_days = [d for d in _open_days(punches, month, leave_info.get('holidays', ())) if rules['absent_from'] and d >= rules['absent_from']]
 
     slips, needs_role = [], []
     for emp, cur in cur_all.iterrows():

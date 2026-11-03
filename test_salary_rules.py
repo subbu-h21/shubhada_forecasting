@@ -60,6 +60,12 @@ check('...and the slip says why, and carries what is left', any('Away with no no
 lv2 = salary._leave_for('Someone Else', '2026-11', by_emp, info, [], None, {}, [])
 check('a person the leave app does not know still gets a clean, complete record', lv2['unnoticed'] == {'weight': 0, 'items': []} and lv2['left'] is None and lv2['sunday']['sessions'] == 0)
 
+# --- national holidays are kept like Sundays (the owner, 3 Nov 2026): the few who work them punch in, nobody else is absent ---------------
+days = ['2026-10-01', '2026-10-02', '2026-10-03']
+punched = {'A': days, 'B': days, 'C': days}
+check('2 October is not a working day, even when 3 people punched in for holiday work', salary._open_days(punched, '2026-10') == ['2026-10-01', '2026-10-03'])
+check('...and a holiday the leave app sends (the admin added it) is not either', salary._open_days(punched, '2026-10', ['2026-10-03']) == ['2026-10-01'])
+
 print()
 print('ALL PASSED' if not FAILS else '%d FAILED: %s' % (len(FAILS), '; '.join(FAILS)))
 sys.exit(1 if FAILS else 0)
