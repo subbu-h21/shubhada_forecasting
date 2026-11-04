@@ -2013,6 +2013,89 @@ def mrp_resolve(said, fuzzy=True):
     return out
 
 
+# --- Finding products for a doctor: by brand name, by salt, or by a combination of salts (owner, 4 Nov 2026) ----------------------------------------------------
+_SALT_SPLIT = re.compile(r'\s*(?:\+|/|&|,|;|\band\b|\bwith\b|\bplus\b)\s*', re.I)
+_STRENGTH = re.compile(r'\b\d+(?:\.\d+)?\s*(?:mg|mcg|gm|g|ml|iu|%)?\b', re.I)
+_FORM_WORDS = {'tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule', 'capsules', 'syrup', 'syp', 'susp', 'suspension', 'inj', 'injection', 'drops', 'cream', 'gel', 'ointment'}
+
+
+def _salt_tokens(query):
+    """'Amoxicillin 500 + clavulanic acid 125' -> ['amoxicillin', 'clavulanic acid'] (strengths and forms dropped)."""
+    out = []
+    for part in _SALT_SPLIT.split(str(query or '')):
+        words = [w for w in re.findall(r'[A-Za-z]+', _STRENGTH.sub(' ', part).lower()) if w not in _FORM_WORDS]
+        if words:
+            out.append(' '.join(words))
+    return out
+
+
+def find_products(query, limit=30):
+    """Find products we deal in by BRAND NAME ("Dolo 650"), by SALT / generic name ("paracetamol"), or by a COMBINATION of salts ("amoxicillin +
+    clavulanic acid", "telmisartan and amlodipine"), from the product list with its active ingredients. For each product: name, manufacturer,
+    active ingredients, whether it is a Schedule H1 drug, and the MRP per strip and strip size from its latest purchase bill. Products whose
+    ingredients are exactly the combination asked come first ('exact_combination'), then ones that contain it plus other salts ('also_contains').
+    This tells what the product list holds - NOT what is on the shelf: whether a product is available is checked separately (the rack app). No
+    sales, stock, cost or customer data."""
+    pm = _product_master()
+    if pm is None:
+        return _guard_no_pii({'available': False, 'reason': 'the product list with salts has not been built yet'})
+    q = str(query or '').strip()
+    if not re.search(r'[A-Za-z0-9]', q):
+        return _guard_no_pii({'error': 'Which product or salt?'})
+    limit = max(1, min(int(limit or 30), 1500))
+    mrp = _latest_mrp()
+    words = [w for w in re.findall(r'[A-Za-z0-9.]+', q.upper()) if w not in {x.upper() for x in _FORM_WORDS}] or re.findall(r'[A-Za-z0-9.]+', q.upper())
+    tokens = _salt_tokens(q)
+    found, seen = [], set()
+
+    def add(row, how, extra=None):
+        key = row.name
+        if key in seen:
+            return
+        seen.add(key)
+        m = mrp.get(row['PRODUCT'])
+        ings = [i.strip() for i in row['ACTIVE INGREDIENTS'].split(',') if i.strip()]
+        item = {'product': row['PRODUCT'], 'manufacturer': row['MANUFACTURER'], 'active_ingredients': ', '.join(ings),
+                'schedule_h1': row['SCHEDULE H1'] == H1_IN_FORCE, 'h1_drug': row['H1 DRUG'] if row['SCHEDULE H1'] == H1_IN_FORCE else '',
+                'mrp_per_strip': round(m[0], 2) if m else None, 'strip_size': m[1] if m else None, 'matched_by': how}
+        if extra:
+            item.update(extra)
+        found.append(item)
+
+    # 1) the brand name: every word of what was typed inside the product name, names that start with it first
+    by_name = pm[pm['PRODUCT'].str.upper().apply(lambda n: all(w in n for w in words))]
+    by_name = by_name.assign(_rank=by_name['PRODUCT'].str.upper().str.startswith(words[0]).map({True: 0, False: 1}), _len=by_name['PRODUCT'].str.len())
+    for _, row in by_name.sort_values(['_rank', '_len']).head(limit).iterrows():
+        add(row, 'brand name')
+    # 2) the salt, or the salts of a combination
+    if tokens:
+        def ings_of(row):
+            return [i.strip().lower() for i in row['ACTIVE INGREDIENTS'].split(',') if i.strip()]
+        scored = []
+        lowered = pm['ACTIVE INGREDIENTS'].str.lower()
+        mask = lowered.str.len() > 0
+        for t in tokens:
+            mask &= lowered.str.contains(t, regex=False)
+        for _, row in pm[mask].iterrows():
+            ings = ings_of(row)
+            if ings and all(any(t in i for i in ings) for t in tokens):
+                exact = len(ings) == len(tokens)
+                scored.append((0 if exact else 1, len(ings), row['PRODUCT'], row, exact))
+        scored.sort(key=lambda x: x[:3])
+        for _, n_ings, _, row, exact in scored[:limit]:
+            add(row, 'salt' if len(tokens) == 1 else 'salt combination', {'exact_combination': exact, 'also_contains': '' if exact else ', '.join(
+                i for i in (x.strip() for x in row['ACTIVE INGREDIENTS'].split(',')) if i and not any(t in i.lower() for t in tokens))})
+        total_salt = len(scored)
+    else:
+        total_salt = 0
+    out = {'query': q, 'salts_understood': tokens, 'brand_name_matches': int(len(by_name)), 'salt_matches': total_salt, 'products': found[:limit * 2],
+           'note': ('MRP is per strip/pack from the latest purchase bill. This is the product list, not the shelf: availability is checked separately. '
+                    'Salts are as listed in the product list; strengths are in the product names.')}
+    if any(p['schedule_h1'] for p in found):
+        out['h1_policy'] = H1_POLICY
+    return _guard_no_pii(out)
+
+
 def get_mrp_total(items):
     """MRP total for a list of products and a number of TABLETS/CAPSULES each
     (owner's rule: "Ecosprin AV 75, 30" = 30 capsules of Ecosprin AV 75 = 2
@@ -2166,6 +2249,10 @@ TOOLS = [
      'description': get_product_patient_history.__doc__,
      'parameters': _schema({'product': {'type': 'string'}, 'limit': {'type': 'integer'}, 'branch': {'type': 'string'},
                             'month': {'type': 'string'}, 'date_from': {'type': 'string'}, 'date_to': {'type': 'string'}}, ['product'])},
+    {'name': 'find_products', 'fn': find_products,
+     'description': find_products.__doc__,
+     'parameters': _schema({'query': {'type': 'string', 'description': 'a brand name, a salt, or salts joined by + or and'},
+                            'limit': {'type': 'integer'}}, ['query'])},
     {'name': 'get_mrp_total', 'fn': get_mrp_total,
      'description': get_mrp_total.__doc__,
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
