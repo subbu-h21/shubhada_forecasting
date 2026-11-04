@@ -1135,6 +1135,22 @@ def api_assistant_salary_cuts():
     return jsonify(out)
 
 
+@app.route('/api/assistant/shifts')
+def api_assistant_shifts():
+    """Each person's agreed working hours (start and end) with their saved WhatsApp number, for the assistant: it does not answer a staff member once their
+    time is over. Times only - no pay, no names beyond the reckoner's own."""
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    settings = salary_mod.load_settings()
+    rows = []
+    for name, sh in sorted(settings['shifts'].items()):
+        if sh.get('start') and sh.get('end'):
+            rows.append({'name': name, 'phone': salary_mod.normalise_phone(settings['phones'].get(name, '')), 'start': sh['start'], 'end': sh['end'],
+                         'half_day': name in set(settings['half_day'])})
+    return jsonify({'shifts': rows})
+
+
 @app.route('/api/assistant/my-slip', methods=['POST'])
 def api_assistant_my_slip():
     """A staff member's OWN latest slip, for the assistant to pass on to them on WhatsApp. Looked up by their saved WhatsApp number, and only a month the
