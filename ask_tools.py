@@ -1121,7 +1121,7 @@ def get_salary_slips(name=None, month=None, n=40):
     (People > Salary) and give the percentages instead.
 
     The rules: salary = Fixed 35% + Performance 45% + Discipline 20% of each
-    person's base. Performance (perf_score, 0-120%) is a role-weighted
+    person's full monthly pay (their base salary is the fixed 35% part). Performance (perf_score, 0-120%) is a role-weighted
     average of groups (Sales, Fetching, Back-office, Accuracy, Customer,
     Team, Owner's rating); every measured item is scored against the
     person's OWN best month, and 90% of that best already earns full marks
@@ -1131,7 +1131,7 @@ def get_salary_slips(name=None, month=None, n=40):
     against the timings the owner agreed with that person (agreed_timings),
     or their own usual pattern if none are set. Targets earn a bonus share
     each when reached. A month under 10 active days is not scored. Until
-    trial_until, nobody is paid below their base - except loss-of-pay days,
+    trial_until, nobody is paid below their full pay - except loss-of-pay days,
     which are cut even then. discipline_cut_pct is the share of the
     DISCIPLINE part lost (never the performance part). 'leave' counts that
     month's approved leave, sick days, loss-of-pay days (leave not approved,

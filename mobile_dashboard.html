@@ -1163,9 +1163,13 @@ const SAL_RULE_LABELS = {
   lop_divisor: 'Loss of pay per day = base ÷ this', absent_from: 'Count days absent without leave from (date)', marks_per_mistake: 'Marks lost per logged mistake',
   marks_per_complaint: 'Marks lost per complaint', marks_per_compliment: 'Marks gained per compliment',
   marks_per_cover: 'Marks gained per day covering a colleague', returns_gate_pct: 'No performance pay if returns above, % of sales',
-  trial_until: 'Trial until (month) — nobody paid below base', min_days_active: 'Fewest active days to score a month',
+  trial_until: 'Trial until (month) — nobody paid below full pay; cuts start the month after', min_days_active: 'Fewest active days to score a month',
   min_role_lines: 'Lines needed for a role to count that month',
-  commit_bonus_pct: 'Target bonus, % of base (shared per target reached)',
+  commit_bonus_pct: 'Target bonus, % of full pay (shared per target reached)',
+  target_days: 'Working days in a full month (for the expected numbers below)', tgt_shelved: 'Expected a month: items shelved',
+  tgt_dc_checked: 'Expected a month: DC checked', tgt_dc_created: 'Expected a month: DC created', tgt_new_product: 'Expected a month: new products created',
+  tgt_noncash: 'Expected a month: non-cash receipts', tgt_reorder: 'Expected a month: re-order items', tgt_transfer: 'Expected a month: stock transfers created',
+  tgt_dump: 'Expected a month: dump list added',
 };
 
 function salToday() {
@@ -1232,7 +1236,7 @@ function salTrialText() {
   const t = SAL.rules.trial_until;
   if (!t) return '';
   return SAL.month <= t
-    ? `<b>Trial month</b> (until ${monthAbbr(t)} ${t.slice(0, 4)}): slips are calculated and shown, but nobody is paid less than their base salary — except loss-of-pay days, which are still cut. <span class="kn">ಪ್ರಯೋಗ ಅವಧಿ — ಯಾರಿಗೂ ಮೂಲ ಸಂಬಳಕ್ಕಿಂತ ಕಡಿಮೆ ಇಲ್ಲ, ಆದರೆ ಸಂಬಳ ಕಡಿತದ (LOP) ದಿನಗಳು ಕಡಿತವಾಗುತ್ತವೆ.</span>`
+    ? `<b>Trial month</b> (until ${monthAbbr(t)} ${t.slice(0, 4)}): slips are calculated and shown, but nobody is paid less than their full monthly salary — except loss-of-pay days, which are still cut. <span class="kn">ಪ್ರಯೋಗ ಅವಧಿ — ಯಾರಿಗೂ ಮೂಲ ಸಂಬಳಕ್ಕಿಂತ ಕಡಿಮೆ ಇಲ್ಲ, ಆದರೆ ಸಂಬಳ ಕಡಿತದ (LOP) ದಿನಗಳು ಕಡಿತವಾಗುತ್ತವೆ.</span>`
     : '';
 }
 
@@ -1240,8 +1244,8 @@ function salSlipsHTML() {
   const s = SAL.summary, r = SAL.rules;
   const stats = [];
   if (s.with_salary) {
-    stats.push(['var(--accent)', money(s.calculated_total), `Calculated for ${s.with_salary} staff (base ${money(s.base_total)})`]);
-    stats.push(['var(--ok)', money(s.payable_total), SAL.month <= (r.trial_until || '') ? 'To pay (trial: never below base, less loss of pay)' : 'To pay']);
+    stats.push(['var(--accent)', money(s.calculated_total), `Calculated for ${s.with_salary} staff (full pay ${money(s.full_total)}, base ${money(s.base_total)})`]);
+    stats.push(['var(--ok)', money(s.payable_total), SAL.month <= (r.trial_until || '') ? 'To pay (trial: never below full pay, less loss of pay)' : 'To pay']);
   }
   stats.push([s.below_floor ? 'var(--danger)' : 'var(--ok)', fmt(s.below_floor), `Below the ${fmt(r.floor_pct)}% floor — no performance pay`]);
   if (s.with_salary) {
@@ -1291,10 +1295,10 @@ function salSlipCard(x) {
   const pill = m ? `${money(m.payable)}` : (x.perf_score == null ? '—' : `${fmt(x.perf_score)}%`);
   let metrics = `<div class="metric"><div class="k">Performance</div><div class="v">${x.perf_score == null ? '—' : fmt(x.perf_score) + '%'}${x.floor_hit ? ' <span style="color:var(--danger)">below floor</span>' : ''}</div></div>
     <div class="metric"><div class="k">Incidents</div><div class="v">${d.timed ? d.incidents : '—'}</div></div>`;
-  if (m) metrics += `<div class="metric"><div class="k">vs base</div><div class="v" style="color:${m.vs_base < 0 ? 'var(--danger)' : 'var(--ok)'}">${m.vs_base > 0 ? '+' : (m.vs_base < 0 ? '−' : '')}${money(Math.abs(m.vs_base))}</div></div>`;
+  if (m) metrics += `<div class="metric"><div class="k">vs full pay</div><div class="v" style="color:${m.vs_base < 0 ? 'var(--danger)' : 'var(--ok)'}">${m.vs_base > 0 ? '+' : (m.vs_base < 0 ? '−' : '')}${money(Math.abs(m.vs_base))}</div></div>`;
   let bar = '';
   if (m) {
-    const tot = Math.max(m.base * (SAL.rules.perf_cap_pct / 100 * SAL.rules.perf_pct + SAL.rules.fixed_pct + SAL.rules.disc_pct) / 100, 1);
+    const tot = Math.max(m.full * (SAL.rules.perf_cap_pct / 100 * SAL.rules.perf_pct + SAL.rules.fixed_pct + SAL.rules.disc_pct) / 100, 1);
     const w = v => (v / tot * 100).toFixed(1) + '%';
     bar = `<div class="sal-bar" role="img" aria-label="Fixed ${money(m.fixed)}, performance ${money(m.perf_pay)}, discipline ${money(m.disc_pay)}">
       <i style="width:${w(m.fixed)};background:var(--ink-faint)"></i><i style="width:${w(m.perf_pay)};background:var(--accent)"></i><i style="width:${w(m.disc_pay)};background:var(--ok)"></i></div>
@@ -1441,7 +1445,7 @@ function salDetailHTML(x) {
       <tr><td colspan="2" class="raw">${fmt(d.free)} free, ${d.charged} charged × ${fmt(r.pct_per_incident)}% of ${m ? money(m.disc_max) : 'the discipline part'}${m ? ` = ${money(m.disc_deduction)} off` : ''}</td></tr>`;
   }
   if (x.commitment) {
-    h += `<tr class="grp"><td>Targets <span class="sal-kn">ಗುರಿ</span> · bonus up to ${fmt(SAL.rules.commit_bonus_pct)}% of base</td><td class="n">${x.commitment.met} of ${x.commitment.of}</td></tr>`;
+    h += `<tr class="grp"><td>Targets <span class="sal-kn">ಗುರಿ</span> · bonus up to ${fmt(SAL.rules.commit_bonus_pct)}% of full pay</td><td class="n">${x.commitment.met} of ${x.commitment.of}</td></tr>`;
     for (const c of x.commitment.checks) {
       h += `<tr><td>${escHtml(c.label)}<div class="raw">target ${fmt(c.target)} (${escHtml(c.source)}) · reached ${fmt(c.actual)}</div></td><td class="n" style="color:${c.met ? 'var(--ok)' : 'var(--danger)'}">${c.met ? 'met' : 'not met'}</td></tr>`;
     }
@@ -1456,13 +1460,13 @@ function salDetailHTML(x) {
     if (lv.sunday.sessions) h += `<tr><td>Sunday sessions worked<div class="raw">${lv.sunday.dates.map(escHtml).join(', ')}</div></td><td class="n" style="color:var(--ok)">${lv.sunday.sessions}</td></tr>`;
   }
   if (m) {
-    h += `<tr class="grp"><td>Salary <span class="sal-kn">ಸಂಬಳ</span> (base ${money(m.base)})</td><td class="n"></td></tr>
+    h += `<tr class="grp"><td>Salary <span class="sal-kn">ಸಂಬಳ</span> (base ${money(m.base)}, full pay ${money(m.full)})</td><td class="n"></td></tr>
       <tr><td>Fixed ${fmt(r.fixed_pct)}%</td><td class="n">${money(m.fixed)}</td></tr>
       <tr><td>Performance (out of ${money(m.perf_max)})</td><td class="n">${money(m.perf_pay)}</td></tr>
       <tr><td>Discipline (out of ${money(m.disc_max)})</td><td class="n">${money(m.disc_pay)}</td></tr>
       ${x.commitment ? `<tr><td>Target bonus (${x.commitment.met} of ${x.commitment.of} targets)</td><td class="n">${money(m.commit_bonus)}</td></tr>` : ''}
       <tr class="grp"><td>Calculated</td><td class="n">${money(m.calculated)}</td></tr>
-      ${x.trial ? `<tr><td colspan="2" class="raw">Trial: the calculated part is never below base. Loss of pay is still cut.</td></tr>` : ''}
+      ${x.trial ? `<tr><td colspan="2" class="raw">Trial: the calculated part is never below the full pay. Loss of pay is still cut.</td></tr>` : ''}
       ${m.lop_amount ? `<tr><td>Loss of pay (${x.leave.lop.length} × ${money(m.lop_per_day)})</td><td class="n" style="color:var(--danger)">−${money(m.lop_amount)}</td></tr>` : ''}
       ${m.sunday_pay ? `<tr><td>Sunday work (${x.leave.sunday.sessions} session${x.leave.sunday.sessions === 1 ? '' : 's'})</td><td class="n" style="color:var(--ok)">+${money(m.sunday_pay)}</td></tr>` : ''}
       <tr class="grp"><td>To pay</td><td class="n"><b>${money(m.payable)}</b></td></tr>`;
@@ -1641,7 +1645,7 @@ function salCommitHTML() {
   const c = SAL.commit;
   const tLabel = Object.fromEntries(c.targets.map(t => [t.code, t.label]));
   const tShow = (t) => Object.entries(t || {}).map(([k, v]) => `${escHtml(tLabel[k] || k)} <b>${fmt(v)}</b>`).join(' · ') || 'no targets';
-  let html = `<div class="sal-note">Each person fills in their own timings and targets on a Google Form from a link you send on WhatsApp. Their usual times and best month are filled in; they keep or change them and sign. <b>Nothing counts until you approve it here.</b> Reaching what they committed earns up to ${fmt(SAL.rules.commit_bonus_pct)}% of base, shared per target reached.
+  let html = `<div class="sal-note">Each person fills in their own timings and targets on a Google Form from a link you send on WhatsApp. Their usual times and best month are filled in; they keep or change them and sign. <b>Nothing counts until you approve it here.</b> Reaching what they committed earns up to ${fmt(SAL.rules.commit_bonus_pct)}% of full pay, shared per target reached.
     <span class="kn">ಪ್ರತಿಯೊಬ್ಬರೂ ತಮ್ಮ ಸಮಯ ಮತ್ತು ಗುರಿ ತುಂಬಿ ಸಹಿ ಮಾಡುತ್ತಾರೆ; ನೀವು ಒಪ್ಪಿದ ನಂತರ ಮಾತ್ರ ಲೆಕ್ಕಕ್ಕೆ.</span></div>`;
 
   // Step 1: the form's template link
@@ -1784,7 +1788,7 @@ function salEditCard(p, i, roles) {
     <div class="name">${escHtml(p)}</div>
     <div class="sal-edit-grid">
       <label>Role<select data-salrole="${escAttr(p)}" id="sal-role-${i}">${roles.map(r => `<option${role === r ? ' selected' : ''}>${r}</option>`).join('')}${role ? '' : '<option selected value="">Choose…</option>'}</select></label>
-      <label>Base salary ₹<input type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="not set"></label>
+      <label>Base salary ₹ (the fixed 35% of full pay)<input type="number" inputmode="numeric" min="0" step="100" id="sal-base-${i}" data-salbase="${escAttr(p)}" value="${SAL.salaries[p] != null ? SAL.salaries[p] : ''}" placeholder="not set"></label>
       <label>WhatsApp number<input type="tel" inputmode="tel" id="sal-phone-${i}" data-salphone="${escAttr(p)}" value="${escAttr(salPhoneShow((SAL.phones || {})[p]))}" placeholder="10-digit mobile"></label>
     </div>${salBaseWarning(p)}
     <div class="sal-sub">Timings <label class="sal-chk"><input type="checkbox" id="sal-half-${i}" data-salhalf="${escAttr(p)}"${half ? ' checked' : ''}> Half-day</label>${usual ? ` <span class="sal-kn">${usual}</span>` : ''}</div>

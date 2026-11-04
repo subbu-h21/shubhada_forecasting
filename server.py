@@ -1114,6 +1114,52 @@ def api_assistant_ping():
     return _assistant_gate() or jsonify({'ok': True, 'app': 'reckoner'})
 
 
+@app.route('/api/assistant/salary-cuts')
+def api_assistant_salary_cuts():
+    """The month's salary cuts in rupees, person by person - for the OWNER's chat with the assistant, which shows them as they are (they are never
+    handed to an AI model). The leave app's month is fetched again first, so a day marked away unnoticed a minute ago is in."""
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    asked = request.args.get('month') or ''
+    get_cached_data()
+    months = salary_mod.months_available(_salary_inputs['v'])
+    month = asked if asked in months else (months[-1] if months else None)
+    if not month:
+        return jsonify({'error': 'There are no salary months yet.'}), 404
+    _refresh_leave(month, force=True)
+    result = salary_mod.compute_slips(_salary_inputs['v'], month)
+    out = salary_mod.cuts_list(result['slips'], salary_mod.cuts_without_slip(result['slips'], month))
+    out.update(month=month, asked=asked or month, months=months, leave_fetched=not (_leave_fetch.get(month) or {}).get('error'),
+               month_complete=bool(result['slips'] and all(s.get('month_complete', True) for s in result['slips'])))
+    return jsonify(out)
+
+
+@app.route('/api/assistant/my-slip', methods=['POST'])
+def api_assistant_my_slip():
+    """A staff member's OWN latest slip, for the assistant to pass on to them on WhatsApp. Looked up by their saved WhatsApp number, and only a month the
+    owner has already sent them (so nothing is shown before it is released). The text is the one the owner sends; it is not given to an AI model."""
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    number = ((request.get_json(silent=True) or {}).get('phone')) or ''
+    settings = salary_mod.load_settings()
+    emp = salary_mod.employee_by_phone(settings['phones'], number)
+    if not emp:
+        return jsonify({'found': False, 'reason': 'no_number'})
+    month = salary_mod.latest_sent_month(salary_mod.load_sends(), emp)
+    if not month:
+        return jsonify({'found': False, 'reason': 'not_sent'})
+    get_cached_data()
+    if _salary_inputs['v'] is None:
+        return jsonify({'error': 'No data ingested yet.'}), 503
+    _refresh_leave(month)
+    sl = next((s for s in salary_mod.compute_slips(_salary_inputs['v'], month)['slips'] if s['employee'] == emp), None)
+    if not sl:
+        return jsonify({'found': False, 'reason': 'not_sent'})
+    return jsonify({'found': True, 'month': month, 'text': salary_mod.slip_message(sl, settings['rules'])})
+
+
 @app.route('/api/assistant/tools')
 def api_assistant_tools():
     return _assistant_gate() or jsonify(assistant_bridge.describe())

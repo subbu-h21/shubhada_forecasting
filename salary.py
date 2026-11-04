@@ -2,7 +2,8 @@
 Salary calculator - the rules the owner agreed in the two Salary Review rounds
 (Sept-Oct 2026). Every rule below was chosen by the owner, item by item:
 
-  Salary = Fixed 35% + Performance 45% + Discipline 20% of the person's base.
+  Salary = Fixed 35% + Performance 45% + Discipline 20% of the person's FULL monthly pay. The BASE SALARY saved for a person is the fixed 35% part
+  (owner, 4 Nov 2026: the figure typed before was the month-end amount; the real base is 35% of it), so the full pay is base / (fixed_pct / 100).
 
   Performance (0-120%) = role-weighted average of groups (Sales, Fetching,
   Back-office, Quality, Customer, Team, Owner's rating). Each measured item is
@@ -33,9 +34,11 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   commit to their own timings and targets in a Google Form from a personal
   WhatsApp link (google/commitment_form.gs); an approved answer sets them.
 
-  First 3 months are a trial: slips are calculated and shown, but nobody is
-  paid less than their base - except for loss of pay, which is cut even in
-  the trial (owner, 2026-10-15: it is leave the person chose to take unpaid).
+  The trial: slips are calculated and shown, but nobody is paid less than their
+  full monthly pay - except for loss of pay, which is cut even in the trial
+  (owner, 2026-10-15: it is leave the person chose to take unpaid). The trial
+  ends after October 2026 (owner, 4 Nov 2026): salary cuts are effective from
+  1 Nov 2026.
 
   LEAVE (owner, 2026-10-15) comes from the shop's leave app (leave_app.py):
   approved leave and paid sick days cost nothing; a loss-of-pay day (leave not
@@ -85,10 +88,15 @@ DEFAULT_RULES = {
     'marks_per_mistake': 10, 'marks_per_complaint': 10,
     'marks_per_compliment': 5, 'marks_per_cover': 5,
     'returns_gate_pct': 3,      # chart Sales-Return / Sales above this -> no performance pay
-    'trial_until': '2026-12',
+    'trial_until': '2026-10',   # nobody paid below the full pay up to and including this month; cuts are effective from the month after (owner, 4 Nov 2026)
     'commit_bonus_pct': 5,      # % of base for reaching every committed target, shared per target reached
     'min_days_active': 10,      # fewer active days -> month too short to score volumes
     'min_role_lines': 100,      # a role counts only if it was really their work that month
+    # What the shop expects from a full month of each piece of CRM work (owner, 4 Nov 2026; first values = the median of September and October for
+    # the people who did the work). Marks = achieved / expected, so a part month is judged on the days worked.
+    'target_days': 26,          # working days in a full month
+    'tgt_shelved': 180, 'tgt_dc_checked': 50, 'tgt_dc_created': 25, 'tgt_new_product': 4,
+    'tgt_noncash': 15, 'tgt_reorder': 100, 'tgt_transfer': 10, 'tgt_dump': 2,
 }
 RULE_LIMITS = {k: (0, 100) for k in ('fixed_pct', 'perf_pct', 'disc_pct', 'biller_share_pct')}
 RULE_LIMITS.update({'full_at_pct': (50, 100), 'item_cap_pct': (100, 200), 'perf_cap_pct': (100, 200),
@@ -97,13 +105,15 @@ RULE_LIMITS.update({'full_at_pct': (50, 100), 'item_cap_pct': (100, 200), 'perf_
                     'marks_per_mistake': (0, 100), 'marks_per_complaint': (0, 100),
                     'marks_per_compliment': (0, 100), 'marks_per_cover': (0, 100),
                     'returns_gate_pct': (0, 100), 'min_days_active': (1, 31), 'min_role_lines': (0, 10000),
-                    'commit_bonus_pct': (0, 50)})
+                    'commit_bonus_pct': (0, 50), 'target_days': (1, 31)})
+RULE_LIMITS.update({k: (0, 100000) for k in ('tgt_shelved', 'tgt_dc_checked', 'tgt_dc_created', 'tgt_new_product',
+                                             'tgt_noncash', 'tgt_reorder', 'tgt_transfer', 'tgt_dump')})
 
 ROLES = ['Biller', 'Fetcher', 'Back-office', 'Both']
 # Owner-approved (Round 2, scaled so each role adds up to 100).
 GROUP_WEIGHTS = {
-    'Biller': dict(S=33, F=7, B=0, Q=20, C=13, T=13, O=14),
-    'Fetcher': dict(S=38, F=31, B=0, Q=12, C=4, T=8, O=7),
+    'Biller': dict(S=28, F=7, B=5, Q=20, C=13, T=13, O=14),     # B 0 -> 5 from Sales (owner, 4 Nov 2026: shelving, DC and the rest count for everyone)
+    'Fetcher': dict(S=38, F=26, B=5, Q=12, C=4, T=8, O=7),      # B 0 -> 5 from Fetching
     'Back-office': dict(S=21, F=0, B=46, Q=13, C=0, T=8, O=12),
     'Both': dict(S=19, F=19, B=33, Q=11, C=4, T=7, O=7),
 }
@@ -168,6 +178,20 @@ CHART_ITEMS = [
     ('Item Shelfed', 'B', 'B7', 'Items shelved'), ('New Product Created', 'B', 'B8', 'New products created'),
     ('Non Cash Receipt', 'B', 'B9', 'Non-cash receipts'),
 ]
+
+# Chart rows scored against the shop's expected monthly number (rule key), not against the person's own best.
+SHOP_TARGET_RULE = {'Item Shelfed': 'tgt_shelved', 'DC Checked': 'tgt_dc_checked', 'DC Created': 'tgt_dc_created', 'New Product Created': 'tgt_new_product',
+                    'Non Cash Receipt': 'tgt_noncash', 'Re-Order Items': 'tgt_reorder', 'Stock Transfer Created': 'tgt_transfer', 'Dump List Added': 'tgt_dump'}
+
+
+def shop_work_score(achieved, active_days, rules, rule_key):
+    """Marks for a piece of CRM work against the shop's expected full-month number: achieved per active day / (expected / target_days), capped at the item cap.
+    None without active days or an expected number."""
+    target = rules.get(rule_key) or 0
+    if not active_days or target <= 0:
+        return None
+    return float(min(achieved / active_days / (target / rules['target_days']) * 100, rules['item_cap_pct']))
+
 
 _lock = threading.Lock()
 
@@ -703,10 +727,12 @@ SUNDAY_FACTOR = 1.2
 UNNOTICED_FACTOR = 1.5
 
 
-def thumb_rule_money(base, lop_divisor, sunday_sessions, unnoticed_weight, sunday_factor=SUNDAY_FACTOR, unnoticed_factor=UNNOTICED_FACTOR):
-    """-> (sunday_pay, unnoticed_amount). A day's pay is base / lop_divisor (30), as for loss of pay. One Sunday session is half a day."""
+def thumb_rule_money(base, lop_divisor, sunday_sessions, unnoticed_weight, sunday_factor=SUNDAY_FACTOR, unnoticed_factor=UNNOTICED_FACTOR, sunday_base=None):
+    """-> (sunday_pay, unnoticed_amount). A day's cut is base / lop_divisor (30), as for loss of pay. One Sunday session is half a day; its pay uses
+    sunday_base (the full monthly pay) when given, so working a Sunday still pays as it did before the base became the 35% part."""
     day = base / lop_divisor
-    return sunday_sessions * 0.5 * sunday_factor * day, unnoticed_weight * unnoticed_factor * day
+    sunday_day = (base if sunday_base is None else sunday_base) / lop_divisor
+    return sunday_sessions * 0.5 * sunday_factor * sunday_day, unnoticed_weight * unnoticed_factor * day
 
 
 SLIP_SUNDAY_X, SLIP_UNNOTICED_X = SUNDAY_FACTOR, UNNOTICED_FACTOR           # the factors printed on a slip (the leave app's own are used for the money)
@@ -811,6 +837,93 @@ def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_
             'sunday': lv['sunday'], 'unnoticed': lv['unnoticed'], 'left': lv.get('left'), 'notes': notes}
 
 
+def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial):
+    """One person's rupees for a month. `base` is the saved BASE SALARY - the fixed part (35%) of the full monthly pay (owner, 4 Nov 2026); the full pay it
+    stands for is base / (fixed_pct / 100), and the performance, discipline and target shares are taken from that. A day's cut (loss of pay, away with no
+    notice) is base / lop_divisor; a Sunday worked still pays from the full pay. In the trial nobody is paid below the full pay (loss of pay still cut)."""
+    full = base * 100 / rules['fixed_pct'] if rules['fixed_pct'] else base
+    fixed = base
+    perf_max = full * rules['perf_pct'] / 100
+    disc_max = full * rules['disc_pct'] / 100
+    perf_pay = perf_max * perf_frac
+    disc_ded = min(disc_max, disc_max * charged * rules['pct_per_incident'] / 100)
+    disc_pay = disc_max - disc_ded
+    commit_max = full * rules['commit_bonus_pct'] / 100 if commit_info else 0
+    commit_bonus = commit_max * commit_info['met'] / commit_info['of'] if commit_info and commit_info['counted'] else 0
+    calculated = fixed + perf_pay + disc_pay + commit_bonus
+    # The trial protects the new scoring, not loss of pay (owner's choice A).
+    lop_per_day = base / rules['lop_divisor']
+    lop_amount = lop_per_day * len(leave['lop'])
+    sunday_pay, unnoticed_amount = thumb_rule_money(base, rules['lop_divisor'], leave['sunday']['sessions'], leave['unnoticed']['weight'],
+                                                    leave_info.get('sunday_factor', SUNDAY_FACTOR), leave_info.get('unnoticed_factor', UNNOTICED_FACTOR), sunday_base=full)
+    payable = max(0, (max(calculated, full) if in_trial else calculated) - lop_amount - unnoticed_amount + sunday_pay)
+    return {k: round(v) for k, v in dict(
+        base=base, full=full, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
+        disc_deduction=disc_ded, disc_pay=disc_pay,
+        commit_bonus=commit_bonus, commit_max=commit_max,
+        calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, unnoticed_amount=unnoticed_amount, sunday_pay=sunday_pay,
+        payable=payable, vs_base=calculated - full).items()}
+
+
+def cuts_without_slip(slips, month, by_emp=None, info=None):
+    """Cut rows for people the leave app has cut days for but who have NO slip this month - nothing in the CRM yet (away from day one, as Fazil on
+    2 Nov 2026), so compute_slips never saw them. Same amounts as a slip would give: base / lop_divisor a loss-of-pay day, the unnoticed factor
+    for days marked away. -> (rows, no_base) in the shape cuts_list() builds."""
+    settings = load_settings()
+    rules, salaries, roles = settings['rules'], settings['salaries'], settings['roles']
+    if by_emp is None:
+        by_emp, info = leave_for_month(month)
+    have = {s['employee'] for s in slips}
+    rows, no_base = [], []
+    for emp, lv in sorted(by_emp.items()):
+        if emp in have or emp in NOT_STAFF or roles.get(emp) == 'Not staff':
+            continue
+        lop = [{'date': i['date'], 'why': i['why']} for i in lv.get('lop', [])]
+        un = lv.get('unnoticed') or {'weight': 0, 'items': []}
+        if not lop and not un['items']:
+            continue
+        base = salaries.get(emp)
+        if not base:
+            no_base.append({'name': emp, 'loss_of_pay_days': len(lop), 'unnoticed_days': un['weight']})
+            continue
+        day = base / rules['lop_divisor']
+        _, un_amount = thumb_rule_money(base, rules['lop_divisor'], 0, un['weight'], unnoticed_factor=(info or {}).get('unnoticed_factor', UNNOTICED_FACTOR))
+        lop_amount = day * len(lop)
+        if not round(lop_amount) and not round(un_amount):
+            continue
+        rows.append({'name': emp, 'day_pay': round(day), 'loss_of_pay': {'days': len(lop), 'amount': round(lop_amount), 'items': lop},
+                     'unnoticed': {'days': un['weight'], 'amount': round(un_amount), 'items': un['items']}, 'total': round(lop_amount) + round(un_amount)})
+    return rows, no_base
+
+
+def cuts_list(slips, extra=None):
+    """The month's SALARY CUTS in rupees, person by person (the owner's "pakka list", 4 Nov 2026): loss-of-pay days (leave not approved, no paid
+    days left, or absent without leave - each base / 30) and days marked away with no notice (1.5 x, half a day half of that). Performance and
+    discipline reductions are NOT cuts here - they change the variable pay, not a day's pay. -> {'rows': [...largest first], 'total', 'people',
+    'no_base': people with cut days but no base salary saved (amount unknown)}. These are pay figures: they go to the owner only, never to the AI."""
+    rows, no_base = [], []
+    if extra:                                  # people with no slip yet (cuts_without_slip)
+        rows, no_base = list(extra[0]), list(extra[1])
+    for s in slips:
+        lv, m = s.get('leave') or {}, s.get('money')
+        lop_items = [{'date': i['date'], 'why': i['why']} for i in lv.get('lop', [])]
+        un = lv.get('unnoticed') or {'weight': 0, 'items': []}
+        if not lop_items and not un['items']:
+            continue
+        if not m:
+            no_base.append({'name': s['employee'], 'loss_of_pay_days': len(lop_items), 'unnoticed_days': un['weight']})
+            continue
+        lop_amount, un_amount = m.get('lop_amount', 0), m.get('unnoticed_amount', 0)
+        if not lop_amount and not un_amount:
+            continue
+        rows.append({'name': s['employee'], 'day_pay': m['lop_per_day'],
+                     'loss_of_pay': {'days': len(lop_items), 'amount': lop_amount, 'items': lop_items},
+                     'unnoticed': {'days': un['weight'], 'amount': un_amount, 'items': un['items']},
+                     'total': lop_amount + un_amount})
+    rows.sort(key=lambda r: (-r['total'], r['name']))
+    return {'rows': rows, 'total': sum(r['total'] for r in rows), 'people': len(rows), 'no_base': no_base}
+
+
 def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
@@ -893,6 +1006,14 @@ def compute_slips(inputs, month):
                         dd = pm[(pm['Employee'] == emp) & (pm['Calendar_Month'] == mo)]['Days_Active']
                         if len(dd) and dd.iloc[0]:
                             past.append(per[emp]['rows'][cat] / dd.iloc[0])
+                if cat in SHOP_TARGET_RULE:
+                    # never done this work in any chart month = not their work, left out; otherwise marked against what the shop expects
+                    score = shop_work_score(rows[cat], d, rules, SHOP_TARGET_RULE[cat]) if d and past and max(past) > 0 else None
+                    if score is None:
+                        continue
+                    add(code, group, label, score, f"{rows[cat]:,.0f} this month (expected {rules[SHOP_TARGET_RULE[cat]]:g})", 'chart, vs the shop\'s expected number',
+                        value=rows[cat], best=None)
+                    continue
                 score = _vs_best(rows[cat] / d, past, rules) if d else None
                 if score is None:
                     continue  # never done this work in any chart month
@@ -1028,29 +1149,7 @@ def compute_slips(inputs, month):
         perf_frac = 0 if (perf is None or floor_hit or gate_hit) else min(perf, rules['perf_cap_pct']) / 100
         if perf is None and not short_month:
             notes.append('Nothing measurable for performance this month.')
-        money = None
-        if base:
-            fixed = base * rules['fixed_pct'] / 100
-            perf_max = base * rules['perf_pct'] / 100
-            disc_max = base * rules['disc_pct'] / 100
-            perf_pay = perf_max * perf_frac
-            disc_ded = min(disc_max, disc_max * charged * rules['pct_per_incident'] / 100)
-            disc_pay = disc_max - disc_ded
-            commit_max = base * rules['commit_bonus_pct'] / 100 if commit_info else 0
-            commit_bonus = commit_max * commit_info['met'] / commit_info['of'] if commit_info and commit_info['counted'] else 0
-            calculated = fixed + perf_pay + disc_pay + commit_bonus
-            # The trial protects the new scoring, not loss of pay (owner's choice A).
-            lop_per_day = base / rules['lop_divisor']
-            lop_amount = lop_per_day * len(leave['lop'])
-            sunday_pay, unnoticed_amount = thumb_rule_money(base, rules['lop_divisor'], leave['sunday']['sessions'], leave['unnoticed']['weight'],
-                                                            leave_info.get('sunday_factor', SUNDAY_FACTOR), leave_info.get('unnoticed_factor', UNNOTICED_FACTOR))
-            payable = max(0, (max(calculated, base) if in_trial else calculated) - lop_amount - unnoticed_amount + sunday_pay)
-            money = {k: round(v) for k, v in dict(
-                base=base, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
-                disc_deduction=disc_ded, disc_pay=disc_pay,
-                commit_bonus=commit_bonus, commit_max=commit_max,
-                calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, unnoticed_amount=unnoticed_amount, sunday_pay=sunday_pay,
-                payable=payable, vs_base=calculated - base).items()}
+        money = slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial) if base else None
         slips.append({
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
             'groups': groups, 'items': items, 'perf_score': None if perf is None else round(perf),
@@ -1349,7 +1448,7 @@ def slip_message(x, rules):
     L = [f'*Shubhada Pharma - Salary slip, {mon}*', f"*{x['employee']}* ({x['role']})",
          f"Days worked: {x['days_active']}"]
     if x['trial']:
-        L.append('Trial month: you are paid at least your base salary, less any loss-of-pay days. / ಪ್ರಯೋಗ ತಿಂಗಳು')
+        L.append('Trial month: you are paid at least your full monthly salary, less any loss-of-pay days. / ಪ್ರಯೋಗ ತಿಂಗಳು')
 
     if m:
         L += ['', '*Salary / ಸಂಬಳ*',
@@ -1360,7 +1459,7 @@ def slip_message(x, rules):
             L.append(f"Target bonus: {_rs(m['commit_bonus'])} of {_rs(m['commit_max'])}")
         L.append(f"*Calculated: {_rs(m['calculated'])}*")
         if x['trial']:
-            L.append('Trial: not less than your base salary.')
+            L.append('Trial: not less than your full monthly salary.')
         if m.get('lop_amount'):
             n = len(lv['lop'])
             L.append(f"Loss of pay ({n} day{'s' if n != 1 else ''} x {_rs(m['lop_per_day'])}): minus {_rs(m['lop_amount'])}")
@@ -1384,6 +1483,8 @@ def slip_message(x, rules):
         L.append(f"Returns were {x['gate']['returns_pct']}% of sales (limit {x['gate']['limit']}%), so no performance pay.")
     if not short:
         L.append(f"{rules['full_at_pct']:g}% of your own best month = full marks (100).")
+        if any(str(i.get('basis', '')).startswith('chart, vs the shop') for i in x['items'] if i['score'] is not None):
+            L.append("Shop work (shelving, DC, new products...): the shop's expected number for the month = full marks (100).")
     for g in ([] if short else x['groups']):
         L += ['', f"_{g['name']}_: {g['score']} marks (counts {g['share_pct']}%)"]
         for i in x['items']:
@@ -1599,6 +1700,20 @@ def load_sends():
     return _load(SENDS_PATH, {})
 
 
+def employee_by_phone(phones, number):
+    """The reckoner name whose saved WhatsApp number is `number` (any way of writing it), or None."""
+    want = normalise_phone(number)
+    if not want:
+        return None
+    return next((n for n, p in sorted(phones.items()) if p and normalise_phone(p) == want), None)
+
+
+def latest_sent_month(sends, employee):
+    """The newest month whose slip the owner really sent to this person (a test send or a failed one does not count), or None."""
+    done = sorted(m for m, per in sends.items() if (per.get(employee) or {}).get('sent'))
+    return done[-1] if done else None
+
+
 def record_send(month, employee, sent, reason=''):
     """What the automatic sender did for one person this month - kept so a
     second run never messages someone twice (a slip already sent is skipped
@@ -1737,7 +1852,7 @@ def summary(result):
     sl = [s for s in result['slips'] if s['money']]
     return {
         'people': len(result['slips']), 'with_salary': len(sl),
-        'base_total': sum(s['money']['base'] for s in sl),
+        'base_total': sum(s['money']['base'] for s in sl), 'full_total': sum(s['money']['full'] for s in sl),
         'calculated_total': sum(s['money']['calculated'] for s in sl),
         'payable_total': sum(s['money']['payable'] for s in sl),
         'lop_total': sum(s['money']['lop_amount'] for s in sl),
