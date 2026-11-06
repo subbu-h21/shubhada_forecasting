@@ -141,6 +141,28 @@ merged = salary.cuts_list([slips[0]], (xr, xn))
 check('the cut list holds both the people with slips and the ones without, largest first, with one total', [r['name'] for r in merged['rows']] == ['Asha Patil', 'Meena Shetty'] and merged['total'] == 2500 + 2100 and merged['people'] == 2
       and merged['no_base'][0]['name'] == 'Nobody Listed', merged)
 
+# --- half-day leave (the owner, 6 Nov 2026): a morning half counts 0.4 of a day, an evening half 0.6 ----------------------------------------------
+half_export = dict(export, month='2026-12', unnoticed=[], sundayWork=[],
+                   leaveDays=[{'emp_code': 'E2', 'date': '2026-12-07', 'pay_type': 'salary_cut', 'leave_type': 'regular', 'portion': 'evening', 'weight': 0.6},
+                              {'emp_code': 'E2', 'date': '2026-12-08', 'pay_type': 'paid', 'leave_type': 'regular', 'portion': 'morning', 'weight': 0.4},
+                              {'emp_code': 'E1', 'date': '2026-12-09', 'pay_type': 'salary_cut', 'leave_type': 'regular', 'portion': 'full', 'weight': 1}])
+(salary.LEAVE_DIR / '2026-12.json').write_text(json.dumps(half_export))
+hb, hinfo = salary.leave_for_month('2026-12')
+check('half days are read with their half and weight; a full day is not in the half list',
+      hb['Ravi Kumar']['half'] == {'2026-12-07': {'portion': 'evening', 'weight': 0.6}, '2026-12-08': {'portion': 'morning', 'weight': 0.4}}
+      and hb['Asha Patil']['half'] == {} and hb['Ravi Kumar']['lop'] == ['2026-12-07'], hb['Ravi Kumar'])
+rl = salary._leave_for('Ravi Kumar', '2026-12', hb, hinfo, [], None, {}, [])
+check('a loss-of-pay evening half is one item weighing 0.6, saying which half', rl['lop'] == [{'date': '2026-12-07', 'why': 'leave not approved / no paid days left (evening half)', 'portion': 'evening', 'weight': 0.6}], rl['lop'])
+check('...the approved morning half counts 0.4 of a paid day on the slip', any('Approved leave: 0.4 paid day' in n for n in rl['notes']), rl['notes'])
+mh = salary.slip_money(6650, R35, 1.0, 0, None, dict(rl, sunday={'sessions': 0}), {}, False)
+check('...and is cut at 0.6 of a day\'s pay (6,650 / 30 x 0.6 = 133)', mh['lop_amount'] == 133 and mh['payable'] == 19000 - 133, mh)
+check('a morning half of loss of pay would be 0.4 (89); whole days still count 1', salary.lop_days([{'date': 'x', 'why': 'y', 'weight': 0.4}, {'date': 'z', 'why': 'w'}]) == 1.4
+      and round(salary.slip_money(6650, R35, 1.0, 0, None, {'lop': [{'date': 'x', 'why': 'y', 'weight': 0.4}], 'sunday': {'sessions': 0}, 'unnoticed': {'weight': 0, 'items': []}}, {}, False)['lop_amount']) == 89)
+hc = salary.cuts_list([{'employee': 'Ravi Kumar', 'money': mh, 'leave': rl}])
+check('the cut list says 0.6 days for the half day', hc['rows'][0]['loss_of_pay']['days'] == 0.6 and hc['rows'][0]['loss_of_pay']['amount'] == 133, hc)
+hx, _ = salary.cuts_without_slip([], '2026-12', {'Ravi Kumar': hb['Ravi Kumar']}, hinfo)
+check('...and so does a person with no slip yet (15,000 base: 500 a day, 0.6 = 300)', hx and hx[0]['loss_of_pay']['days'] == 0.6 and hx[0]['loss_of_pay']['amount'] == 300, hx)
+
 print()
 print('ALL PASSED' if not FAILS else '%d FAILED: %s' % (len(FAILS), '; '.join(FAILS)))
 sys.exit(1 if FAILS else 0)

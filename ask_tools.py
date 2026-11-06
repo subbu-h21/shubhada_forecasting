@@ -1185,8 +1185,10 @@ def get_salary_slips(name=None, month=None, n=40):
                            'discipline_cut_pct': min(100, charged * rules['pct_per_incident']),
                            'timed': d['timed']},
             # from the leave app: days, never rupees
-            'leave': {'approved_paid_days': len(x['leave']['paid']), 'sick_days': len(x['leave']['sick']),
-                      'loss_of_pay_days': len(x['leave']['lop']),
+            # (a half day of leave counts 0.4 / 0.6 - the owner, 6 Nov 2026)
+            'leave': {'approved_paid_days': salary_mod._day_count(x['leave']['paid'], x['leave'].get('half') or {}),
+                      'sick_days': salary_mod._day_count(x['leave']['sick'], x['leave'].get('half') or {}),
+                      'loss_of_pay_days': salary_mod.lop_days(x['leave']['lop']),
                       'absent_without_leave_days': sum(1 for i in x['leave']['lop'] if i['why'].startswith('absent')),
                       'sunday_sessions_worked': x['leave']['sunday']['sessions']},
             'agreed_timings': ({k: sh.get(k) for k in ('start', 'break_out', 'break_in', 'end') if sh.get(k)}
