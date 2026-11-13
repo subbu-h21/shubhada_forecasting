@@ -11,6 +11,7 @@ Usage:
 Output:
     reports\<latest-month>\Monthly Reckoner Report.xlsx
 """
+import collections
 import hashlib
 import json
 import math
@@ -427,9 +428,11 @@ def redate_active_files(dry_run=False):
     return out
 
 
-# Source_Month tags an entire uploaded FILE with its one dominant month, for
-# ingestion bookkeeping only (which file is "chosen" per month+kind, narrower-
-# vs-wider replacement, _remove_file_rows/_append_rows - see their docstrings).
+# Source_Month tags an entire uploaded FILE with its one dominant month. Since
+# 13 Nov 2026 files are merged bill by bill (see _merge_rows), so it no longer
+# decides anything in ingest; the only reader left is reorder.py, as the month
+# to put a bill with no usable date in. (_remove_file_rows/_append_rows are
+# kept for redate_active_files.)
 # A file's dominant month covers most of its own rows, but a stray invoice
 # dated into a neighboring month (entered or exported late) keeps
 # Source_Month wrong for that one row forever. add_calendar_month() gives
@@ -546,6 +549,165 @@ def _append_rows(master_path, df):
     combined.to_csv(master_path, index=False)
 
 
+# ---------------------------------------------------------------------------
+# Merging a file into a master BY BILL (the owner, 13 Nov 2026)
+# ---------------------------------------------------------------------------
+# A file used to be filed under ONE month: one "chosen" file per kind and month, replaced only by a file with more days, a
+# narrower one skipped as a "duplicate month". So a top-up of a few days was thrown away; the CRM's purchase export (it lists
+# bills by when they were ENTERED, so it runs across two months and was filed under the older one) was rejected and all of
+# November's purchases were lost; and a sales file that started before the 1st counted 25-31 Oct twice. Now every file is
+# merged bill by bill and a bill is held ONCE, whichever files it came in:
+#   - a bill in the file replaces the stored copy of that bill: the newest upload wins and an edited bill is corrected;
+#   - a stored bill the file does not have is left alone (a top-up of a few days, or an export of recent entries only);
+#   - SALES only: on a day the file clearly carries completely, a stored bill it no longer lists was deleted in the CRM and
+#     is removed (the old whole-month replacement did that too). Purchases are listed by entry date, so never.
+# Putting the same lines in again, from any file, changes nothing.
+BILL_KEY_COLUMNS = {'sale': ['Inv.No'], 'purchase': ['Supplier', 'Inv.No']}   # unique per bill in all 450k sales / 100k purchase lines (13 Nov 2026)
+BOOKKEEPING_COLUMNS = ('Source_File', 'Source_Month', 'Calendar_Month')
+SALE_DAY_MIN_ROWS = 100     # a sales day counts as carried by a file when it lists at least this many lines (a real day has 1,000+, a stray misdated line is 1) ...
+SALE_DAY_KEEP_SHARE = 0.9   # ... and at least this share of the lines already stored for that day (else the file holds only a part of that day)
+
+
+def _canon_value(v):
+    """A cell as plain text for comparing lines: numbers as numbers (1, 1.0 and '1.00' are all '1'), a midnight time dropped,
+    blank and NaN ''. The master has 1.0 where a file read back has 1, and '2026-10-29 00:00:00' where it has '2026-10-29'."""
+    if v is None:
+        return ''
+    if isinstance(v, pd.Timestamp):
+        s = v.strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        s = str(v).strip()
+    if s.lower() in ('nan', 'nat', 'none'):
+        return ''
+    if s.endswith(' 00:00:00'):
+        return s[:-9]
+    try:
+        f = float(s)
+    except ValueError:
+        return s
+    if not math.isfinite(f):
+        return s
+    return format(round(f, 6), 'f').rstrip('0').rstrip('.') or '0'
+
+
+def _line_fingerprints(df, cols):
+    return [tuple(_canon_value(v) for v in row) for row in df[cols].itertuples(index=False, name=None)]
+
+
+def _day_text(dates):
+    """'YYYY-MM-DD' per row, from real dates or from the master's text."""
+    if pd.api.types.is_datetime64_any_dtype(dates):
+        return dates.dt.strftime('%Y-%m-%d').fillna('')
+    return dates.astype(str).str[:10]
+
+
+def _bill_keys(df, kind):
+    """One text key per line naming the bill it belongs to. A line with no invoice number cannot be tied to a bill, so it is
+    its own bill, named after its content and which identical copy it is - the same line in a later file is then the same bill."""
+    cols = BILL_KEY_COLUMNS[kind]
+    parts = {}
+    for c in cols:
+        t = df[c].fillna('').astype(str).str.strip()
+        if c == 'Inv.No':
+            t = t.str.replace(r'\.0+$', '', regex=True)      # 1234 read as 1234.0 is still 1234
+        parts[c] = t.where(t.str.lower() != 'nan', '')
+    keys = parts[cols[0]]
+    for c in cols[1:]:
+        keys = keys + '\x1f' + parts[c]
+    blank = (parts['Inv.No'] == '').to_numpy()
+    if blank.any():
+        keys = keys.copy()
+        seen = collections.Counter()
+        own = [c for c in df.columns if c not in BOOKKEEPING_COLUMNS]
+        for pos, fp in zip(np.flatnonzero(blank), _line_fingerprints(df.iloc[np.flatnonzero(blank)], own)):
+            seen[fp] += 1
+            keys.iloc[pos] = 'LINE\x1f' + '\x1e'.join(fp) + f'#{seen[fp]}'
+    return keys
+
+
+def _atomic_write_csv(df, path):
+    """Write to a temp file, then swap it in, so a crash half way can never leave half a master behind. Windows refuses the swap
+    for a moment while the running server has the file open, so it is tried again."""
+    tmp = path.with_name(path.name + f'.tmp{time.time_ns()}')
+    try:
+        df.to_csv(tmp, index=False)
+        for attempt in range(10):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(1.5)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _merge_rows(kind, df, dry_run=False):
+    """Merge one file's lines into its master as described above. -> the counts the ingest message reports. dry_run writes nothing."""
+    master_path = SALES_MASTER if kind == 'sale' else PURCH_MASTER
+    df = df.reset_index(drop=True)
+    if pd.api.types.is_datetime64_any_dtype(df['Date']):
+        # one text form for every stored date, '2026-10-29 00:00:00' (what the master holds): a master started by a file on its own
+        # would otherwise get '2026-10-29' for its first lines and the long form for the rest
+        df = df.assign(Date=df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S'))
+    new_keys = _bill_keys(df, kind)
+    if master_path.exists():
+        existing = pd.read_csv(master_path, dtype={c: str for c in BILL_KEY_COLUMNS[kind]}, low_memory=False)
+    else:
+        existing = pd.DataFrame(columns=list(df.columns))
+    ex_keys = _bill_keys(existing, kind)
+    known = set(new_keys) & set(ex_keys)
+    hit = ex_keys.isin(set(new_keys)).to_numpy()
+    replaced, kept = existing[hit], existing[~hit]
+
+    # How much of the file was already stored? Only used for the message - never decides what is written.
+    cols = [c for c in df.columns if c in existing.columns and c not in BOOKKEEPING_COLUMNS]
+    stored = collections.Counter(_line_fingerprints(replaced, cols))
+    in_known = new_keys.isin(known).to_numpy()
+    same = 0
+    for fp in _line_fingerprints(df[in_known], cols):
+        if stored[fp] > 0:
+            stored[fp] -= 1
+            same += 1
+    st = {'lines_in_file': len(df), 'bills_in_file': int(new_keys.nunique()), 'new_bills': len(set(new_keys) - known),
+          'lines_new': int((~in_known).sum()), 'lines_same': same, 'lines_edited': int(in_known.sum()) - same,
+          'lines_replaced': len(replaced) - same, 'removed_vanished': 0, 'part_days': {}}
+
+    if kind == 'sale' and len(kept) and 'Date' in df.columns:
+        file_n = _day_text(df['Date']).value_counts()
+        old_days = _day_text(existing['Date'])
+        stored_n = old_days.value_counts()
+        kept_days = old_days[~hit]
+        carried = {d for d, n in file_n.items() if re.match(r'^\d{4}-\d{2}-\d{2}$', d) and n >= SALE_DAY_MIN_ROWS}
+        whole = {d for d in carried if file_n[d] >= SALE_DAY_KEEP_SHARE * int(stored_n.get(d, 0))}
+        gone = kept_days.isin(whole).to_numpy()
+        st['removed_vanished'] = int(gone.sum())
+        st['part_days'] = {d: int(n) for d, n in kept_days[kept_days.isin(carried - whole).to_numpy()].value_counts().items()}
+        kept = kept[~gone]
+
+    combined = pd.concat([kept, df], ignore_index=True) if len(kept) else df.copy()
+    st.update(rows_before=len(existing), rows_after=len(combined))
+    if not dry_run:
+        _atomic_write_csv(combined, master_path)
+    return st
+
+
+def _merge_message(name, kind, df, st, dry_run=False):
+    d0, d1 = df['Date'].min(), df['Date'].max()
+    span = f'{d0:%d %b} to {d1:%d %b %Y}' if pd.notna(d0) else 'no dates'
+    parts = [f"{st['lines_new']:,} new lines added", f"{st['lines_same']:,} already there"]
+    if st['lines_edited']:
+        parts.append(f"{st['lines_edited']:,} lines of corrected bills replaced {st['lines_replaced']:,} old ones")
+    if st['removed_vanished']:
+        parts.append(f"{st['removed_vanished']:,} lines of bills no longer in the export removed")
+    msg = f"{'Would merge' if dry_run else 'Merged'} {name} as {kind.upper()} ({span}, {st['lines_in_file']:,} lines): " + ', '.join(parts) + '.'
+    for day, n in sorted(st['part_days'].items()):
+        msg += f'\n  Note: on {day} {n:,} stored lines are not in this file, which holds only part of that day - they were kept.'
+    return msg
+
+
 SALES_NORMALIZED_MARKER = PROC_DIR / '.sales_normalized'
 
 
@@ -625,31 +787,36 @@ def backup_processed_data():
         print(f'Warning: backup failed ({e}) - ingestion still completed normally.')
 
 
-def ingest():
+def ingest(dry_run=False):
+    """Merge every new or changed file in data\\raw into the masters, bill by bill (see "Merging a file into a master BY BILL"
+    above), and return the full history. dry_run=True only says what would happen and writes nothing."""
     ensure_sales_master_normalized()  # acquires its own lock - call before, not inside, ours below
     with _FileLock('ingest'):
-        manifest = load_manifest()
+        manifest = load_manifest()      # manifest['chosen'] (one file per month) is no longer used - files are merged, not chosen
         RAW_DIR.mkdir(parents=True, exist_ok=True)
         PROC_DIR.mkdir(parents=True, exist_ok=True)
-        master_for = {'sale': SALES_MASTER, 'purchase': PURCH_MASTER}
-        changed = False
 
-        for path in sorted(RAW_DIR.glob('*.xlsx')):
-            if path.name.startswith('~$'):
-                continue
+        # Oldest upload first: when two files in one batch hold the same bill, the newer file's copy is the one kept.
+        files = sorted((p for p in RAW_DIR.glob('*.xlsx') if not p.name.startswith('~$')), key=lambda p: (p.stat().st_mtime, p.name))
+        todo = []
+        for path in files:
             h = file_hash(path)
             prior_meta = manifest['files'].get(path.name)
-            if prior_meta and prior_meta.get('hash') == h:
-                continue  # this exact file already processed, nothing changed
+            if not (prior_meta and prior_meta.get('hash') == h):    # this exact file already processed: nothing changed
+                todo.append((path, h))
 
+        if todo and not dry_run:
+            backup_processed_data()     # BEFORE anything is written, so a merge that goes wrong can be put back
+
+        for path, h in todo:
             try:
                 kind, df, coverage = detect_type_and_load(path)
             except Exception as e:
                 # One malformed file (blank dates, unrecognized layout, corrupt
                 # workbook) shouldn't take down every other file in this batch.
                 print(f"Skipped {path.name}: could not read it - {e}")
-                manifest['files'][path.name] = {'hash': h, 'status': 'error', 'error': str(e)}
-                changed = True
+                if not dry_run:
+                    manifest['files'][path.name] = {'hash': h, 'status': 'error', 'error': str(e)}
                 continue
 
             if kind == 'sale':
@@ -658,53 +825,19 @@ def ingest():
                 # has to remember to convert B2B rows themselves.
                 df = normalize_sale_units(df)
 
-            month = df['Source_Month'].iloc[0]
-            key = f'{kind}:{month}'
-            chosen_name = manifest['chosen'].get(key)
+            st = _merge_rows(kind, df, dry_run=dry_run)
+            print(_merge_message(path.name, kind, df, st, dry_run))
+            if not dry_run:
+                manifest['files'][path.name] = {
+                    'hash': h, 'kind': kind, 'month': df['Source_Month'].iloc[0], 'status': 'merged', **coverage,
+                    'new_lines': st['lines_new'], 'already_there': st['lines_same'], 'corrected_lines': st['lines_edited'],
+                    'removed_lines': st['removed_vanished'], 'merged_at': time.strftime('%Y-%m-%d %H:%M')}
 
-            if chosen_name is None or chosen_name == path.name:
-                # first file seen for this month+type, or this exact file was updated in place
-                replace, reason = True, 'first file for this month' if chosen_name is None else 'file updated in place'
-            else:
-                prior_cov = manifest['files'].get(chosen_name, {})
-                prior_days = prior_cov.get('unique_days', 0)
-                prior_rows = prior_cov.get('rows', 0)
-                prior_hash = prior_cov.get('hash')
-                shape = (coverage['unique_days'], coverage['rows'])
-                prior_shape = (prior_days, prior_rows)
-                if shape > prior_shape:
-                    replace = True
-                    reason = f"wider date coverage ({coverage['unique_days']} days) than '{chosen_name}' ({prior_days} days) - replacing it"
-                elif shape == prior_shape and h != prior_hash:
-                    # Same shape but different bytes - not a duplicate, a
-                    # correction (e.g. a fixed MRP/typo re-exported). A true
-                    # duplicate would have matched hashes and been skipped
-                    # already, above.
-                    replace = True
-                    reason = f"same date coverage as '{chosen_name}' but different content - treating as a correction and replacing it"
-                else:
-                    replace = False
-                    reason = f"narrower/equal date coverage ({coverage['unique_days']} days) vs current '{chosen_name}' ({prior_days} days) - skipped as duplicate month"
-
-            if replace:
-                if chosen_name and chosen_name != path.name:
-                    _remove_file_rows(master_for[kind], chosen_name, month)
-                    if chosen_name in manifest['files']:
-                        manifest['files'][chosen_name]['status'] = 'superseded'
-                _append_rows(master_for[kind], df)
-                manifest['chosen'][key] = path.name
-                manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'active', **coverage}
-                print(f"Ingested {path.name} as {kind.upper()} -> {month} ({coverage['rows']} rows, {coverage['unique_days']} days): {reason}")
-            else:
-                manifest['files'][path.name] = {'hash': h, 'kind': kind, 'month': month, 'status': 'rejected', **coverage}
-                print(f"Skipped {path.name}: {reason}")
-            changed = True
-
-        save_manifest(manifest)
-        if not changed:
+        if not todo:
             print('No new files found in data\\raw - nothing to ingest.')
-        else:
-            backup_processed_data()
+        if dry_run:
+            return None, None
+        save_manifest(manifest)
 
         # SALES_MASTER is normalized once, at write time, above - never call
         # normalize_sale_units() on data read back out of it (see that
