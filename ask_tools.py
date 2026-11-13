@@ -2098,6 +2098,431 @@ def find_products(query, limit=30):
     return _guard_no_pii(out)
 
 
+# ---------------------------------------------------------------------------
+# The ENRICHED product master (Oct 2026): 28,003 products, each described by two AI models and checked - composition with
+# strengths, normalised salts, dosage form, therapeutic class, indications, a disease / use CATEGORY (25 groups, no
+# "Other"). Built by data/product_master/enrich_*.py and category_v2.py into "Product Master Enriched (all).xlsx"
+# (gitignored business data). Read here through a CSV copy that is rebuilt by itself whenever the xlsx changes (the
+# xlsx takes ~20 s to read; the copy well under a second). Used by find_alternatives and get_category_sales.
+# ---------------------------------------------------------------------------
+ENRICHED_XLSX = Path(__file__).parent / 'data' / 'product_master' / 'Product Master Enriched (all).xlsx'
+ENRICHED_CSV = Path(__file__).parent / 'data' / 'product_master' / 'product_master_enriched.csv'
+ENRICHED_COLS = ['PRODUCT', 'MANUFACTURER', 'PACK', 'KIND', 'CATEGORY', 'SCHEDULE H1', 'H1 DRUG', 'BRAND FAMILY', 'COMPOSITION',
+                 'SALTS (normalised)', 'IS COMBINATION', 'DOSAGE FORM', 'ROUTE', 'THERAPEUTIC CLASS', 'INDICATIONS', 'RX REQUIRED',
+                 'CONFIDENCE', 'REVIEW']
+_enriched_cache = {}          # its own cache: _load() clears _cache whenever sales change, and this list does not change with them
+ALTERNATIVES_NOTE = ('Same salts, same strength and same form (including the same release: SR / XR / ER vs ordinary) = the same '
+                     'medicine from another company (a generic substitute). A different strength, form or release is NOT a direct '
+                     'substitute; strength "check" means the strengths could not be matched exactly - compare the packs. "same_use_different_medicine" lists other medicines '
+                     'for the same use - only the doctor can switch to one of those. Never substitute a medicine without the '
+                     "pharmacist's check. MRP is per strip / pack from the latest purchase bill. This is the product list, not the "
+                     'shelf: whether one is in stock is checked separately (the rack app).')
+
+
+def _enriched():
+    """The enriched product master as a DataFrame keyed by upper-cased product name (None if it has not been built)."""
+    src = ENRICHED_XLSX if ENRICHED_XLSX.exists() else None
+    if src is not None and (not ENRICHED_CSV.exists() or ENRICHED_CSV.stat().st_mtime < src.stat().st_mtime):
+        d = pd.read_excel(src, sheet_name='data', dtype=str).fillna('')
+        d = d[[c for c in ENRICHED_COLS if c in d.columns]]
+        tmp = ENRICHED_CSV.with_suffix('.tmp')
+        d.to_csv(tmp, index=False, encoding='utf-8')
+        tmp.replace(ENRICHED_CSV)
+    if not ENRICHED_CSV.exists():
+        return None
+    stamp = ENRICHED_CSV.stat().st_mtime
+    if _enriched_cache.get('stamp') != stamp:
+        d = pd.read_csv(ENRICHED_CSV, dtype=str, keep_default_na=False)
+        d['PRODUCT'] = d['PRODUCT'].str.strip()
+        d = d[d['PRODUCT'].str.len() > 0]
+        d = d[~d['PRODUCT'].str.upper().str.startswith('XXX')]          # names struck out in the shop's list ("Xxxxxxx...")
+        d['_key'] = d['PRODUCT'].str.upper()
+        d = d.drop_duplicates('_key').set_index('_key')
+        d['_salts'] = d['SALTS (normalised)'].map(_salt_set)
+        d['_strength'] = [_strength_sig(c, n) for c, n in zip(d['COMPOSITION'], d['PRODUCT'])]
+        d['_release'] = [_release(n, c) for n, c in zip(d['PRODUCT'], d['COMPOSITION'])]
+        _enriched_cache.update(stamp=stamp, data=d)
+    return _enriched_cache['data']
+
+
+def _salt_set(text):
+    return frozenset(s.strip().lower() for s in re.split(r'[;,]', str(text or '')) if s.strip())
+
+
+def _strength_sig(composition, name=''):
+    """The strengths in a composition ("Metformin 500 mg" -> ('500mg',)), or, with no composition, the numbers in the name."""
+    text = str(composition or '')
+    ratios = {'r' + a + '/' + b for a, b in re.findall(r'(?<![\d.])(\d{2})\s*/\s*(\d{2})(?![\d.])', str(name or '') + ' ' + text)
+              if int(a) + int(b) == 100}                    # premixed insulin 30/70, 50/50, 25/75 - from the name too ...
+    pcts = re.findall(r'(?<![\d.])(\d{2})\s*%', text)
+    if len(pcts) == 2 and int(pcts[0]) + int(pcts[1]) == 100:
+        ratios.add('r%s/%s' % tuple(pcts))                  # ... or written "30% soluble + 70% isophane"
+    ratios = tuple(sorted(ratios))
+    found = re.findall(r'(\d+(?:\.\d+)?)\s*(mg|mcg|µg|g|iu|%|ml|units?|u)(?![a-z])', text.lower()) if text else []
+    if found:
+        return tuple(sorted({(n.rstrip('0').rstrip('.') if '.' in n else n) + u.replace('units', 'iu').replace('unit', 'iu') for n, u in found})) + ratios
+    nums = re.findall(r'\d+(?:\.\d+)?', str(name or ''))
+    return (tuple(sorted(set(nums))) if nums else ()) + ratios
+
+
+# Slow / modified release: an SR tablet is not a substitute for a plain one, nor the other way round.
+_RELEASE = re.compile(r'\b(SR|XR|ER|CR|PR|MR|XL|LA|ODT?|RETARD|PROLONGED|SUSTAINED|EXTENDED|CONTROLLED|MODIFIED)\b')
+
+
+def _release(name, composition=''):
+    """'SR' / 'XR' ... for a modified-release product (from its name or composition), '' for an ordinary one."""
+    m = _RELEASE.search(str(name or '').upper()) or _RELEASE.search(str(composition or '').upper())
+    if not m:
+        return ''
+    w = m.group(1)
+    return {'PROLONGED': 'PR', 'SUSTAINED': 'SR', 'EXTENDED': 'ER', 'CONTROLLED': 'CR', 'MODIFIED': 'MR', 'ODT': 'OD'}.get(w, w)
+
+
+def _same_strength(a, b):
+    if not a or not b:
+        return 'unknown'
+    if {x for x in a if x.startswith('r')} != {x for x in b if x.startswith('r')}:
+        return 'different'                                   # a different insulin mix (30/70 vs 50/50 vs none)
+    if a == b:
+        return 'same'
+    return 'check' if set(a) <= set(b) or set(b) <= set(a) else 'different'
+
+
+def _recent_bills():
+    """{PRODUCT (upper-cased): bills in the last 6 sales months} - only to put what the shop actually sells first; never shown."""
+    if 'recent_bills' not in _enriched_cache or _enriched_cache.get('recent_bills_for') is not _cache.get('sales'):
+        s, _ = _load()
+        if s.empty:
+            out = {}
+        else:
+            months = sorted(s['Calendar_Month'].dropna().unique())[-6:]
+            r = s[s['Calendar_Month'].isin(months)]
+            out = r.groupby(r['Product'].astype(str).str.strip().str.upper())['Inv.No'].nunique().to_dict()
+        _enriched_cache.update(recent_bills=out, recent_bills_for=_cache.get('sales'))
+    return _enriched_cache['recent_bills']
+
+
+def _pick_product(d, query):
+    """The product the question means: an exact name, else every word inside the name (names starting with it, then shorter
+    names, then the best seller first). -> (row or None, other close names)."""
+    q = str(query or '').strip().upper()
+    if q in d.index:
+        return d.loc[q], []
+    words = [w for w in re.findall(r'[A-Z0-9.]+', q) if w not in {x.upper() for x in _FORM_WORDS}] or re.findall(r'[A-Z0-9.]+', q)
+    if not words:
+        return None, []
+    hits = d[d['PRODUCT'].str.upper().apply(lambda n: all(w in n for w in words))]
+    if hits.empty:
+        close = difflib.get_close_matches(q, list(d.index), n=5, cutoff=0.6)
+        return None, [d.loc[k, 'PRODUCT'] for k in close]
+    bills = _recent_bills()
+    asked_release = _release(q)
+    hits = hits.assign(_start=(~hits.index.str.startswith(words[0])).astype(int), _len=hits['PRODUCT'].str.len(),
+                       _rel=(hits['_release'] != asked_release).astype(int), _bills=[-bills.get(k, 0) for k in hits.index])
+    hits = hits.sort_values(['_start', '_rel', '_bills', '_len'])
+    return hits.iloc[0], list(hits['PRODUCT'].iloc[1:6])
+
+
+def find_alternatives(product, limit=12, same_use=False):
+    """ALTERNATIVES / SUBSTITUTES for a product ("alternative to Glycomet 500", "same salt as Pan 40", "other company for
+    Dolo 650", "substitute", "generic"), from the enriched product list (composition with strengths, dosage form,
+    therapeutic class). Gives the product found and its composition, then OTHER BRANDS WITH EXACTLY THE SAME SALTS -
+    each marked same / different / check strength and same form or not, with manufacturer, MRP per strip and Schedule H1 -
+    the right substitutes (same salts + same strength + same form) first, the ones this shop sells most first among
+    them. same_use=true (or when no same-salt product exists) also lists a few DIFFERENT medicines for the same use
+    (same therapeutic class and form) - only a doctor can switch to those. No sales figures, stock, cost or customer
+    data. For a salt or combination name rather than a brand, use find_products."""
+    d = _enriched()
+    if d is None:
+        return _guard_no_pii({'available': False, 'reason': 'the enriched product list has not been built yet'})
+    limit = max(1, min(int(limit or 12), 40))
+    row, others = _pick_product(d, product)
+    if row is None:
+        return _guard_no_pii({'found': False, 'query': str(product), 'did_you_mean': others,
+                              'note': 'No product of that name in the product list.'})
+    mrp, bills = {str(k).strip().upper(): v for k, v in _latest_mrp().items()}, _recent_bills()
+    salts, sig, form, rel = row['_salts'], row['_strength'], row['DOSAGE FORM'], row['_release']
+
+    def item(r, extra):
+        m = mrp.get(r.name)
+        out = {'product': r['PRODUCT'], 'manufacturer': r['MANUFACTURER'], 'composition': r['COMPOSITION'],
+               'form': r['DOSAGE FORM'], 'mrp_per_strip': round(m[0], 2) if m else None, 'strip_size': m[1] if m else None,
+               'schedule_h1': r['SCHEDULE H1'] == H1_IN_FORCE, 'sold_here_recently': bills.get(r.name, 0) > 0}
+        out.update(extra)
+        if any('insulin' in x for x in r['_salts']):
+            out['please_check'] = 'insulin: confirm the type (regular / premix ratio / analogue) and IU/ml on the pack'
+        elif _num_or_none(r['CONFIDENCE']) is not None and _num_or_none(r['CONFIDENCE']) < 0.5:
+            out['please_check'] = 'the product list is not sure of this composition'
+        return out
+
+    base = {'found': True, 'product': row['PRODUCT'], 'manufacturer': row['MANUFACTURER'], 'composition': row['COMPOSITION'],
+            'salts': sorted(salts), 'form': form, 'release': rel or 'ordinary', 'therapeutic_class': row['THERAPEUTIC CLASS'], 'category': row['CATEGORY'],
+            'uses': row['INDICATIONS'], 'schedule_h1': row['SCHEDULE H1'] == H1_IN_FORCE, 'other_names_matched': others}
+    same = []
+    if salts:
+        cand = d[(d['_salts'] == salts) & (d.index != row.name)]
+        for key, r in cand.iterrows():
+            st = _same_strength(sig, r['_strength'])
+            same_form = r['DOSAGE FORM'] == form and r['_release'] == rel
+            same.append(((st != 'same', not same_form, -bills.get(key, 0), len(r['PRODUCT'])),
+                         item(r, {'strength': st, 'same_form': same_form, 'release': r['_release'] or 'ordinary'})))
+        same.sort(key=lambda x: x[0])
+    base['same_salts'] = [x[1] for x in same[:limit]]
+    base['same_salts_total'] = len(same)
+    base['direct_substitutes'] = sum(1 for _, x in same if x['strength'] == 'same' and x['same_form'])
+    if not salts:
+        base['note_salts'] = 'The product list has no composition for this product, so same-salt brands cannot be found.'
+    if (same_use or not same) and row['THERAPEUTIC CLASS']:
+        cls = d[(d['THERAPEUTIC CLASS'].str.lower() == row['THERAPEUTIC CLASS'].lower()) & (d['DOSAGE FORM'] == form)
+                & (d['_salts'] != salts) & (d.index != row.name)]
+        cls = cls.assign(_b=[-bills.get(k, 0) for k in cls.index]).sort_values(['_b'])
+        base['same_use_different_medicine'] = [item(r, {'salts': sorted(r['_salts'])}) for _, r in cls.head(min(limit, 8)).iterrows()]
+    base['note'] = ALTERNATIVES_NOTE
+    if base['schedule_h1'] or any(x.get('schedule_h1') for x in base['same_salts']):
+        base['h1_policy'] = H1_POLICY
+    return _guard_no_pii(base)
+
+
+def _num_or_none(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+CATEGORY_BY = {'category': 'CATEGORY', 'therapeutic_class': 'THERAPEUTIC CLASS', 'kind': 'KIND'}
+
+
+def get_category_sales(month=None, branch=None, category=None, by='category', n=15):
+    """SALES BY CATEGORY - the disease / use groups of the enriched product list (Diabetes; BP, Heart & Cholesterol;
+    Fever & Pain; Antibiotics & Infections; Skin; Vitamins & Supplements; Ayurvedic & Herbal; Baby Care ... 25 groups).
+    by='category' (default), 'therapeutic_class' (finer: "Proton-pump inhibitor", "Biguanide antidiabetic") or 'kind'
+    (medicine / supplement / cosmetic ...). month 'YYYY-MM', 'all' (every month) or empty (the latest month; it is
+    compared with the month before). branch: part of a branch name. With `category` (part of a group's name, e.g.
+    'diabetes'): that group's month-by-month sales and its top products. Sales value is with GST (as billed); strips and
+    bills too. Aggregates only - no patient data."""
+    s, _ = _load()
+    d = _enriched()
+    if d is None:
+        return _guard_no_pii({'available': False, 'reason': 'the enriched product list has not been built yet'})
+    col = CATEGORY_BY.get(str(by or 'category').lower(), 'CATEGORY')
+    if s.empty:
+        return _guard_no_pii({'available': False, 'reason': 'no sales loaded'})
+    df = s[['Product', 'Item Total', 'Inv.No', 'Qty', 'Calendar_Month']].copy()
+    df['Branch'] = df['Inv.No'].apply(rk.extract_branch)
+    if branch:
+        df = df[df['Branch'].str.contains(str(branch), case=False, na=False)]
+    key = df['Product'].astype(str).str.strip().str.upper()
+    df['Group'] = key.map(d[col]).replace('', pd.NA).fillna('Not in the product list')
+    df['Strips'] = rk.to_strips(df['Qty'], df['Product'], _factor_map())
+    operating = sorted(s['Calendar_Month'].dropna().unique())
+    if month in (None, '', 'latest'):
+        months = [operating[-1]]
+    elif str(month).lower() == 'all':
+        months = operating
+    elif month in operating:
+        months = [month]
+    else:
+        return _guard_no_pii({'error': f'no data for month {month!r}', 'months_available': operating})
+
+    def table(frame):
+        g = frame.groupby('Group').agg(sales_value=('Item Total', 'sum'), strips=('Strips', 'sum'), bills=('Inv.No', 'nunique'))
+        total = float(g['sales_value'].sum()) or 1.0
+        g['share_pct'] = g['sales_value'] / total * 100
+        return g.sort_values('sales_value', ascending=False)
+
+    cur = df[df['Calendar_Month'].isin(months)]
+    out = {'by': {'CATEGORY': 'category', 'THERAPEUTIC CLASS': 'therapeutic_class', 'KIND': 'kind'}[col],
+           'months': months if len(months) <= 3 else f'{months[0]} to {months[-1]}', 'branch': branch or 'all branches',
+           'total_sales_value': _round(cur['Item Total'].sum())}
+    if category:
+        groups = sorted(g for g in df['Group'].unique() if str(category).lower() in str(g).lower())
+        if not groups:
+            names = sorted(x for x in d[col].unique() if x)
+            return _guard_no_pii({'error': f'no {out["by"]} matches {category!r}', 'groups': names[:60]})
+        sel = df[df['Group'].isin(groups)]
+        selc = sel[sel['Calendar_Month'].isin(months)]
+        out['groups'] = groups
+        out['sales_value'] = _round(selc['Item Total'].sum())
+        out['share_of_all_sales_pct'] = _round(selc['Item Total'].sum() / (cur['Item Total'].sum() or 1) * 100, 1)
+        mm = sel.groupby('Calendar_Month').agg(sales_value=('Item Total', 'sum'), strips=('Strips', 'sum'), bills=('Inv.No', 'nunique'))
+        out['month_by_month'] = _records(mm.reset_index().rename(columns={'Calendar_Month': 'month'}).round(2))
+        tp = selc.groupby('Product').agg(sales_value=('Item Total', 'sum'), strips=('Strips', 'sum'), bills=('Inv.No', 'nunique'))
+        out['top_products'] = _records(tp.sort_values('sales_value', ascending=False).head(int(n)).reset_index().round(2))
+        return _guard_no_pii(out)
+    t = table(cur)
+    out['rows'] = _records(t.head(int(n)).reset_index().rename(columns={'Group': out['by']}).round(2))
+    out['groups_total'] = int(len(t))
+    if len(months) == 1:
+        i = operating.index(months[0])
+        if i > 0:
+            prev_rows = df[df['Calendar_Month'] == operating[i - 1]]
+            out['previous_month'] = operating[i - 1]
+            if months[0] == operating[-1]:              # the running month: compare with the SAME days of the month before
+                days = pd.to_datetime(s['Date'], errors='coerce')
+                upto = int(days[s['Calendar_Month'] == months[0]].dt.day.max() or 31)
+                pday = pd.to_datetime(s.loc[prev_rows.index, 'Date'], errors='coerce').dt.day
+                prev_rows = prev_rows[pday <= upto]
+                out['previous_month'] = f'{operating[i - 1]} (days 1-{upto} only, to match this month so far)'
+            prev = table(prev_rows)['sales_value']
+            for r in out['rows']:
+                p = float(prev.get(r[out['by']], 0) or 0)
+                r['previous_month_value'] = _round(p)
+                r['change_pct'] = _round((r['sales_value'] - p) / p * 100, 1) if p else None
+    if months[-1] == operating[-1] and len(months) == 1:
+        out['note'] = 'This month is not over yet: it is compared with the same days of last month.'
+    return _guard_no_pii(out)
+
+
+# --- Matching what a prescription says against the product list (the owner, 13 Nov 2026) ---------------------------------
+# A careful reader turns handwriting into names ("Glycomt 500", "Mixtard 50/50"); here each one is matched IN CODE against
+# the 28,003 real products, so a misread shows (no close product = NOT SURE) and a matched one carries its composition.
+_NAME_NOISE = {x.upper() for x in _FORM_WORDS} | {'MG', 'MCG', 'ML', 'GM', 'G', 'IU', 'S', 'TEMP', 'TO', 'FRIDGE', 'VIAL', 'VAIL', 'PEN', 'FLEX',
+                                                  'FLEXPEN', 'REFIL', 'REFILL', 'CARTRIDGE', 'CARTRIDGES', 'KIT', 'NEW', 'X', 'OF', 'INJ.', 'TAB.', 'STRIP',
+                                                  'BOTTLE', 'SYP.', 'CAP.', 'MGTAB', 'MGTABS', 'TABS.', 'DROP', 'ORAL', 'HM', 'PENFILL', 'PENFIL', 'PLAIN', 'DUO', 'TIN', 'JAR', 'BOX', 'PACK'}
+_FORM_ALIASES = {'tab': 'tablet', 'tabs': 'tablet', 'tablets': 'tablet', 'cap': 'capsule', 'caps': 'capsule', 'capsules': 'capsule',
+                 'inj': 'injection', 'syp': 'syrup', 'susp': 'suspension', 'drop': 'drops', 'oint': 'ointment'}
+MATCH_SURE = 0.92            # name likeness for "matched"
+MATCH_CLOSE = 0.75           # below this: not found
+
+
+def _brand_words(name):
+    """'GLYCOMET 500MG SR TAB' -> ['GLYCOMET'] - the letters-only words of a name, without forms, units and pack words."""
+    words = re.findall(r'[A-Z][A-Z\-]*', str(name or '').upper())
+    return [w.strip('-') for w in words if w.strip('-') and w.strip('-') not in _NAME_NOISE and not _RELEASE.fullmatch(w.strip('-'))]
+
+
+def _name_nums(name):
+    text = str(name or '').upper()
+    nums = set(re.findall(r'(?<![\d.])(\d+(?:\.\d+)?)', text))
+    return {n.rstrip('0').rstrip('.') if '.' in n else n for n in nums}
+
+
+def _brand_index(k):
+    """{the first k brand words of a name: [product keys]} - built once per list."""
+    d = _enriched()
+    cache = _enriched_cache.setdefault('brand_index', {})
+    if cache.get('stamp') != _enriched_cache.get('stamp'):
+        cache.clear()
+        cache['stamp'] = _enriched_cache.get('stamp')
+    if k not in cache:
+        idx = {}
+        for key, name in zip(d.index, d['PRODUCT']):
+            words = _brand_words(name)
+            if len(words) >= k:
+                idx.setdefault(' '.join(words[:k]), []).append(key)
+        cache[k] = idx
+    return cache[k]
+
+
+def _match_one(query, form='', bills=None, mrp=None):
+    """-> {'status': matched / choose / close / not_found / unreadable, 'product', ..., 'candidates': [...]}."""
+    d = _enriched()
+    q = str(query or '').strip()
+    words = _brand_words(q)
+    if not words:
+        return {'query': q, 'status': 'unreadable', 'candidates': []}
+    qb = ' '.join(words)
+    qnums = _name_nums(q)
+    qrel = _release(q)
+    qform = _FORM_ALIASES.get(str(form or '').lower().strip(), str(form or '').lower().strip())
+    k = len(words)
+    scored = {}
+    for kk in sorted({k, 1} if k > 1 else {1}):
+        target = ' '.join(words[:kk])
+        idx = _brand_index(kk)
+        near = set(difflib.get_close_matches(target, list(idx), n=12, cutoff=0.6))
+        near |= {b for b in idx if b.startswith(target) and len(b) <= len(target) + 3}
+        for b in near:
+            likeness = difflib.SequenceMatcher(None, target, b).ratio() * (1.0 if kk == k else 0.97)
+            for key in idx[b]:
+                if scored.get(key, 0) < likeness:
+                    scored[key] = likeness
+    if not scored:
+        return {'query': q, 'status': 'not_found', 'candidates': []}
+    rows = []
+    for key, likeness in scored.items():
+        r = d.loc[key]
+        extra = max(0, len(_brand_words(r['PRODUCT'])) - k)       # "Glycomet GP 2" for "Glycomet 500": another product (a combination)
+        extra_nums = len(_name_nums(r['PRODUCT']) - qnums) if qnums else 0   # "Glycomet GP 1/850" for "Glycomet GP 1"
+        likeness = max(0.0, likeness - 0.05 * extra - 0.02 * extra_nums)
+        pnums = _name_nums(r['PRODUCT']) | {re.sub(r'[a-z%/]+$', '', x) for x in r['_strength'] if not x.startswith('r')}
+        nums_ok = (not qnums) or qnums <= pnums or any(('r' + '/'.join(sorted(qnums))) in x for x in r['_strength'])
+        ratio_q = {'r' + a + '/' + b for a, b in re.findall(r'(?<![\d.])(\d{2})\s*/\s*(\d{2})(?![\d.])', q) if int(a) + int(b) == 100}
+        ratio_ok = not ratio_q or ratio_q <= {x for x in r['_strength'] if x.startswith('r')}
+        form_ok = (not qform) or qform == 'other' or r['DOSAGE FORM'] == qform
+        rel_ok = r['_release'] == qrel
+        score = likeness * 100 + (25 if nums_ok and ratio_ok else 0) + (4 if form_ok else 0) + (4 if rel_ok else 0) \
+            + min(1.0, math.log1p((bills or {}).get(key, 0)) / 6)     # the shop's seller only breaks ties between packs
+        rows.append((score, likeness, nums_ok and ratio_ok, form_ok, rel_ok, key, r, extra))
+    rows.sort(key=lambda x: (-x[0], len(x[6]['PRODUCT'])))
+
+    def show(r):
+        m = (mrp or {}).get(r.name)
+        return {'product': r['PRODUCT'], 'composition': r['COMPOSITION'], 'form': r['DOSAGE FORM'], 'release': r['_release'] or 'ordinary',
+                'mrp_per_strip': round(m[0], 2) if m else None, 'strip_size': m[1] if m else None,
+                'schedule_h1': r['SCHEDULE H1'] == H1_IN_FORCE, 'sold_here_recently': (bills or {}).get(r.name, 0) > 0}
+
+    best = rows[0]
+    out = {'query': q, 'candidates': [show(x[6]) for x in rows[:5]]}
+    out.update(show(best[6]))
+    out['likeness'] = round(best[1], 2)
+    if best[1] < MATCH_CLOSE:
+        out['status'] = 'not_found'
+        for f in ('product', 'composition', 'form', 'release', 'mrp_per_strip', 'strip_size', 'schedule_h1', 'sold_here_recently'):
+            out.pop(f, None)
+        return out
+    # the same top score shared by products that are NOT the same medicine (Glycomet 250 / 500 / 850 for "Glycomet"): ask which
+    top = [x for x in rows if x[1] >= best[1] - 0.001 and x[2] == best[2] and x[3] == best[3] and x[4] == best[4]]
+    kinds = {(x[6]['_salts'], x[6]['_strength'], x[6]['DOSAGE FORM'], x[6]['_release']) for x in top}
+    if best[7]:
+        # the best name has words the prescription does not ("Cremaffin PLUS" for "Cremaffin"): never a sure match. If
+        # other names fit as well, they are the choices.
+        top = [x for x in rows if x[1] >= best[1] - 0.001 and x[2] == best[2]]      # never a different strength as a choice
+        kinds = {(x[6]['_salts'], x[6]['_strength'], x[6]['DOSAGE FORM'], x[6]['_release']) for x in top}
+    if best[1] >= MATCH_SURE and best[2] and len(kinds) == 1 and not best[7]:
+        out['status'] = 'matched'
+    elif best[1] >= MATCH_SURE and len(kinds) > 1:
+        out['status'] = 'choose'
+        seen, opts = set(), []
+        for x in top:
+            sig = (x[6]['_salts'], x[6]['_strength'], x[6]['DOSAGE FORM'], x[6]['_release'])
+            if sig not in seen:
+                seen.add(sig)
+                opts.append(show(x[6]))
+        out['candidates'] = opts[:6]
+    else:
+        out['status'] = 'close'
+    return out
+
+
+def match_products(items):
+    """Match names read from a PRESCRIPTION (handwriting) against the product list - name, strength, form and release
+    compared, spelling slips allowed. Each item: {"name": what was read, "form": tablet / injection ... (optional),
+    "others": other possible readings (optional)}. For each: status 'matched' (one real product, its composition),
+    'choose' (the name fits several strengths or forms - which one?), 'close' (only a near name - check it), 'not_found'
+    or 'unreadable', with the nearest real products, and for each other reading its own best product. No sales figures."""
+    d = _enriched()
+    if d is None:
+        return _guard_no_pii({'available': False, 'reason': 'the enriched product list has not been built yet'})
+    bills = _recent_bills()
+    mrp = {str(k).strip().upper(): v for k, v in _latest_mrp().items()}
+    results = []
+    for it in (items if isinstance(items, list) else [])[:20]:
+        it = it if isinstance(it, dict) else {'name': str(it)}
+        res = _match_one(it.get('name'), it.get('form'), bills, mrp)
+        alts = []
+        for o in (it.get('others') or [])[:3]:
+            a = _match_one(o, it.get('form'), bills, mrp)
+            if a['status'] in ('matched', 'choose', 'close') and a.get('product') and a.get('product') != res.get('product'):
+                alts.append({'reading': str(o), 'status': a['status'], 'product': a['product'], 'composition': a.get('composition', '')})
+        res['other_readings'] = alts
+        results.append(res)
+    return _guard_no_pii({'results': results,
+                          'note': 'Matched by name, strength, form and release against the product list. A match is the likeliest real '
+                                  'product for what was READ - the prescription itself is what counts.'})
+
+
 def get_mrp_total(items):
     """MRP total for a list of products and a number of TABLETS/CAPSULES each
     (owner's rule: "Ecosprin AV 75, 30" = 30 capsules of Ecosprin AV 75 = 2
@@ -2255,6 +2680,20 @@ TOOLS = [
      'description': find_products.__doc__,
      'parameters': _schema({'query': {'type': 'string', 'description': 'a brand name, a salt, or salts joined by + or and'},
                             'limit': {'type': 'integer'}}, ['query'])},
+    {'name': 'find_alternatives', 'fn': find_alternatives,
+     'description': find_alternatives.__doc__,
+     'parameters': _schema({'product': {'type': 'string', 'description': 'the brand / product name to find alternatives for'},
+                            'limit': {'type': 'integer'},
+                            'same_use': {'type': 'boolean', 'description': 'also list different medicines for the same use'}}, ['product'])},
+    {'name': 'get_category_sales', 'fn': get_category_sales,
+     'description': get_category_sales.__doc__,
+     'parameters': _schema({'month': {'type': 'string'}, 'branch': {'type': 'string'}, 'category': {'type': 'string'},
+                            'by': {'type': 'string', 'enum': list(CATEGORY_BY)}, 'n': {'type': 'integer'}})},
+    {'name': 'match_products', 'fn': match_products,
+     'description': match_products.__doc__,
+     'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
+         'name': {'type': 'string'}, 'form': {'type': 'string'}, 'others': {'type': 'array', 'items': {'type': 'string'}}},
+         'required': ['name']}}}, ['items'])},
     {'name': 'get_mrp_total', 'fn': get_mrp_total,
      'description': get_mrp_total.__doc__,
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {

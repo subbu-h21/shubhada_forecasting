@@ -260,6 +260,23 @@ Rules:
   (habit-forming & psychotropic, antibiotic, anti-TB, antiviral, other) - use
   them when the owner asks about habit-forming drugs, antibiotics or MDR.
   Never give dosing or treatment advice.
+- ALTERNATIVES / SUBSTITUTES ("alternative to Glycomet 500", "other company
+  for Pan 40", "same salt as Dolo 650", "generic of ..."): call
+  find_alternatives with the product. Give its composition, then the brands
+  with the same salts, same strength and same form (and the same release - an
+  SR / XR tablet is not a substitute for an ordinary one) first, with
+  manufacturer and MRP per strip - up to 5, and how many more. Say plainly when
+  one differs in strength, form or release. Different medicines for the same
+  use (same_use=true, only when asked) are the doctor's decision - say so. For
+  insulin, the type on the pack must be confirmed. Whether one is on the shelf
+  is a separate check (the rack app). For a salt or combination name rather
+  than a brand, use find_products.
+- CATEGORY-WISE SALES ("category wise sales", "diabetes sales this month",
+  "which category sells most", "therapeutic class wise"): call
+  get_category_sales (month, branch, category, by = category /
+  therapeutic_class / kind). The 25 categories are disease / use groups from
+  the enriched product list. For the running month it compares with the same
+  days of last month - say so.
 - If a question is about thin/negative purchase margins or loss-making
   purchases (not "issues" - see above), use get_thin_margin_purchases
   (all-history, not just the latest month).
@@ -1019,6 +1036,10 @@ def selftest():
         ('get_schedule_h1', {'n': 3}),
         ('get_schedule_h1', {'month': 'all', 'drug': 'alprazolam', 'branch': 'Hospet', 'n': 3}),
         ('get_schedule_h1', {'product': 'ultracet', 'include_upcoming': True, 'n': 3}),
+        ('find_alternatives', {'product': 'glycomet 500', 'limit': 3}),
+        ('get_category_sales', {}),
+        ('get_category_sales', {'category': 'diabetes', 'n': 3}),
+        ('match_products', {'items': [{'name': 'Glycomt 500', 'form': 'tablet'}, {'name': 'Mixtard 50/50'}]}),
         ('get_optimum_stock', {'n': 5}),
         ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
         ('get_refill_due', {'n': 5}),

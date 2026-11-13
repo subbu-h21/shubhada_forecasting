@@ -263,6 +263,26 @@ sales questions only and tells you order tracking is offline if you ask about or
 - **Tests.** `venv/Scripts/python.exe test_dual_ask.py` (offline - a stub order dashboard
   and a scripted model).
 
+## Alternatives and category-wise sales (13 Nov 2026)
+
+Two Ask tools read the **enriched product master** (`data/product_master/Product Master Enriched (all).xlsx`, sheet `data`; gitignored). The xlsx
+takes ~20 s to read, so a CSV copy (`product_master_enriched.csv`, same folder) is rebuilt by itself whenever the xlsx is newer.
+
+- **`find_alternatives(product, limit, same_use)`** - substitutes for a brand: the same salts (normalised), marked same / different / check
+  strength (from the composition; insulin mixes such as 30/70 read from the name or the percentages), same form and the same release (SR / XR /
+  ER / CR ... vs ordinary). Direct substitutes first, then the shop's better sellers (no figures shown). `same_use=true` adds different medicines
+  of the same therapeutic class and form - the doctor's decision. Struck-out names ("Xxxxxx...") are skipped. No sales, stock or customer data.
+- **`get_category_sales(month, branch, category, by, n)`** - sales value (with GST), strips, bills and share per category (25 disease / use
+  groups), therapeutic class or kind; the running month is compared with the same days of last month; with `category`, its month-by-month and
+  top products.
+
+- **`match_products(items)`** - names read from a handwritten prescription matched against the list (the Shop Assistant calls it in
+  code after its careful reading): name likeness with spelling slips allowed, then strength, insulin mix, form and release. Status
+  `matched` (one real product), `choose` (several strengths / packs fit), `close` (only a near name, or one with extra words -
+  "Cremaffin Plus" for "Cremaffin"), `not_found`, `unreadable`; never a different strength as a choice. No sales figures.
+
+`test_alternatives.py` (offline). The Shop Assistant gives `find_alternatives` to staff and doctors too.
+
 ## Rack & bin questions on the Ask page
 
 The Ask page can also answer from **Rack Management** (the separate rack app on port
