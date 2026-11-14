@@ -2523,6 +2523,106 @@ def match_products(items):
                                   'product for what was READ - the prescription itself is what counts.'})
 
 
+def get_food_advice(products=None, invoice_no=None):
+    """FOOD AND MEDICINE GUIDE for a prescription or a bill ("food advice", "what food to avoid with these medicines",
+    "safe foods", "diet with this prescription", "empty stomach or after food?", "food-drug interaction"): for each
+    medicine HOW TO TAKE it (empty stomach / before / with / after food), then the foods to AVOID, to KEEP APART from
+    the dose (with the hours), to keep STEADY and to LIMIT, then the GOOD foods - all combined across the medicines. Give
+    'products' (product names as on the prescription or bill - brand names with strength, misspellings are matched; a
+    generic name like "metformin" also works) or 'invoice_no' (a shop bill number like 2627WH62553 - its products are
+    read from the sales register). Worked out LIVE by a strong AI model for exactly these medicines (takes 20-40 seconds;
+    nothing is stored). The answer's 'text' is the finished, patient-ready guide: send it EXACTLY as it is
+    (it is already formatted for WhatsApp) - do not shorten, reorder or add food advice of your own. 'staff_note' is for
+    the person asking only. No patient details are used."""
+    import food_advice as F
+    d = _enriched()
+    if d is None:
+        return {'available': False, 'reason': 'the enriched product list has not been built yet'}
+    names, source = [], ''
+    if invoice_no:
+        s, _ = _load()
+        inv = str(invoice_no).strip().upper()
+        rows = s[s['Inv.No'].astype(str).str.strip().str.upper() == inv]
+        if rows.empty:
+            last = str(s['Date'].max())[:10] if not s.empty else '?'
+            return {'found': False, 'invoice_no': inv,
+                    'reason': 'bill %s is not in the sales register (it has bills up to %s) - please send the product names or a '
+                              'photo of the bill instead' % (inv, last)}
+        names = list(dict.fromkeys(rows['Product'].astype(str).str.strip()))
+        source = 'bill %s (%s)' % (inv, str(rows['Date'].min())[:10])
+    for p in (products if isinstance(products, list) else ([products] if products else [])):
+        p = str((p.get('name') or p.get('product') or '') if isinstance(p, dict) else p).strip()
+        if p and p not in names:
+            names.append(p)
+    if not names:
+        return {'error': 'give the products (names) or a bill number'}
+    bills = _recent_bills()
+    items, unmatched, read, seen, found = [], [], [], set(), []
+    for name in names[:25]:
+        key = name.upper()
+        row, how = None, ''
+        if key in d.index:
+            row = d.loc[key]
+        else:
+            m = _match_one(name, '', bills)
+            if m['status'] == 'matched':
+                row = d.loc[m['product'].upper()]
+            elif m['status'] in ('choose', 'close') and m.get('product'):
+                cands = [c['product'].upper() for c in (m.get('candidates') or []) if c.get('product')]
+                same = len({d.loc[c, '_salts'] for c in cands if c in d.index}) <= 1
+                row = d.loc[m['product'].upper()]
+                if m['status'] == 'close':
+                    how = 'nearest name in our list - please check'
+                elif not same:
+                    how = 'which one? also: ' + ' / '.join(c['product'] for c in m['candidates'][1:4])
+            elif name.lower() in _all_salts(d):                         # a generic name ("metformin")
+                row = {'PRODUCT': name.title(), 'KIND': 'medicine', 'ROUTE': 'oral', 'COMPOSITION': name, '_salts': frozenset([name.lower()])}
+        if row is None:
+            unmatched.append(name)
+            read.append({'asked': name, 'product': None})
+            continue
+        row = row if isinstance(row, dict) else row.to_dict()
+        product = row['PRODUCT']
+        if product.upper() in seen:
+            continue
+        seen.add(product.upper())
+        found.append((name, row, how))
+    try:                                                     # one live question about all of them (nothing is kept)
+        kb, cost = F.ask_live([r for _n, r, _h in found], call=FOOD_CALL)
+    except Exception as exc:  # noqa: BLE001
+        return {'available': False, 'reason': 'the AI service did not answer (%s) - please try again in a minute' % type(exc).__name__,
+                'medicines': [{'asked': n, 'product': r['PRODUCT']} for n, r, _h in found]}
+    for name, row, how in found:
+        adv = F.product_advice(row, kb)
+        if how:
+            adv['notes'] = adv.get('notes', []) + ['(read as %s: %s)' % (row['PRODUCT'], how)]
+        items.append(adv)
+        read.append({'asked': name, 'product': row['PRODUCT'], 'composition': adv.get('composition', ''), 'timing': adv.get('timing', ''),
+                     **({'check': how} if how else {})})
+    guide = F.combine(items)
+    staff = []
+    if source:
+        staff.append('Products from %s.' % source)
+    if guide['review']:
+        staff.append('Some of this advice is marked for the pharmacist to confirm (%s).' %
+                     ', '.join(i['short'] for i in guide['how_to_take'] if i.get('review')))
+    if unmatched:
+        staff.append('Not found in the product list: %s.' % ', '.join(unmatched))
+    return {'text': F.guide_text(guide, unmatched), 'medicines': read, 'staff_note': ' '.join(staff), 'cost_usd': round(cost, 4),
+            'note': 'Send "text" exactly as it is. Worked out just now by %s for exactly these medicines (doubtful points marked '
+                    'for the pharmacist) - general guidance, the doctor\'s advice comes first.' % F.model()}
+
+
+FOOD_CALL = None            # the food model call - None: food_advice.openrouter_call (a stub in the tests)
+
+
+def _all_salts(d):
+    if _enriched_cache.get('all_salts_for') != _enriched_cache.get('stamp'):
+        _enriched_cache['all_salts'] = frozenset(x for ss in d['_salts'] for x in ss)
+        _enriched_cache['all_salts_for'] = _enriched_cache.get('stamp')
+    return _enriched_cache['all_salts']
+
+
 def get_mrp_total(items):
     """MRP total for a list of products and a number of TABLETS/CAPSULES each
     (owner's rule: "Ecosprin AV 75, 30" = 30 capsules of Ecosprin AV 75 = 2
@@ -2694,6 +2794,11 @@ TOOLS = [
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
          'name': {'type': 'string'}, 'form': {'type': 'string'}, 'others': {'type': 'array', 'items': {'type': 'string'}}},
          'required': ['name']}}}, ['items'])},
+    {'name': 'get_food_advice', 'fn': get_food_advice,
+     'description': get_food_advice.__doc__,
+     'parameters': _schema({'products': {'type': 'array', 'items': {'type': 'string'},
+                                         'description': 'product names from the prescription or bill'},
+                            'invoice_no': {'type': 'string', 'description': 'a shop bill number, instead of products'}})},
     {'name': 'get_mrp_total', 'fn': get_mrp_total,
      'description': get_mrp_total.__doc__,
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {

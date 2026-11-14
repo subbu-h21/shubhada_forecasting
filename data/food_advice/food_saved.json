@@ -1,0 +1,1431 @@
+{
+ "note": "Food records written on 13 Nov 2026 before the full build was stopped. checked=true: used as they are; checked=false: sent to the live model as a draft to check. Foods are codes from food_advice.py.",
+ "salts": {
+  "acebrophylline": {
+   "timing": "after_food",
+   "timing_note": "Take after a meal to reduce stomach upset.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food advice reflects common oral product directions; check the specific label."
+  },
+  "aluminium hydroxide": {
+   "timing": "after_food",
+   "timing_note": "Usually taken after meals; follow the product label for bedtime use.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Antacid can interfere with absorption of other medicines; check medicine-to-medicine spacing."
+  },
+  "ambroxol": {
+   "timing": "after_food",
+   "timing_note": "Take after food if it causes stomach discomfort.",
+   "avoid": [],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral product instructions vary; food mainly helps tolerability."
+  },
+  "amitriptyline": {
+   "timing": "any_time",
+   "timing_note": "Usually taken at night because it can make you sleepy.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It can greatly increase sleepiness and impair coordination."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food does not materially affect dosing; evening use is for sedation."
+  },
+  "azithromycin": {
+   "timing": "any_time",
+   "timing_note": "Tablets may be taken with food if they upset your stomach; follow the label for other forms.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Meal instructions vary by formulation; do not apply capsule instructions to tablets."
+  },
+  "b complex vitamins": {
+   "timing": "after_food",
+   "timing_note": "Take after a meal to avoid nausea.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Taking after food improves tolerance. Injectable forms need no meal timing. No meaningful food interactions."
+  },
+  "bilastine": {
+   "timing": "empty_stomach",
+   "timing_note": "Take 1 hour before or 2 hours after food or fruit juice, with water.",
+   "avoid": [
+    {
+     "food": "fruit_juice",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Fruit juice lowers how much medicine gets absorbed"
+    },
+    {
+     "food": "grapefruit",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Grapefruit juice lowers how much medicine gets absorbed"
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "SmPC: food and grapefruit juice reduce bioavailability by about 30%, so dose 1 h before or 2 h after food or juice."
+  },
+  "biotin": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "No meaningful food interactions. High doses interfere with lab immunoassays such as thyroid and troponin tests; advise stopping before tests."
+  },
+  "carbamazepine": {
+   "timing": "with_food",
+   "timing_note": "Take with or just after meals to reduce stomach upset. Swallow CR tablets whole or halved, never chewed.",
+   "avoid": [
+    {
+     "food": "grapefruit",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Grapefruit can raise the medicine level and cause dizziness or double vision"
+    },
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Adds to drowsiness and dizziness and may trigger fits"
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Grapefruit inhibits CYP3A4 and raises CBZ levels (SmPC). Alcohol adds CNS depression and lowers seizure threshold."
+  },
+  "carbonate": {
+   "timing": "with_food",
+   "timing_note": "If this is calcium carbonate, take it with a meal for better absorption.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "“Carbonate” is incomplete; calcium carbonate is inferred from the listed calcium products."
+  },
+  "carvedilol": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal to reduce dizziness on standing.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much salt can worsen blood pressure or fluid retention."
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food slows absorption and reduces the risk of a sudden blood-pressure drop."
+  },
+  "cefpodoxime proxetil": {
+   "timing": "with_food",
+   "timing_note": "Take tablets with a meal for better absorption; suspension may be taken without food.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Tablet and suspension food instructions differ; timing shown is for tablets."
+  },
+  "chlordiazepoxide": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Together they can cause dangerous sleepiness and slow breathing."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for chlordiazepoxide alone."
+  },
+  "chlorphenamine": {
+   "timing": "any_time",
+   "timing_note": "May make you sleepy; food can help if it upsets your stomach.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can greatly increase sleepiness and impair alertness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Sedation is the main relevant food-and-drink concern."
+  },
+  "cilnidipine": {
+   "timing": "any_time",
+   "timing_note": "Take at the same time each day.",
+   "avoid": [
+    {
+     "food": "grapefruit",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It may raise medicine levels and cause dizziness or low blood pressure."
+    },
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Extra salt makes blood pressure harder to control."
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Grapefruit interaction is plausible through CYP3A4; clinical evidence is limited."
+  },
+  "clobazam": {
+   "timing": "any_time",
+   "timing_note": "Can be taken with or without food.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Causes heavy drowsiness and slowed breathing"
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Alcohol increases benzodiazepine CNS and respiratory depression and raises clobazam levels."
+  },
+  "clopidogrel": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Heavy drinking can increase stomach irritation and bleeding."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "No routine restriction on leafy vegetables; clopidogrel is not warfarin."
+  },
+  "copper": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Copper is a mineral nutrient; examples are mixed supplements, whose other ingredients may change advice."
+  },
+  "d chiro inositol": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "No established food interaction for D-chiro-inositol alone; combination products differ."
+  },
+  "dapagliflozin": {
+   "timing": "any_time",
+   "timing_note": "Drink enough water, especially in hot weather.",
+   "avoid": [
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much sugar makes blood glucose harder to control."
+    }
+   ],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Maintain hydration; assess fluid advice individually in heart or kidney failure."
+  },
+  "deflazacort": {
+   "timing": "with_food",
+   "timing_note": "Take in the morning with breakfast.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Steroids hold salt and water, which raises BP and swelling"
+    },
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Steroids can raise blood sugar"
+    },
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Raises the risk of stomach irritation and bleeding"
+    }
+   ],
+   "good": [
+    "calcium_foods",
+    "protein_foods"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Corticosteroid: morning dose with food. Salt and sugar rules apply; calcium helps bone protection in long courses."
+  },
+  "dextromethorphan": {
+   "timing": "any_time",
+   "timing_note": "May be taken with or without food.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It may increase drowsiness and impair alertness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Many cough products also contain sedating ingredients; check the actual formulation."
+  },
+  "dextromethorphan hydrobromide": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Adds to drowsiness and dizziness"
+    }
+   ],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Alcohol increases CNS depression, and combination syrups often contain sedating antihistamines."
+  },
+  "dicyclomine": {
+   "timing": "before_food",
+   "timing_note": "If prescribed for meal-related cramps, take before meals; follow your label.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "It may worsen dizziness or drowsiness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Meal timing applies to oral use and varies by indication; injection has no meal timing."
+  },
+  "dutasteride": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for dutasteride alone, not alpha-blocker combinations."
+  },
+  "empagliflozin": {
+   "timing": "any_time",
+   "timing_note": "Keep well hydrated, especially in hot weather.",
+   "avoid": [
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Sugary food and drinks make blood sugar harder to control."
+    }
+   ],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Do not apply meal instructions from combination products to empagliflozin alone."
+  },
+  "escitalopram": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it causes nausea.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can worsen drowsiness and mood symptoms."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for escitalopram alone, not benzodiazepine combinations."
+  },
+  "etofylline": {
+   "timing": "after_food",
+   "timing_note": "Take after food to avoid stomach upset. Swallow retard tablets whole.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Caffeine adds to palpitations, tremor and sleeplessness"
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Xanthine derivative, so caffeine adds stimulant effects. Indian products are often combined with theophylline."
+  },
+  "etoricoxib": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Extra salt can worsen swelling or high blood pressure."
+    },
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Heavy drinking raises the risk of stomach bleeding."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral-product guidance; injectable products have no meal timing."
+  },
+  "ferric ammonium": {
+   "timing": "empty_stomach",
+   "timing_note": "Absorbs best away from meals; take with food if it upsets your stomach.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Tea and coffee reduce iron absorption."
+    },
+    {
+     "food": "milk_dairy",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Calcium in dairy reduces iron absorption."
+    },
+    {
+     "food": "calcium_iron_antacid",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Calcium and antacids reduce iron absorption."
+    }
+   ],
+   "good": [
+    "vitamin_c_foods"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Guidance is for the iron component; listed products may also contain folate and B12."
+  },
+  "ferrous": {
+   "timing": "empty_stomach",
+   "timing_note": "Take with water; if it upsets your stomach, take it with food.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Tea and coffee reduce iron absorption."
+    },
+    {
+     "food": "milk_dairy",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Calcium in dairy reduces iron absorption."
+    },
+    {
+     "food": "calcium_iron_antacid",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Calcium supplements and antacids reduce iron absorption."
+    }
+   ],
+   "good": [
+    "vitamin_c_foods"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Assumes an oral ferrous iron salt; exact formulation and tolerability affect timing."
+  },
+  "ferrous ascorbate": {
+   "timing": "empty_stomach",
+   "timing_note": "Take with water; if it upsets your stomach, take it after food.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Tea and coffee reduce iron absorption."
+    },
+    {
+     "food": "milk_dairy",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Dairy can reduce iron absorption."
+    },
+    {
+     "food": "calcium_iron_antacid",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Calcium and antacids reduce iron absorption; check before adding more iron."
+    }
+   ],
+   "good": [
+    "vitamin_c_foods"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for ferrous ascorbate alone; do not infer folic acid from combination brands."
+  },
+  "fexofenadine": {
+   "timing": "any_time",
+   "timing_note": "Swallow with water only, not with fruit juice.",
+   "avoid": [
+    {
+     "food": "fruit_juice",
+     "level": "space",
+     "gap_hours": 4,
+     "why": "Fruit juice lowers how much medicine gets absorbed"
+    },
+    {
+     "food": "grapefruit",
+     "level": "space",
+     "gap_hours": 4,
+     "why": "Grapefruit juice lowers how much medicine gets absorbed"
+    },
+    {
+     "food": "calcium_iron_antacid",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Antacids reduce absorption of this medicine"
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "OATP1A2 inhibition by juices cuts AUC by about 30-60%. Al/Mg antacids lower absorption (SmPC: separate by about 2 h)."
+  },
+  "flunarizine": {
+   "timing": "any_time",
+   "timing_note": "Often taken in the evening because it may cause drowsiness.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can increase drowsiness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Guidance is for flunarizine alone, not example combination products."
+  },
+  "glucosamine": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal if it causes stomach upset.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food is for tolerability, not essential for absorption."
+  },
+  "glucose": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Route and indication vary: oral glucose, ORS ingredient and injectable dextrose need different instructions."
+  },
+  "guaifenesin": {
+   "timing": "any_time",
+   "timing_note": "Drink water regularly to help loosen mucus.",
+   "avoid": [],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Guidance is for guaifenesin alone, not other ingredients in cough combinations."
+  },
+  "human insulin soluble": {
+   "timing": "before_food",
+   "timing_note": "Inject about 30 minutes before eating; have the meal ready and do not skip it.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "It can cause low blood sugar, sometimes hours later."
+    },
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Frequent sweets raise blood sugar; use sugar to treat a low."
+    }
+   ],
+   "good": [
+    "regular_meals",
+    "glucose_handy"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "For soluble human insulin alone; premixed insulin products require their own instructions."
+  },
+  "hydroxide": {
+   "timing": "any_time",
+   "timing_note": "Check the full ingredient name and product directions.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Incomplete salt name: magnesium and aluminium hydroxides have different uses and directions."
+  },
+  "hydroxyzine": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol increases drowsiness and impairs coordination."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Applies to oral hydroxyzine."
+  },
+  "ibuprofen": {
+   "timing": "with_food",
+   "timing_note": "Take with food or milk to reduce stomach upset.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Heavy drinking raises the risk of stomach bleeding."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food reduces stomach upset but does not eliminate ulcer or bleeding risk."
+  },
+  "itraconazole": {
+   "timing": "after_food",
+   "timing_note": "Capsules: take just after a full meal. Oral solution: take on an empty stomach.",
+   "avoid": [
+    {
+     "food": "grapefruit",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It may change itraconazole levels."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Capsules and oral solution are not interchangeable; meal timing differs."
+  },
+  "ivermectin": {
+   "timing": "empty_stomach",
+   "timing_note": "Take with water on an empty stomach; follow the product or prescriber's directions.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Fasting is conventional for parasite treatment; food advice can differ by indication."
+  },
+  "lercanidipine": {
+   "timing": "before_food",
+   "timing_note": "Take at least 15 minutes before a meal, preferably in the morning, with water.",
+   "avoid": [
+    {
+     "food": "grapefruit",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Grapefruit raises the medicine level and can drop BP too much"
+    },
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can increase the BP-lowering effect and cause dizziness"
+    },
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much salt raises blood pressure"
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "SmPC: fatty meal increases bioavailability 4-fold, so dose 15 min pre-meal. Grapefruit (CYP3A4) and alcohol are contraindicated/avoid."
+  },
+  "levocarnitine": {
+   "timing": "with_food",
+   "timing_note": "Take with or after meals to reduce stomach upset. Spread doses through the day.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Label advises taking with meals for GI tolerance. No meaningful food interactions."
+  },
+  "levocetirizine": {
+   "timing": "any_time",
+   "timing_note": "If it makes you sleepy, take it in the evening.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol may make you more sleepy and less alert."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food may slow absorption slightly but does not require meal separation."
+  },
+  "levosulpiride": {
+   "timing": "before_food",
+   "timing_note": "Usually taken before meals when prescribed for stomach symptoms.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can increase drowsiness and impair coordination."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral prokinetic use; injection meal timing is not applicable."
+  },
+  "liquid paraffin": {
+   "timing": "empty_stomach",
+   "timing_note": "Take between meals. Do not take just before lying down.",
+   "avoid": [],
+   "good": [
+    "plenty_water",
+    "high_fibre_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Taken with meals it impairs fat-soluble vitamin absorption. Aspiration risk if taken just before lying down; avoid long-term use."
+  },
+  "loperamide": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [
+    "plenty_water"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Replace fluids and salts during diarrhoea; seek assessment for blood in stool or fever."
+  },
+  "lorazepam": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Together they can cause dangerous sedation and slow breathing."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Alcohol avoidance is important even when doses are taken hours apart."
+  },
+  "lysine": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Lysine alone has no important food restriction; example products contain other nutrients."
+  },
+  "metronidazole": {
+   "timing": "with_food",
+   "timing_note": "Take oral tablets with or just after food to reduce stomach upset.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It may cause flushing, nausea or vomiting; avoid for 48 hours after."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Alcohol restriction follows common product guidance, although reaction evidence is mixed; timing is for oral forms."
+  },
+  "montelukast": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food restrictions are not needed for usual tablets; some granule products have specific instructions."
+  },
+  "moxonidine": {
+   "timing": "any_time",
+   "timing_note": "Take at the same time each day, with or without food.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much salt makes blood pressure harder to control."
+    },
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Alcohol may worsen dizziness or drowsiness."
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food does not affect dosing; alcohol may add to sedative effects."
+  },
+  "myo inositol": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "No established food interaction for myo-inositol alone; PCOS products may contain other drugs."
+  },
+  "nebivolol": {
+   "timing": "any_time",
+   "timing_note": "Take at the same time each day, with or without food.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much salt makes blood pressure harder to control."
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "No clinically important food interaction for nebivolol alone."
+  },
+  "norethisterone": {
+   "timing": "any_time",
+   "timing_note": "Take at the same time each day, with or without food.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "No meaningful food interactions. St John's wort reduces effect, which is uncommon locally."
+  },
+  "ofloxacin": {
+   "timing": "any_time",
+   "timing_note": "Swallow oral doses with water; keep mineral supplements and antacids apart.",
+   "avoid": [
+    {
+     "food": "calcium_iron_antacid",
+     "level": "space",
+     "gap_hours": 2,
+     "why": "Minerals can stop enough antibiotic being absorbed."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Spacing applies to oral ofloxacin, not infusions; ordinary meals need no restriction."
+  },
+  "omega fatty acids": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal to reduce fishy burps and stomach upset.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice applies to oral omega-fatty-acid supplements."
+  },
+  "ondansetron": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral forms do not require a meal; injection and suppository have no meal timing."
+  },
+  "oxetacaine": {
+   "timing": "before_food",
+   "timing_note": "Usually taken shortly before meals for stomach discomfort.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Timing varies by formulation; examples often combine it with antacids."
+  },
+  "pantoprazole": {
+   "timing": "before_food",
+   "timing_note": "Take before a meal, preferably before breakfast; swallow the tablet whole.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Timing describes oral delayed-release products; injection has no meal timing."
+  },
+  "phenylephrine": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral products can be taken with or without food; rectal products have no meal timing."
+  },
+  "picosulfate": {
+   "timing": "any_time",
+   "timing_note": "Often taken in the evening; it usually works overnight.",
+   "avoid": [],
+   "good": [
+    "plenty_water",
+    "high_fibre_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Guidance is for oral sodium picosulfate used for constipation."
+  },
+  "prednisolone": {
+   "timing": "with_food",
+   "timing_note": "Take in the morning with breakfast.",
+   "avoid": [
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Steroids hold salt and water, which raises BP and swelling"
+    },
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Steroids can raise blood sugar"
+    },
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Raises the risk of stomach irritation and bleeding"
+    }
+   ],
+   "good": [
+    "calcium_foods",
+    "protein_foods"
+   ],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "Morning dose with food reduces GI upset and HPA suppression. Limit salt and sugar; give calcium for bone protection on long courses."
+  },
+  "promethazine theoclate": {
+   "timing": "any_time",
+   "timing_note": "For travel sickness, take before travel as directed; food is not required.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol greatly increases drowsiness and impairs coordination."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Sedating antiemetic; travel timing is separate from meal timing."
+  },
+  "propranolol": {
+   "timing": "any_time",
+   "timing_note": "Take consistently the same way each day, with food or without it.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food can affect absorption, so consistent administration is preferable."
+  },
+  "quetiapine": {
+   "timing": "any_time",
+   "timing_note": "Follow the product label; prolonged-release tablets may have separate meal instructions.",
+   "avoid": [
+    {
+     "food": "grapefruit",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It can raise quetiapine levels and side effects."
+    },
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It can greatly increase drowsiness and impair alertness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Immediate-release tablets may be taken with or without food; prolonged-release meal advice differs."
+  },
+  "ramipril": {
+   "timing": "any_time",
+   "timing_note": "Take at about the same time each day.",
+   "avoid": [
+    {
+     "food": "high_potassium",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Large amounts, especially salt substitutes, can raise blood potassium."
+    },
+    {
+     "food": "high_salt",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much salt makes blood pressure harder to control."
+    }
+   ],
+   "good": [
+    "low_salt_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Do not ban ordinary fruit or vegetables; check potassium, especially with kidney disease."
+  },
+  "ranitidine": {
+   "timing": "any_time",
+   "timing_note": "Often taken at bedtime or before meals as advised.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": true,
+   "source": "Claude Opus and GPT-6 Sol agreed",
+   "notes": "No meaningful food interactions. Withdrawn in many countries over NDMA impurity concerns; check availability."
+  },
+  "rosuvastatin": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Heavy drinking increases the risk of liver problems."
+    },
+    {
+     "food": "fatty_fried",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much saturated fat works against cholesterol control."
+    }
+   ],
+   "good": [
+    "high_fibre_food"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Unlike some statins, rosuvastatin has no clinically important grapefruit restriction."
+  },
+  "salbutamol": {
+   "timing": "any_time",
+   "timing_note": "Oral tablets or syrup may be taken with or without food.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much caffeine may worsen shakiness or a racing heart."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Caffeine caution is most relevant with high intake or troublesome palpitations."
+  },
+  "selenium": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Selenium alone; multivitamin ingredients may need separate advice."
+  },
+  "silodosin": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal at the same time each day.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food reduces peak levels and may lessen dizziness on standing."
+  },
+  "simethicone": {
+   "timing": "after_food",
+   "timing_note": "Usually taken after meals; some products are also taken at bedtime.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for simethicone alone; antacid combination ingredients may have other interactions."
+  },
+  "sitagliptin": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much sugar makes blood glucose harder to control."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food does not materially affect sitagliptin; timing of combination products may differ."
+  },
+  "tamsulosin": {
+   "timing": "after_food",
+   "timing_note": "Take about 30 minutes after the same meal each day.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Meal advice applies to usual oral modified-release products; check the specific label."
+  },
+  "teneligliptin": {
+   "timing": "any_time",
+   "timing_note": "Take at the same time each day, with or without food.",
+   "avoid": [
+    {
+     "food": "sugar_sweets",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Sugary foods and drinks make blood sugar harder to control."
+    }
+   ],
+   "good": [
+    "regular_meals",
+    "vegetables_millets"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Guidance is for teneligliptin alone, not combination tablets."
+  },
+  "theophylline": {
+   "timing": "any_time",
+   "timing_note": "Take the same way each day with respect to meals; follow your brand's directions.",
+   "avoid": [
+    {
+     "food": "tea_coffee",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "Too much caffeine can worsen tremor, palpitations and poor sleep."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food effects vary by sustained-release formulation; avoid abrupt major caffeine changes."
+  },
+  "thiamine mononitrate": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Advice is for thiamine mononitrate alone, not other ingredients in vitamin combinations."
+  },
+  "tocopheryl": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal containing a little fat to help absorption.",
+   "avoid": [],
+   "good": [
+    "fat_with_dose"
+   ],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Refers broadly to vitamin E derivatives; formulation may vary."
+  },
+  "torasemide": {
+   "timing": "any_time",
+   "timing_note": "Take oral doses in the morning to reduce night-time urination.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Same drug as torsemide. Potassium advice depends on kidney function and electrolyte results."
+  },
+  "torsemide": {
+   "timing": "any_time",
+   "timing_note": "Take in the morning to reduce night-time urination.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Do not restrict potassium foods solely for torsemide; electrolyte advice depends on test results."
+  },
+  "tramadol": {
+   "timing": "any_time",
+   "timing_note": "Take with food if it causes nausea.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It increases dangerous drowsiness and breathing problems."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Meal timing applies to oral tramadol; injection has no meal timing."
+  },
+  "trihexyphenidyl": {
+   "timing": "with_food",
+   "timing_note": "Take with meals if it upsets your stomach.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "limit",
+     "gap_hours": 0,
+     "why": "It can worsen dizziness and drowsiness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Some patients tolerate dosing before meals; follow the prescriber's directions."
+  },
+  "trisodium": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Incomplete chemical name, not an identifiable salt on its own; ORS advice needs the full formulation."
+  },
+  "valproate": {
+   "timing": "with_food",
+   "timing_note": "Take oral doses with or after food if they upset your stomach.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "Alcohol can worsen drowsiness and impair alertness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral formulations can differ; injection has no meal timing."
+  },
+  "valproic acid": {
+   "timing": "with_food",
+   "timing_note": "Take with food if it upsets your stomach; swallow modified-release tablets whole.",
+   "avoid": [
+    {
+     "food": "alcohol",
+     "level": "avoid",
+     "gap_hours": 0,
+     "why": "It can increase drowsiness and impair alertness."
+    }
+   ],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Food advice varies by formulation; consistency matters for modified-release products."
+  },
+  "vitamin b12": {
+   "timing": "any_time",
+   "timing_note": "",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Oral vitamin B12 may be taken with or without food; injection has no meal timing."
+  },
+  "zinc": {
+   "timing": "with_food",
+   "timing_note": "Take with a meal if it upsets your stomach.",
+   "avoid": [],
+   "good": [],
+   "review": false,
+   "checked": false,
+   "source": "one model only - a draft the live model checks",
+   "notes": "Zinc formulations vary; food improves tolerability but can modestly reduce absorption."
+  }
+ }
+}

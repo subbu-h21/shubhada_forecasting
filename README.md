@@ -283,6 +283,25 @@ takes ~20 s to read, so a CSV copy (`product_master_enriched.csv`, same folder) 
 
 `test_alternatives.py` (offline). The Shop Assistant gives `find_alternatives` to staff and doctors too.
 
+## Food and medicines (13 Nov 2026)
+
+**`get_food_advice(products | invoice_no)`** - the food guide for a prescription or a bill: for each medicine how to take it (empty stomach /
+before / with / after food), then the foods to **avoid**, to **keep apart** from the dose (hours per medicine), to keep **steady** and to
+**limit**, and the **good** foods - combined across all the medicines, as one patient-ready WhatsApp message (`text`, sent as it is). Products
+are matched like `match_products` (spelling slips, a generic name also works); a bill number reads its products from the sales register (no
+patient details). Creams, eye drops, inhalers: "no food rules"; herbal products and anything not on file: "please ask our pharmacist".
+
+The food knowledge is asked **live** for every request (the owner: no downloaded food list kept): one call to a strong AI model
+(`FOOD_ADVICE_MODEL`, default Claude Opus, through OpenRouter; 20-40 seconds, a few US cents) about exactly the salts on that
+prescription or bill - only product names, compositions and drug classes are sent. Its answer must use a fixed list of Indian food groups
+(`food_advice.py`: milk / curd / paneer, tea / coffee, high-potassium foods, green leafy vegetables, grapefruit, alcohol ...) so several
+medicines combine by plain rules: the strictest level wins, a "good" food another medicine says to avoid is dropped, a combination tablet
+gets its own meal timing. What the model is unsure of is marked for the pharmacist; if the AI service does not answer, no guide is given.
+
+`data/food_advice/food_saved.json` holds the 90 salt records written before that decision: the 12 that Claude Opus and GPT-6 Sol wrote
+independently and agreed on are used as they are (no AI call); the other 78 go to the live model as a draft to check. Nothing is added to
+it. `test_food_advice.py` (offline, a stand-in for the model).
+
 ## Rack & bin questions on the Ask page
 
 The Ask page can also answer from **Rack Management** (the separate rack app on port

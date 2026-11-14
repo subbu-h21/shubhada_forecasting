@@ -277,6 +277,13 @@ Rules:
   therapeutic_class / kind). The 25 categories are disease / use groups from
   the enriched product list. For the running month it compares with the same
   days of last month - say so.
+- FOOD AND MEDICINES ("food advice", "what to eat / avoid with these
+  medicines", "food-drug interaction", "empty stomach or after food?", "diet
+  with this prescription / bill"): call get_food_advice with the product names
+  (from the prescription or bill in the conversation) or the bill number
+  (invoice_no). Send its 'text' EXACTLY as it is - it is the finished guide -
+  then one short line from 'staff_note' if it has one. Never add, drop or
+  change any food advice yourself.
 - If a question is about thin/negative purchase margins or loss-making
   purchases (not "issues" - see above), use get_thin_margin_purchases
   (all-history, not just the latest month).
@@ -1040,6 +1047,7 @@ def selftest():
         ('get_category_sales', {}),
         ('get_category_sales', {'category': 'diabetes', 'n': 3}),
         ('match_products', {'items': [{'name': 'Glycomt 500', 'form': 'tablet'}, {'name': 'Mixtard 50/50'}]}),
+        ('get_food_advice', {'products': ['Glycomet 500', 'Thyronorm 50', 'Ciplox 500']}),
         ('get_optimum_stock', {'n': 5}),
         ('get_optimum_stock', {'branch': 'Shivaji', 'product': 'DOLO 650'}),
         ('get_refill_due', {'n': 5}),
