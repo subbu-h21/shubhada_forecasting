@@ -43,7 +43,10 @@ Salary calculator - the rules the owner agreed in the two Salary Review rounds
   LEAVE (owner, 2026-10-15) comes from the shop's leave app (leave_app.py):
   approved leave and paid sick days cost nothing; a loss-of-pay day (leave not
   approved, no paid days left, or absent with no leave applied) costs
-  base / lop_divisor (30). An absence is a working day the shop was open
+  base / lop_divisor (30) - up to rules['long_leave_days'] (3) loss-of-pay working days in a month. MORE than that is a LONG leave (owner, 9 Nov 2026):
+  the whole month's pay is prorated, paid for the working days present or on paid / sick leave out of the month's working days (Sundays and
+  holidays excluded), so a month away pays nothing - see leave_cut(). The leave app tells the reckoner when leave changes (/api/leave/changed)
+  and asks what a long leave would cost for its note to the owner (/api/leave/impact). An absence is a working day the shop was open
   (3+ people punched in) with no punch-in, no bill/fetch and no leave in the
   app - counted only once that month's leave has been fetched, and only from
   rule absent_from (the leave app's first day; before it, days off were
@@ -54,6 +57,8 @@ Owner-entered data (base salaries, roles, the incident log, the monthly 1-5
 ratings and uploaded shubhadahealth Performance Charts) lives in
 data/processed/salary/, so the reckoner's own backups pick it up.
 """
+import calendar
+import datetime
 import re
 import threading
 import time
@@ -84,6 +89,7 @@ DEFAULT_RULES = {
     'biller_share_pct': 80,     # rest of each sale goes to the fetcher
     'free_incidents': 3, 'pct_per_incident': 5, 'early_exit_weight': 0.5,
     'lop_divisor': 30,          # loss of pay per day = base / this (owner, 2026-10-15)
+    'long_leave_days': 3,       # MORE loss-of-pay working days than this in a month = LONG leave: the month's whole pay is prorated (owner, 2026-11-09)
     'absent_from': '2026-10-16',  # days absent without leave count from here (the leave app's first day)
     'marks_per_mistake': 10, 'marks_per_complaint': 10,
     'marks_per_compliment': 5, 'marks_per_cover': 5,
@@ -101,7 +107,7 @@ DEFAULT_RULES = {
 RULE_LIMITS = {k: (0, 100) for k in ('fixed_pct', 'perf_pct', 'disc_pct', 'biller_share_pct')}
 RULE_LIMITS.update({'full_at_pct': (50, 100), 'item_cap_pct': (100, 200), 'perf_cap_pct': (100, 200),
                     'floor_pct': (0, 100), 'free_incidents': (0, 31), 'pct_per_incident': (0, 100),
-                    'early_exit_weight': (0, 1), 'lop_divisor': (1, 31),
+                    'early_exit_weight': (0, 1), 'lop_divisor': (1, 31), 'long_leave_days': (0, 31),
                     'marks_per_mistake': (0, 100), 'marks_per_complaint': (0, 100),
                     'marks_per_compliment': (0, 100), 'marks_per_cover': (0, 100),
                     'returns_gate_pct': (0, 100), 'min_days_active': (1, 31), 'min_role_lines': (0, 10000),
@@ -531,10 +537,18 @@ def build_inputs(sales, employee_monthly, employee_scorecard, profit):
     daily, _ = rk._employee_shift_timing(act) if act is not None else (None, None)
     if daily is not None:
         daily = daily[['Employee', 'Day', 'Calendar_Month', 'Arrive_Min', 'Exit_Min', 'Lunch_Out_Min', 'Lunch_In_Min']].copy()
+    # Who was SEEN on each day (the owner, 12 Nov 2026): every bill or fetch counts, however few, and the last day of the data is kept even when it
+    # stops early - unlike `daily`, which keeps only days with enough stamps to time a shift. First and last stamp of the day, for the half-day rule.
+    seen_daily = None
+    if act is not None and len(act):
+        a = act.copy()
+        a['minute'] = (a['dt'].dt.hour * 60 + a['dt'].dt.minute).where(a['has_time'])
+        seen_daily = (a.groupby(['Employee', 'Day', 'Calendar_Month'])
+                      .agg(Arrive_Min=('minute', 'min'), Exit_Min=('minute', 'max')).reset_index())
 
     sc = employee_scorecard.set_index(['Employee', 'Calendar_Month']) if employee_scorecard is not None and not employee_scorecard.empty else None
     return {'monthly': employee_monthly.copy(), 'credit': credit, 'customers': cust, 'home_branch': home,
-            'branch_daily': br, 'scorecard': sc, 'scored_months': scored_months, 'daily': daily}
+            'branch_daily': br, 'scorecard': sc, 'scored_months': scored_months, 'daily': daily, 'seen_daily': seen_daily}
 
 
 def months_available(inputs):
@@ -709,6 +723,20 @@ def _shift_discipline(inputs, emp, month, shift, half, punches=None, returns=Non
 # ------------------------------------------------------------------ leave --
 LEAVE_DIR = SALARY_DIR / 'leave'
 SHOP_OPEN_MIN_PUNCHES = 3   # a weekday counts as a working day when this many people punched in
+# The owner, 12 Nov 2026: a person is SEEN on a day when they billed or fetched (or punched in, when the punch-ins are fetched). So the shop is
+# open on a weekday this many people billed or fetched, even before the month's punch-ins are fetched, and a working day nobody saw them, with
+# no approved leave, is loss of pay. Back-office staff barely bill, so the bills alone cannot say they were away: they are judged only from
+# their punch-ins.
+SHOP_OPEN_MIN_ACTIVE = 3
+# The owner, 12 Nov 2026: Tue 10 Nov 2026 (a short day) is excused for anyone who worked Sun 8 Nov - that Sunday counts as the admin's approval
+# for being away on the 10th; anyone away on both is loss of pay. The half-day rule below is not applied on these days.
+COMP_OFF_DAYS = {'2026-11-10': '2026-11-08'}
+# The rules above (the bills alone making someone absent, and the half-day rule) count from this day: before it, absences came from the punch-ins only.
+SALES_RULES_FROM = '2026-11-01'
+# The owner, 12 Nov 2026: someone on a FULL-day shift seen only in one half of it (first seen after the middle of their agreed shift, or last
+# seen before it), with no approved leave, loses half a day's pay (morning half 0.4 of a day, evening half 0.6 - the half-day leave weights).
+HALF_ABSENT_MARGIN_MIN = 30     # how far past (or before) the middle of the shift, so a lunch break around the middle never counts
+DATA_LATE_MIN = 120             # on the last day of the sales data, a duty that starts this close to where the data stops is not judged
 
 
 def save_leave(month, data):
@@ -749,6 +777,35 @@ def _day_count(dates, half):
     return round(sum((half.get(d) or {}).get('weight', 1) for d in dates), 2)
 
 
+def working_days_in_month(month, holidays=()):
+    """The month's working days: every day but Sundays and holidays (the leave app's list when it was fetched; the three national days always)."""
+    if not MONTH_RE.match(str(month or '')):
+        return 0
+    year, mon = int(month[:4]), int(month[5:7])
+    off = set(holidays or ())
+    count = 0
+    for d in range(1, calendar.monthrange(year, mon)[1] + 1):
+        day = datetime.date(year, mon, d)
+        if day.weekday() == 6 or day.isoformat() in off or day.strftime('%m-%d') in NATIONAL_HOLIDAYS:
+            continue
+        count += 1
+    return count
+
+
+def leave_cut(basis, base, rules, month, holidays, lop_weight):
+    """-> (cut, per_day, working_days, long_leave): what loss of pay costs out of one month's pay (`basis`; `base` is the fixed part).
+
+    Short loss of pay - up to rules['long_leave_days'] working days - is base / lop_divisor a day (the owner's rule of 15 Oct 2026).
+    LONG loss of pay (more than that; the owner, 9 Nov 2026) prorates the WHOLE month's pay: the person is paid for the working days they were
+    present or on paid / sick leave, out of the month's working days - so a month away pays nothing."""
+    days = working_days_in_month(month, holidays)
+    if days and lop_weight > rules.get('long_leave_days', DEFAULT_RULES['long_leave_days']):
+        away = min(lop_weight, days)
+        return basis * away / days, basis / days, days, True
+    per_day = base / rules['lop_divisor']
+    return per_day * lop_weight, per_day, days, False
+
+
 def leave_for_month(month):
     """{reckoner name: {'paid': [dates], 'sick': [...], 'lop': [...], 'sunday': {...}}}
     from the saved leave-app export, and info (fetched_at, unmatched names)."""
@@ -784,7 +841,19 @@ def leave_for_month(month):
             row = out.setdefault(emp, blank())['unnoticed']
             row['items'].append({'date': u['date'], 'portion': u.get('portion', 'full'), 'weight': u.get('weight', 1)})
             row['weight'] += u.get('weight', 1)
-    return out, {'fetched': True, 'fetched_at': data.get('fetched_at'), 'pay': data.get('sundaySessionPay'),
+    # The owner, 12 Nov 2026, through the assistant: "Ravi did not come on 9th (morning)" - an absence the owner marked (loss of pay; the leave app
+    # sends it with source 'admin'; the reckoner's own absences come back as 'reckoner' and are worked out here again, so they are not read) - and
+    # "Ravi was present on 9th" - never an absence, whatever the bills say.
+    for a in data.get('absent', []):
+        emp = code_to.get(a.get('emp_code'))
+        if emp and emp != '-' and a.get('source') == 'admin' and a.get('date'):
+            portion = a.get('portion') if a.get('portion') in HALF_DAY_WEIGHT else 'full'
+            out.setdefault(emp, blank()).setdefault('marked', {})[a['date']] = {'portion': portion, 'weight': HALF_DAY_WEIGHT.get(portion, 1)}
+    for p in data.get('present', []):
+        emp = code_to.get(p.get('emp_code'))
+        if emp and emp != '-' and p.get('date'):
+            out.setdefault(emp, blank()).setdefault('present', []).append(p['date'])
+    return out, {'fetched': True, 'month': month, 'fetched_at': data.get('fetched_at'), 'pay': data.get('sundaySessionPay'),
                  'sunday_factor': data.get('sundayPayFactor', SUNDAY_FACTOR), 'unnoticed_factor': data.get('unnoticedFactor', UNNOTICED_FACTOR),
                  'holidays': [h['date'] for h in data.get('holidays', []) if h.get('date')],
                  'unmatched': sorted(n for n, e in names.items() if not e)}
@@ -795,48 +864,149 @@ def leave_for_month(month):
 NATIONAL_HOLIDAYS = ('01-26', '08-15', '10-02')
 
 
-def _open_days(punches, month, holidays=()):
-    """Weekdays of the month, up to yesterday, when the shop was open (enough punch-ins) - not Sundays or holidays."""
+def _open_days(punches, month, holidays=(), daily=None):
+    """Weekdays of the month, up to yesterday, when the shop was open (enough punch-ins, or enough people billing or fetching - `daily`, the
+    bill/fetch stamps per person and day) - not Sundays or holidays."""
     per_day = {}
     for days in (punches or {}).values():
         for d in days:
             if d.startswith(month):
                 per_day[d] = per_day.get(d, 0) + 1
+    open_by = {d for d, n in per_day.items() if n >= SHOP_OPEN_MIN_PUNCHES}
+    if daily is not None and len(daily):
+        mine = daily[daily['Calendar_Month'] == month]
+        active = mine.groupby(mine['Day'].dt.strftime('%Y-%m-%d'))['Employee'].nunique()
+        open_by |= {d for d in active[active >= SHOP_OPEN_MIN_ACTIVE].index if d >= SALES_RULES_FROM}
     yesterday = (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
     off = set(holidays)
-    return sorted(d for d, n in per_day.items()
-                  if n >= SHOP_OPEN_MIN_PUNCHES and d <= yesterday and pd.Timestamp(d).dayofweek != 6
+    return sorted(d for d in open_by
+                  if d <= yesterday and pd.Timestamp(d).dayofweek != 6
                   and d not in off and d[5:] not in NATIONAL_HOLIDAYS)
 
 
-def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_days):
+def _data_end(daily):
+    """(day, minute) the sales data stops at - the last bill/fetch stamp of its last day - or (None, None)."""
+    if daily is None or not len(daily):
+        return None, None
+    last = daily['Day'].max()
+    end = daily.loc[daily['Day'] == last, 'Exit_Min'].max()
+    return last.strftime('%Y-%m-%d'), (None if pd.isna(end) else int(end))
+
+
+def _seen_times(daily, emp, month):
+    """{date: (first, last) minute, or None when that day's stamps carry no time} of one person's bills/fetches in the month."""
+    if daily is None or not len(daily):
+        return {}
+    mine = daily[(daily['Employee'] == emp) & (daily['Calendar_Month'] == month)]
+    return {d.strftime('%Y-%m-%d'): (None if pd.isna(a) or pd.isna(b) else (int(a), int(b)))
+            for d, a, b in zip(mine['Day'], mine['Arrive_Min'], mine['Exit_Min'])}
+
+
+def _first_seen(daily, emp):
+    """The first day this person was ever seen in the data ('YYYY-MM-DD'), or None - so someone away at the start of a month is not taken
+    for a new joiner."""
+    if daily is None or not len(daily):
+        return None
+    days = daily.loc[daily['Employee'] == emp, 'Day']
+    return days.min().strftime('%Y-%m-%d') if len(days) else None
+
+
+def _absent_halves(seen_times, open_days, on_leave, shift, punch_in, data_end):
+    """{date: {'portion', 'weight'}} - the working days someone on a FULL-day shift was seen only in one half of it (the owner, 12 Nov 2026).
+    `seen_times` {date: (first, last) minute of their bills/fetches}; `punch_in` {date: minute}. A day on leave, a comp-off day, a day on
+    another shift (came 2+ hours before their start) and the evening half of the day the data stops early are never judged."""
+    if not (TIME_RE.match(str(shift.get('start') or '')) and TIME_RE.match(str(shift.get('end') or ''))):
+        return {}
+    start, end = _to_min(shift['start']), _to_min(shift['end'])
+    if end <= start:
+        return {}
+    mid = (start + end) / 2
+    end_day, end_min = data_end
+    out = {}
+    for d in open_days:
+        if d in on_leave or d in COMP_OFF_DAYS or not seen_times.get(d):
+            continue
+        first, last = seen_times[d]
+        if (punch_in or {}).get(d) is not None:
+            first = min(first, punch_in[d])
+        if first <= start - OTHER_SHIFT_MIN:
+            continue
+        if first >= mid + HALF_ABSENT_MARGIN_MIN:
+            out[d] = {'portion': 'morning', 'weight': HALF_DAY_WEIGHT['morning']}
+        elif last <= mid - HALF_ABSENT_MARGIN_MIN and not (d == end_day and end_min is not None and end_min < end):
+            out[d] = {'portion': 'evening', 'weight': HALF_DAY_WEIGHT['evening']}
+    return out
+
+
+def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_days, shift=None, half_shift=False, back_office=False):
     """One person's leave for the slip: loss-of-pay days with the reason for each,
-    paid and sick days, Sunday work."""
+    paid and sick days, Sunday work. `shift` (their agreed start / end), `half_shift` and `back_office` drive the owner's rules of 12 Nov 2026:
+    seen = billed, fetched or punched in; a working day not seen = loss of pay; on a full-day shift, seen in only one half = half a day's loss
+    of pay; a comp-off day (COMP_OFF_DAYS) is excused by working its Sunday."""
     lv = leave_by_emp.get(emp) or {'paid': [], 'sick': [], 'lop': [], 'sunday': {'sessions': 0, 'amount': 0, 'dates': []}, 'unnoticed': {'weight': 0, 'items': []}, 'left': None}
     reasons = {d: 'leave not approved / no paid days left' for d in lv['lop']}
     for r in logged:
         if r['type'] == 'unplanned_leave' and r.get('date', '').startswith(month):
             reasons.setdefault(r['date'], 'absent without leave (logged)')
-    notes, absent = [], []
+    notes, absent, gone_half = [], [], {}
+    marked = lv.get('marked') or {}                      # the owner said they did not come (loss of pay, whatever the bills say)
+    present = set(lv.get('present') or ())               # the owner said they WERE at work (never an absence)
+    daily = None
+    if isinstance(inputs, dict):                         # every bill/fetch (seen_daily); the shift-timing table only when that is all there is
+        daily = inputs.get('seen_daily') if inputs.get('seen_daily') is not None else inputs.get('daily')
+    times = _seen_times(daily, emp, month)
     if not info.get('fetched'):
         notes.append('Leave app not fetched for this month - approved leave, loss of pay and Sunday pay are not counted yet.')
-    elif my_punches:
-        # Days they came: a punch-in or any bill/fetch stamp.
-        seen = set(my_punches)
-        d = inputs.get('daily')
-        if d is not None:
-            mine = d[(d['Employee'] == emp) & (d['Calendar_Month'] == month)]
-            seen |= set(mine['Day'].dt.strftime('%Y-%m-%d'))
+    elif my_punches or (times and not back_office):
+        # Days they came: a punch-in or any bill/fetch stamp. Without punch-ins, the bills alone (not for back-office staff).
+        seen = set(my_punches or ()) | set(times) | present
         on_leave = set(lv['paid']) | set(lv['sick']) | set(lv['lop'])
-        first = min(seen) if seen else None
-        absent = [x for x in open_days if first and x >= first and x not in seen and x not in on_leave]
+        first = min([x for x in (_first_seen(daily, emp), min(seen) if seen else None) if x], default=None)
+        end_day, end_min = _data_end(daily)
+        start_min = _to_min(shift['start']) if shift and TIME_RE.match(str(shift.get('start') or '')) else None
+        excused = []
+        for x in open_days:
+            if not first or x < first or x in seen or x in on_leave or x in marked:
+                continue
+            if not my_punches and x < SALES_RULES_FROM:
+                continue                    # before the owner's rules of 12 Nov 2026, the bills alone never made anyone absent
+            if not my_punches and x == end_day and end_min is not None and (start_min is None or start_min > end_min - DATA_LATE_MIN):
+                continue                    # the sales data stops before their duty that day could show
+            if x in COMP_OFF_DAYS and COMP_OFF_DAYS[x] in seen:
+                excused.append(x)
+                continue
+            absent.append(x)
         for x in absent:
-            reasons.setdefault(x, 'absent without leave')
+            reasons.setdefault(x, 'absent without leave' + (f' (and not seen on {COMP_OFF_DAYS[x]} either)' if x in COMP_OFF_DAYS else ''))
         if absent:
             notes.append(f"Absent without leave on {len(absent)} day{'s' if len(absent) != 1 else ''} "
-                         f"(shop open, no punch-in, no bill, no leave applied) - loss of pay.")
+                         f"(shop open, {'no punch-in, ' if my_punches else ''}no bill, no leave applied) - loss of pay.")
+        for x in excused:
+            notes.append(f"Away on {x}, but worked Sunday {COMP_OFF_DAYS[x]} - treated as approved by the admin, no cut.")
+        if shift and not half_shift and not (back_office and not my_punches):
+            gone_half = {d: h for d, h in _absent_halves(times, [d for d in open_days if d >= SALES_RULES_FROM],
+                                                         on_leave | set(absent) | present | set(marked), shift, my_punches, (end_day, end_min)).items()
+                         if d not in reasons}
+            for x, h in gone_half.items():
+                reasons[x] = f"absent half the day ({h['portion']} half not seen)"
+            if gone_half:
+                n = round(sum(h['weight'] for h in gone_half.values()), 2)
+                notes.append(f"Seen for only half of their agreed shift on {len(gone_half)} day{'s' if len(gone_half) != 1 else ''} "
+                             f"(no leave applied) - {n:g} day{'s' if n != 1 else ''} loss of pay (morning half 0.4, evening half 0.6).")
+        if not my_punches:
+            notes.append('No punch-ins fetched for this month yet: days present are taken from the bills and fetches.')
     elif info.get('fetched'):
-        notes.append('No punch-ins this month, so days absent without leave are not checked.')
+        notes.append('No punch-ins this month' + (' (back-office: the bills alone cannot show their days)' if back_office else '')
+                     + ', so days absent without leave are not checked.')
+    for x, m in marked.items():                          # the owner's own word: loss of pay for that day (or half), replacing any other reason
+        if x.startswith(month):
+            reasons[x] = 'marked absent by the admin' + (f" ({m['portion']} half)" if m['portion'] != 'full' else '')
+            gone_half.pop(x, None)
+    if marked:
+        n = round(sum(m['weight'] for x, m in marked.items() if x.startswith(month)), 2)
+        notes.append(f"Marked absent by the admin: {n:g} day{'s' if n != 1 else ''} (they had told someone, no leave applied) - loss of pay.")
+    if present:
+        notes.append(f"The admin confirmed they were at work on {', '.join(sorted(present))} - never counted as absent.")
     # A day the admin marked as unnoticed replaces any other loss of pay for that day (never two cuts for one day).
     un_dates = {i['date'] for i in lv['unnoticed']['items']}
     for x in un_dates:
@@ -853,6 +1023,11 @@ def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_
 
     def item(x):
         h = half.get(x) if x in lv['lop'] else None          # a half day of leave that is loss of pay: cut at its weight
+        if not h and x in marked and marked[x]['portion'] != 'full':      # half a day the owner marked absent: cut at its weight
+            return {'date': x, 'why': reasons[x], 'portion': marked[x]['portion'], 'weight': marked[x]['weight']}
+        if not h and x in gone_half:                          # half a working day not seen (the owner, 12 Nov 2026): cut at its weight
+            g = gone_half[x]
+            return {'date': x, 'why': reasons[x], 'portion': g['portion'], 'weight': g['weight']}
         if not h:
             return {'date': x, 'why': reasons[x]}
         return {'date': x, 'why': f"{reasons[x]} ({h['portion']} half)", 'portion': h['portion'], 'weight': h['weight']}
@@ -876,17 +1051,23 @@ def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, 
     commit_bonus = commit_max * commit_info['met'] / commit_info['of'] if commit_info and commit_info['counted'] else 0
     calculated = fixed + perf_pay + disc_pay + commit_bonus
     # The trial protects the new scoring, not loss of pay (owner's choice A).
-    lop_per_day = base / rules['lop_divisor']
-    lop_amount = lop_per_day * lop_days(leave['lop'])          # a half day of loss of pay counts 0.4 / 0.6
+    pay_basis = max(calculated, full) if in_trial else calculated
+    # Short loss of pay is base / 30 a day; LONG loss of pay (more than rules['long_leave_days'] working days in the month) prorates the whole
+    # month's pay by the working days present or on paid / sick leave (owner, 9 Nov 2026).
+    lop_amount, lop_per_day, working_days, long_leave = leave_cut(pay_basis, base, rules, leave_info.get('month'), leave_info.get('holidays', ()),
+                                                                  lop_days(leave['lop']))     # a half day of loss of pay counts 0.4 / 0.6
     sunday_pay, unnoticed_amount = thumb_rule_money(base, rules['lop_divisor'], leave['sunday']['sessions'], leave['unnoticed']['weight'],
                                                     leave_info.get('sunday_factor', SUNDAY_FACTOR), leave_info.get('unnoticed_factor', UNNOTICED_FACTOR), sunday_base=full)
-    payable = max(0, (max(calculated, full) if in_trial else calculated) - lop_amount - unnoticed_amount + sunday_pay)
-    return {k: round(v) for k, v in dict(
+    payable = max(0, pay_basis - lop_amount - unnoticed_amount + sunday_pay)
+    out = {k: round(v) for k, v in dict(
         base=base, full=full, fixed=fixed, perf_max=perf_max, perf_pay=perf_pay, disc_max=disc_max,
         disc_deduction=disc_ded, disc_pay=disc_pay,
         commit_bonus=commit_bonus, commit_max=commit_max,
         calculated=calculated, lop_per_day=lop_per_day, lop_amount=lop_amount, unnoticed_amount=unnoticed_amount, sunday_pay=sunday_pay,
         payable=payable, vs_base=calculated - full).items()}
+    out['long_leave'] = long_leave
+    out['working_days'] = working_days
+    return out
 
 
 def cuts_without_slip(slips, month, by_emp=None, info=None):
@@ -917,14 +1098,46 @@ def cuts_without_slip(slips, month, by_emp=None, info=None):
         if not base:
             no_base.append({'name': emp, 'loss_of_pay_days': lop_days(lop), 'unnoticed_days': un['weight']})
             continue
-        day = base / rules['lop_divisor']
         _, un_amount = thumb_rule_money(base, rules['lop_divisor'], 0, un['weight'], unnoticed_factor=(info or {}).get('unnoticed_factor', UNNOTICED_FACTOR))
-        lop_amount = day * lop_days(lop)
+        # no slip = no performance scored: a LONG absence is prorated from the full monthly pay (leave_cut), a short one is base / lop_divisor a day
+        full_pay = base * 100 / rules['fixed_pct'] if rules['fixed_pct'] else base
+        lop_amount, day, _wd, _long = leave_cut(full_pay, base, rules, (info or {}).get('month'), (info or {}).get('holidays', ()), lop_days(lop))
         if not round(lop_amount) and not round(un_amount):
             continue
         rows.append({'name': emp, 'day_pay': round(day), 'loss_of_pay': {'days': lop_days(lop), 'amount': round(lop_amount), 'items': lop},
                      'unnoticed': {'days': un['weight'], 'amount': round(un_amount), 'items': un['items']}, 'total': round(lop_amount) + round(un_amount)})
     return rows, no_base
+
+
+def leave_impact(name, items):
+    """What extra loss-of-pay days would cost one person, for the leave app's note to the owner when a long leave is asked for.
+    items = [{'month': 'YYYY-MM', 'lopDays': n}] (the days of the request that would be loss of pay in each month). The estimate is from the full
+    monthly pay (their performance that month is not known yet) and counts the loss of pay already booked in that month.
+    -> {'full_pay', 'months': [{'month', 'extra_days', 'already_days', 'working_days', 'long_leave', 'extra_cut'}], 'extra_cut'} or {'error'}.
+    These are pay figures: they go to the owner only, never to an AI model."""
+    names = match_site_names([str(name or '')])
+    emp = names.get(str(name or ''))
+    settings = load_settings()
+    rules, salaries = settings['rules'], settings['salaries']
+    base = salaries.get(emp) if emp else None
+    if not emp or not base:
+        return {'error': 'no base salary is saved for %s' % (name or 'this person')}
+    full = base * 100 / rules['fixed_pct'] if rules['fixed_pct'] else base
+    rows, total = [], 0
+    for it in items or []:
+        month, extra = str(it.get('month') or ''), float(it.get('lopDays') or 0)
+        if not MONTH_RE.match(month) or extra <= 0:
+            continue
+        by_emp, info = leave_for_month(month)
+        lv = (by_emp or {}).get(emp) or {}
+        already = _day_count(lv.get('lop', []), lv.get('half') or {})
+        holidays = (info or {}).get('holidays', ())
+        before = leave_cut(full, base, rules, month, holidays, already)
+        after = leave_cut(full, base, rules, month, holidays, already + extra)
+        cut = max(0, after[0] - before[0])
+        total += cut
+        rows.append({'month': month, 'extra_days': extra, 'already_days': already, 'working_days': after[2], 'long_leave': after[3], 'extra_cut': round(cut)})
+    return {'full_pay': round(full), 'months': rows, 'extra_cut': round(total)}
 
 
 def cuts_list(slips, extra=None):
@@ -973,7 +1186,9 @@ def compute_slips(inputs, month):
     br = inputs['branch_daily']
     in_trial = bool(rules['trial_until']) and month <= rules['trial_until']
     leave_by_emp, leave_info = leave_for_month(month)
-    open_days = [d for d in _open_days(punches, month, leave_info.get('holidays', ())) if rules['absent_from'] and d >= rules['absent_from']]
+    seen_daily = inputs.get('seen_daily') if inputs.get('seen_daily') is not None else inputs.get('daily')
+    open_days = [d for d in _open_days(punches, month, leave_info.get('holidays', ()), seen_daily)
+                 if rules['absent_from'] and d >= rules['absent_from']]
 
     slips, needs_role = [], []
     for emp, cur in cur_all.iterrows():
@@ -1145,7 +1360,8 @@ def compute_slips(inputs, month):
                          'days late. Enter their timings in Edit' + (f" (usually {times(usual)})." if usual else '.'))
         incidents = late + long_lunch + early * exit_w
         charged = max(0.0, incidents - rules['free_incidents'])
-        leave = _leave_for(emp, month, leave_by_emp, leave_info, mine, punches.get(emp), inputs, open_days)
+        leave = _leave_for(emp, month, leave_by_emp, leave_info, mine, punches.get(emp), inputs, open_days,
+                           shift=sh if agreed else None, half_shift=is_half, back_office=role == 'Back-office')
         notes += leave['notes']
         if not timed and not (is_half and not agreed):
             notes.append('Not enough bill/fetch stamps to time their day - no late/lunch/exit deductions.')
@@ -1493,7 +1709,12 @@ def slip_message(x, rules):
             L.append('Trial: not less than your full monthly salary.')
         if m.get('lop_amount'):
             n = lop_days(lv['lop'])
-            L.append(f"Loss of pay ({n:g} day{'s' if n != 1 else ''} x {_rs(m['lop_per_day'])}): minus {_rs(m['lop_amount'])}")
+            if m.get('long_leave') and m.get('working_days'):
+                away = min(n, m['working_days'])
+                L.append(f"Long leave ({n:g} day{'s' if n != 1 else ''} away of the month's {m['working_days']} working days): the month's pay is cut in proportion, "
+                         f"paid for {m['working_days'] - away:g} of {m['working_days']} days: minus {_rs(m['lop_amount'])}")
+            else:
+                L.append(f"Loss of pay ({n:g} day{'s' if n != 1 else ''} x {_rs(m['lop_per_day'])}): minus {_rs(m['lop_amount'])}")
         if m.get('unnoticed_amount'):
             w = lv['unnoticed']['weight']
             L.append(f"Away with no notice or permission ({w:g} day{'s' if w != 1 else ''} x {SLIP_UNNOTICED_X:g} x {_rs(m['lop_per_day'])}): minus {_rs(m['unnoticed_amount'])}")

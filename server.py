@@ -41,6 +41,7 @@ import vault
 import shubhada_fetch
 import leave_notify
 import leave_app
+import leave_absences
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / 'server_config.json'
@@ -635,7 +636,35 @@ def api_upload():
                          'error': 'The file was saved but could not be processed - see server.log.'}), 500
     invalidate_cache()
     logger.info('Upload processed: %s', saved)
+    # The owner, 12 Nov 2026: new sales data updates the leave app and the salary at once - the days (and half days) nobody saw the person go on
+    # record there, each person is told and the owner gets one summary (the leave app sends them). In the background: the upload answers now.
+    threading.Thread(target=absences_after_upload, daemon=True).start()
     return jsonify({'saved': saved, 'log': log.getvalue()})
+
+
+def absences_after_upload(today=None):
+    """Recompute this month's slips (and last month's, in the first 5 days of a month) from the fresh data and leave, and post the absences to the
+    leave app. Never raises; returns {month: the leave app's answer or None}."""
+    out = {}
+    try:
+        get_cached_data()                          # rebuilds the frames (and the salary inputs) from the new master files
+        inputs = _salary_inputs.get('v')
+        if not inputs:
+            return out
+        today = today or pd.Timestamp.now().normalize()
+        want = {today.strftime('%Y-%m')}
+        if today.day <= 5:
+            want.add((today - pd.Timedelta(days=today.day)).strftime('%Y-%m'))
+        for month in sorted(want & set(salary_mod.months_available(inputs))):
+            if _refresh_leave(month, force=True):  # the leave app is not answering: nothing is posted from a stale copy
+                out[month] = None
+                continue
+            leave_absences._last.pop(month, None)     # post now even if the list looks unchanged (the leave app may have been restarted)
+            out[month] = leave_absences.sync(salary_mod.compute_slips(inputs, month)['slips'], month)
+            logger.info('After upload: %s absences checked', month)
+    except Exception:
+        logger.error('Absences after upload failed:\n%s', traceback.format_exc())
+    return out
 
 
 # --- Salary (People > Salary) ---------------------------------------------
@@ -668,6 +697,8 @@ def _salary_payload(month=None):
         month = months[-1] if months else None
     leave_error = _refresh_leave(month) if month else None
     result = salary_mod.compute_slips(inputs, month) if month else {'slips': [], 'needs_role': []}
+    if month and not leave_error:       # the days absent with no information go on record in the leave app too (in the background)
+        threading.Thread(target=leave_absences.sync, args=(result['slips'], month), daemon=True).start()
     settings = salary_mod.load_settings()
     staff = sorted({s['employee'] for s in result['slips']} | set(result['needs_role'])
                    | {n for n, r in settings['roles'].items() if r != 'Not staff'})
@@ -1114,6 +1145,33 @@ def api_assistant_ping():
     return _assistant_gate() or jsonify({'ok': True, 'app': 'reckoner'})
 
 
+# --- The leave app (project 13) tells the reckoner what changed, and asks what a long leave would cost ------------------------------------------
+# Same door as its WhatsApp messages: this PC only, and its shared token (leave_notify's X-Notify-Token).
+@app.route('/api/leave/changed', methods=['POST'])
+def api_leave_changed():
+    """Leave was applied, decided or cancelled: read those months again NOW, so the slips, the salary-cut list and any payment built from them
+    never run on a copy that is up to five minutes old (or, with the leave app closed, older)."""
+    if not leave_notify._authorised():
+        return jsonify({'error': 'not allowed'}), 403
+    months = [m for m in ((request.get_json(silent=True) or {}).get('months') or []) if salary_mod.MONTH_RE.match(str(m))][:4]
+    errors = {}
+    for m in dict.fromkeys(months):
+        err = _refresh_leave(m, force=True)
+        if err:
+            errors[m] = err
+    return jsonify({'refreshed': [m for m in dict.fromkeys(months) if m not in errors], 'errors': errors})
+
+
+@app.route('/api/leave/impact', methods=['POST'])
+def api_leave_impact():
+    """What extra loss-of-pay days would cost one person (for the owner's WhatsApp note about a long leave request). Pay figures: owner only."""
+    if not leave_notify._authorised():
+        return jsonify({'error': 'not allowed'}), 403
+    b = request.get_json(silent=True) or {}
+    items = [{'month': str(i.get('month') or ''), 'lopDays': i.get('lopDays')} for i in (b.get('items') or [])[:4] if isinstance(i, dict)]
+    return jsonify(salary_mod.leave_impact(str(b.get('name') or '')[:80], items))
+
+
 @app.route('/api/assistant/salary-cuts')
 def api_assistant_salary_cuts():
     """The month's salary cuts in rupees, person by person - for the OWNER's chat with the assistant, which shows them as they are (they are never
@@ -1127,8 +1185,10 @@ def api_assistant_salary_cuts():
     month = asked if asked in months else (months[-1] if months else None)
     if not month:
         return jsonify({'error': 'There are no salary months yet.'}), 404
-    _refresh_leave(month, force=True)
+    leave_err = _refresh_leave(month, force=True)
     result = salary_mod.compute_slips(_salary_inputs['v'], month)
+    if not leave_err:
+        threading.Thread(target=leave_absences.sync, args=(result['slips'], month), daemon=True).start()
     out = salary_mod.cuts_list(result['slips'], salary_mod.cuts_without_slip(result['slips'], month))
     out.update(month=month, asked=asked or month, months=months, leave_fetched=not (_leave_fetch.get(month) or {}).get('error'),
                month_complete=bool(result['slips'] and all(s.get('month_complete', True) for s in result['slips'])))

@@ -163,6 +163,99 @@ check('the cut list says 0.6 days for the half day', hc['rows'][0]['loss_of_pay'
 hx, _ = salary.cuts_without_slip([], '2026-12', {'Ravi Kumar': hb['Ravi Kumar']}, hinfo)
 check('...and so does a person with no slip yet (15,000 base: 500 a day, 0.6 = 300)', hx and hx[0]['loss_of_pay']['days'] == 0.6 and hx[0]['loss_of_pay']['amount'] == 300, hx)
 
+# --- the owner's rules of 12 Nov 2026: seen = billed or fetched; a working day not seen = loss of pay; half a full-day shift not seen = a half
+# day's loss of pay; Tue 10 Nov is excused by working Sun 8 Nov -------------------------------------------------------------------------------
+import pandas as pd  # noqa: E402
+
+
+def hm(t):
+    return int(t[:2]) * 60 + int(t[3:])
+
+
+rows = []
+
+
+def came(emp, day, first, last):
+    rows.append({'Employee': emp, 'Day': pd.Timestamp('2026-11-%02d' % day), 'Calendar_Month': '2026-11', 'Arrive_Min': hm(first), 'Exit_Min': hm(last)})
+
+
+weekdays = [2, 3, 4, 5, 6, 7, 9, 10, 11]
+for f in ('Filler One', 'Filler Two', 'Filler Three'):           # the shop is open: 3 people billing every weekday; the data stops at 17:00 on the 11th
+    for d in weekdays:
+        came(f, d, '09:00', '17:00' if d == 11 else '20:00')
+for d, first, last in [(2, '09:05', '17:50'), (4, '14:30', '17:55'), (5, '09:10', '12:40'), (6, '09:10', '13:20'), (7, '09:00', '18:00'),
+                       (8, '10:00', '14:00'), (9, '09:00', '18:00'), (11, '09:00', '12:00')]:
+    came('Mina Rao', d, first, last)                              # agreed 09:00-18:00: away on 3 and 10, worked Sunday 8
+for d in (2, 3, 4, 5, 6, 7, 9, 11):
+    came('Lata Rao', d, '09:00', '17:00' if d == 11 else '18:00')  # away on 10, did NOT work Sunday 8
+for d in (2, 4, 5, 6, 7, 9, 10):
+    came('Eve Rao', d, '16:10', '21:20')                          # half-day shift 16:00-21:30: away on 3 and 11
+came('Bo Rao', 2, '10:00', '10:05')                               # back-office: barely bills
+daily = pd.DataFrame(rows)
+nov_open = salary._open_days({}, '2026-11', (), daily)
+check('without punch-ins, the shop is open on the weekdays 3+ people billed or fetched (no Sundays)',
+      nov_open == ['2026-11-%02d' % d for d in weekdays], nov_open)
+check('the sales data is known to stop at 17:00 on the 11th', salary._data_end(daily) == ('2026-11-11', 17 * 60), salary._data_end(daily))
+full_shift = {'start': '09:00', 'end': '18:00'}
+mina = salary._leave_for('Mina Rao', '2026-11', by_emp, info, [], None, {'daily': daily}, nov_open, shift=full_shift)
+got = {i['date']: (i.get('portion'), i.get('weight', 1)) for i in mina['lop']}
+check('a working day not seen at all, with no leave, is a full day of loss of pay', got.get('2026-11-03') == (None, 1), mina['lop'])
+check('first seen after the middle of the shift (+30 min) = the morning half lost (0.4)', got.get('2026-11-04') == ('morning', 0.4), mina['lop'])
+check('last seen before the middle of the shift (-30 min) = the evening half lost (0.6)', got.get('2026-11-05') == ('evening', 0.6), mina['lop'])
+check('leaving just after the middle of the shift (a lunch break) is not a half day', '2026-11-06' not in got, mina['lop'])
+check('away on Tue 10 Nov after working Sun 8 Nov: treated as approved, no cut', '2026-11-10' not in got
+      and any('worked Sunday 2026-11-08' in n for n in mina['notes']), (mina['lop'], mina['notes']))
+check('the evening half of the day the data stops early is not judged', '2026-11-11' not in got, mina['lop'])
+check('...so exactly 1 + 0.4 + 0.6 days of loss of pay, and the slip says the days come from the bills',
+      salary.lop_days(mina['lop']) == 2.0 and any('taken from the bills' in n for n in mina['notes']), (mina['lop'], mina['notes']))
+lata = salary._leave_for('Lata Rao', '2026-11', by_emp, info, [], None, {'daily': daily}, nov_open, shift=full_shift)
+check('away on Tue 10 Nov and not seen on Sun 8 Nov either: loss of pay', [i['date'] for i in lata['lop']] == ['2026-11-10']
+      and 'not seen on 2026-11-08' in lata['lop'][0]['why'], lata['lop'])
+eve = salary._leave_for('Eve Rao', '2026-11', by_emp, info, [], None, {'daily': daily}, nov_open, shift={'start': '16:00', 'end': '21:30'}, half_shift=True)
+check('a half-day shift: a day not seen is loss of pay, and no half-day rule applies to them', [i['date'] for i in eve['lop']] == ['2026-11-03'], eve['lop'])
+check('...the day the data stops before their duty starts is not judged', '2026-11-11' not in [i['date'] for i in eve['lop']])
+bo = salary._leave_for('Bo Rao', '2026-11', by_emp, info, [], None, {'daily': daily}, nov_open, shift=full_shift, back_office=True)
+check('back-office staff are never cut from the bills alone (they barely bill)', bo['lop'] == [] and any('back-office' in n for n in bo['notes']), (bo['lop'], bo['notes']))
+came('Tina Rao', 9, '16:30', '21:00')                             # worked in October, away on 2-7 Nov
+for d in (4, 5, 6, 7):
+    came('Tina Rao', d, '16:30', '21:00')
+seen = pd.concat([daily, pd.DataFrame(rows[-5:]), pd.DataFrame([{'Employee': 'Tina Rao', 'Day': pd.Timestamp('2026-10-30'), 'Calendar_Month': '2026-10',
+                                                                 'Arrive_Min': hm('16:30'), 'Exit_Min': hm('21:00')}])], ignore_index=True)
+tina = salary._leave_for('Tina Rao', '2026-11', by_emp, info, [], None, {'daily': daily, 'seen_daily': seen}, nov_open, shift={'start': '16:00', 'end': '21:30'}, half_shift=True)
+check('someone seen last month but away at the start of this one is not taken for a new joiner', [i['date'] for i in tina['lop']][:2] == ['2026-11-02', '2026-11-03'], tina['lop'])
+check('the leave check uses every bill and fetch (seen_daily), not only the days with enough stamps to time',
+      [i['date'] for i in salary._leave_for('Tina Rao', '2026-11', by_emp, info, [], None, {'daily': daily.iloc[:0], 'seen_daily': seen}, nov_open,
+                                            shift={'start': '16:00', 'end': '21:30'}, half_shift=True)['lop']] == [i['date'] for i in tina['lop']])
+check('a day whose stamps carry no time still counts as seen, but is never judged for a half day',
+      salary._absent_halves({'2026-11-02': None}, ['2026-11-02'], set(), full_shift, None, (None, None)) == {})
+check('a half day not seen is never posted to the leave app as a whole absent day',
+      not any(i['why'].startswith('absent without leave') for i in mina['lop'] if i.get('portion')))
+
+# --- the owner's own word through the assistant (12 Nov 2026): "Mina did not come on 9th, morning" / "Mina was present on 3rd" -----------------
+marks_export = dict(export, month='2026-11', leaveDays=[], unnoticed=[], sundayWork=[],
+                    employees=export['employees'] + [{'emp_code': 'E9', 'name': 'Mina Rao'}],
+                    absent=[{'emp_code': 'E9', 'date': '2026-11-09', 'portion': 'morning', 'source': 'admin'},
+                            {'emp_code': 'E9', 'date': '2026-11-07', 'portion': 'full', 'source': 'reckoner'}],     # the reckoner's own: worked out again here
+                    present=[{'emp_code': 'E9', 'date': '2026-11-03'}, {'emp_code': 'E9', 'date': '2026-11-04'}])
+(salary.LEAVE_DIR / '2026-11.json').write_text(json.dumps(marks_export))
+real_match = salary.match_site_names
+salary.match_site_names = lambda names: {n: n for n in names}
+mb, minfo = salary.leave_for_month('2026-11')
+salary.match_site_names = real_match
+check('the leave export\'s owner marks are read: an absence with its half, and the present days; the reckoner\'s own are not',
+      mb['Mina Rao'].get('marked') == {'2026-11-09': {'portion': 'morning', 'weight': 0.4}} and mb['Mina Rao'].get('present') == ['2026-11-03', '2026-11-04'],
+      mb.get('Mina Rao'))
+mm = salary._leave_for('Mina Rao', '2026-11', mb, minfo, [], None, {'daily': daily}, nov_open, shift=full_shift)
+mg = {i['date']: (i.get('portion'), i.get('weight', 1), i['why']) for i in mm['lop']}
+check('"was present on 3rd": not absent that day, whatever the bills say', '2026-11-03' not in mg, mm['lop'])
+check('...and "present on 4th" also stops the half-day rule that day', '2026-11-04' not in mg, mm['lop'])
+check('"did not come on 9th, morning": loss of pay for that half (0.4), although the bills saw her', mg.get('2026-11-09') == ('morning', 0.4, 'marked absent by the admin (morning half)'), mm['lop'])
+check('...the rest of the rules still apply (5th: evening half not seen)', mg.get('2026-11-05', (None,))[0] == 'evening', mm['lop'])
+check('...and the slip says what the owner marked', any('Marked absent by the admin: 0.4 day' in n for n in mm['notes']) and any('confirmed they were at work' in n for n in mm['notes']), mm['notes'])
+check('before 1 Nov 2026 the bills alone never make anyone absent (the punch-ins did)',
+      salary._open_days({}, '2026-10', (), pd.DataFrame([{'Employee': f, 'Day': pd.Timestamp('2026-10-20'), 'Calendar_Month': '2026-10', 'Arrive_Min': 600, 'Exit_Min': 900}
+                                                          for f in ('A', 'B', 'C')])) == [])
+
 print()
 print('ALL PASSED' if not FAILS else '%d FAILED: %s' % (len(FAILS), '; '.join(FAILS)))
 sys.exit(1 if FAILS else 0)

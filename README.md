@@ -88,6 +88,15 @@ For access away from your home network, this is designed to be used over
 
 ## Salary calculator (People → Salary)
 
+**Attendance from the sales data (the owner, 12 Nov 2026; `salary.py`, from `SALES_RULES_FROM` = 1 Nov 2026).** A person is *seen* on a day when they
+billed or fetched (or punched in). A working day (Mon-Sat, 3+ people active) not seen, with no approved leave, is loss of pay; someone on a full-day
+shift seen in only one half of their agreed hours loses half a day (morning 0.4, evening 0.6; 30 minutes either side of the middle is never a half).
+Tue 10 Nov 2026 is excused for anyone who worked Sun 8 Nov (`COMP_OFF_DAYS`). Back-office staff are judged from punch-ins only; the last, partial
+day of the data only as far as it goes. The owner's own word through the shop assistant wins: an absence they mark (leave app `absent`, source
+`admin`) is loss of pay whatever the bills say, and a day they mark present is never an absence. **After every upload** (`absences_after_upload`)
+the month's leave is read again and the absences are posted to the leave app, which tells each person and sends the owner a summary. Tests:
+`test_salary_rules.py`, `test_leave_absences.py`, `test_long_leave.py`.
+
 Monthly slips built from the rules agreed in the two Salary Review rounds
 (Oct 2026) - the rules and their reasons are at the top of `salary.py`.
 Salary = Fixed 35% + Performance 45% + Discipline 20% of each person's base;
