@@ -2677,6 +2677,137 @@ def get_mrp_total(items):
             'note': 'units = tablets/capsules; total = MRP per strip / strip size x units'}
 
 
+def check_shop_bill(invoice_no='', date='', products=None):
+    """Is this one of OUR sales bills, and what are its products? For the Shop Assistant's bill-photo quality check.
+    'invoice_no' (e.g. 2627WH87286) and 'date' (YYYY-MM-DD) as read from the photo; 'products' as read from it.
+    -> in_register: True (found), False (not found though the register covers that day) or None (the register does not
+    reach that day yet); date_matches; and for each product read: our product it is, its manufacturer, kind and salts.
+    No patient data and no rupee figures."""
+    s, _ = _load()
+    inv = re.sub(r'\s+', '', str(invoice_no or '')).upper()
+    out = {'invoice_no': inv, 'in_register': None, 'register_last_day': '', 'date_matches': None, 'bill_products': []}
+    if not s.empty:
+        days = pd.to_datetime(s['Date'], errors='coerce')
+        last = days.max()
+        out['register_last_day'] = last.strftime('%Y-%m-%d') if pd.notna(last) else ''
+        rows = s[s['Inv.No'].astype(str).str.strip().str.upper() == inv] if inv else s.iloc[0:0]
+        if not rows.empty:
+            out['in_register'] = True
+            bill_day = pd.to_datetime(rows['Date'], errors='coerce').min()
+            out['register_date'] = bill_day.strftime('%Y-%m-%d') if pd.notna(bill_day) else ''
+            out['date_matches'] = bool(date) and out['register_date'] == str(date)[:10]
+            out['bill_products'] = list(dict.fromkeys(rows['Product'].astype(str).str.strip()))
+        elif date and out['register_last_day'] and str(date)[:10] <= out['register_last_day']:
+            out['in_register'] = False
+    d = _enriched()
+    bills = _recent_bills() if d is not None else {}
+    regs = {p.upper(): p for p in out['bill_products']}
+    items = []
+    for name in (products if isinstance(products, list) else [])[:20]:
+        name = str(name or '').strip()
+        row = None
+        if d is not None and name:
+            key = name.upper()
+            if key not in d.index:                                   # the register's own name for it, then the closest name
+                close = difflib.get_close_matches(key, list(regs), n=1, cutoff=0.75)
+                if close:
+                    key = close[0]
+            if key in d.index:
+                row = d.loc[key]
+            else:
+                m = _match_one(name, '', bills)
+                if m['status'] in ('matched', 'choose', 'close') and m.get('product') and m['product'].upper() in d.index:
+                    row = d.loc[m['product'].upper()]
+        if row is None:
+            items.append({'read': name, 'product': None})
+            continue
+        items.append({'read': name, 'product': str(row['PRODUCT']), 'manufacturer': str(row.get('MANUFACTURER', '')),
+                      'kind': str(row.get('KIND', '')), 'salts': sorted(row['_salts']),
+                      'on_this_bill': (str(row['PRODUCT']).upper() in regs) if regs else None})
+    out['products'] = items
+    return out
+
+
+BRAND_BOUGHT_MONTHS = 12        # a failed batch is usually sampled months after it was made: a year of purchases
+BRAND_SOLD_DAYS = 90
+
+
+def _first_word(name):
+    words = re.findall(r'[a-z0-9]+', str(name or '').lower())
+    return words[0] if words else ''
+
+
+def _bought_sold_by_brand():
+    """{first word of the name: [{product, bought..., sold...}]} for every product bought in the last BRAND_BOUGHT_MONTHS
+    months or sold in the last BRAND_SOLD_DAYS days. Rebuilt when the data is reloaded."""
+    if 'brand_index' in _cache:
+        return _cache['brand_index']
+    s, p = _load()
+    out = {}
+
+    def entry(key):
+        return out.setdefault(key, {'product': key, 'bought_times': 0, 'bought_qty': 0.0, 'last_bought': '', 'suppliers': [],
+                                    'sold_lines_90d': 0, 'last_sold': ''})
+
+    if not p.empty:
+        dates = pd.to_datetime(p['Date'], errors='coerce')
+        cut = dates.max() - pd.DateOffset(months=BRAND_BOUGHT_MONTHS) if dates.notna().any() else None
+        rows = p[dates >= cut] if cut is not None else p.iloc[0:0]
+        rows = rows.assign(_key=rows['Product'].astype(str).str.strip().str.upper(),
+                           _day=pd.to_datetime(rows['Date'], errors='coerce').dt.strftime('%Y-%m-%d'))
+        for key, g in rows.groupby('_key'):
+            e = entry(key)
+            e['bought_times'] = int(g['Inv.No'].nunique())
+            e['bought_qty'] = float(sum(pd.to_numeric(g[c], errors='coerce').fillna(0).sum()
+                                        for c in ('Qty', 'Free Qty') if c in g.columns))
+            e['last_bought'] = str(g['_day'].max())
+            last = g.sort_values('_day', ascending=False)
+            e['suppliers'] = list(dict.fromkeys(last['Supplier'].astype(str).str.strip()))[:3]
+    if not s.empty:
+        dates = pd.to_datetime(s['Date'], errors='coerce')
+        cut = dates.max() - pd.Timedelta(days=BRAND_SOLD_DAYS) if dates.notna().any() else None
+        rows = s[dates >= cut] if cut is not None else s.iloc[0:0]
+        rows = rows.assign(_key=rows['Product'].astype(str).str.strip().str.upper(),
+                           _day=pd.to_datetime(rows['Date'], errors='coerce').dt.strftime('%Y-%m-%d'))
+        for key, g in rows.groupby('_key'):
+            e = entry(key)
+            e['sold_lines_90d'] = int(len(g))
+            e['last_sold'] = str(g['_day'].max())
+    index = {}
+    for key, e in out.items():
+        word = _first_word(key)
+        if len(word) >= 3:
+            index.setdefault(word, []).append(e)
+    _cache['brand_index'] = index
+    return index
+
+
+def get_brand_products(words):
+    """The shop's own products whose name starts with each of these brand words (e.g. "thyrox", "levera"), with how
+    often and from which suppliers they were bought (last 12 months) and sold (last 90 days), and their company and
+    salts from the product list. For matching a government quality alert (CDSCO NSQ / spurious) to what the shop
+    stocks. No rupee figures, no patient data."""
+    d = _enriched()
+    index = _bought_sold_by_brand()
+    out = {}
+    for w in (words if isinstance(words, list) else [words])[:300]:
+        word = _first_word(w)
+        if len(word) < 3 or word in out:
+            continue
+        found = []
+        for e in index.get(word, [])[:40]:
+            row = dict(e, bought_qty=round(e['bought_qty'], 1))
+            if d is not None and e['product'] in d.index:
+                m = d.loc[e['product']]
+                row.update(manufacturer=str(m.get('MANUFACTURER', '')), salts=sorted(m['_salts']),
+                           composition=str(m.get('COMPOSITION', '')))
+            else:
+                row.update(manufacturer='', salts=[], composition='')
+            found.append(row)
+        out[word] = found
+    return {'products': out, 'bought_window_months': BRAND_BOUGHT_MONTHS, 'sold_window_days': BRAND_SOLD_DAYS}
+
+
 def _schema(props, required=()):
     return {'type': 'object', 'properties': props, 'required': list(required)}
 
@@ -2799,6 +2930,14 @@ TOOLS = [
      'parameters': _schema({'products': {'type': 'array', 'items': {'type': 'string'},
                                          'description': 'product names from the prescription or bill'},
                             'invoice_no': {'type': 'string', 'description': 'a shop bill number, instead of products'}})},
+    {'name': 'check_shop_bill', 'fn': check_shop_bill,
+     'description': check_shop_bill.__doc__,
+     'parameters': _schema({'invoice_no': {'type': 'string'}, 'date': {'type': 'string', 'description': 'YYYY-MM-DD'},
+                            'products': {'type': 'array', 'items': {'type': 'string'}}}, ['invoice_no'])},
+    {'name': 'get_brand_products', 'fn': get_brand_products,
+     'description': get_brand_products.__doc__,
+     'parameters': _schema({'words': {'type': 'array', 'items': {'type': 'string'},
+                                      'description': 'brand words, e.g. ["thyrox", "levera"]'}}, ['words'])},
     {'name': 'get_mrp_total', 'fn': get_mrp_total,
      'description': get_mrp_total.__doc__,
      'parameters': _schema({'items': {'type': 'array', 'items': {'type': 'object', 'properties': {

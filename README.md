@@ -311,6 +311,17 @@ gets its own meal timing. What the model is unsure of is marked for the pharmaci
 independently and agreed on are used as they are (no AI call); the other 78 go to the live model as a draft to check. Nothing is added to
 it. `test_food_advice.py` (offline, a stand-in for the model).
 
+## Products by brand, for failed-batch alerts (14 Nov 2026)
+
+`get_brand_products(words)` gives, for each brand word ("thyrox", "levera"), the shop's products whose name starts with it - bought in the
+last 12 months or sold in the last 90 days - with how often and from which suppliers they were bought (latest first), how often they were
+sold, and their company, composition and salts from the enriched product list. No rupee figures and no patient data. The Shop Assistant's
+failed-batch watch (`nsq_watch.py` there) uses it to match CDSCO's new NSQ / spurious batches to what we stock. `test_brand_products.py`.
+
+`check_shop_bill(invoice_no, date, products)` is for the Shop Assistant's bill-photo quality check: is the bill number in the sales
+register (True / False when the register covers that day / None when it does not reach it yet), does the date match, and for each product
+read from the photo our product, its full manufacturer name, kind and salts. No patient data, no rupee figures.
+
 ## Rack & bin questions on the Ask page
 
 The Ask page can also answer from **Rack Management** (the separate rack app on port
