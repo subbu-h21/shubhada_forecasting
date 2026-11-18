@@ -1195,6 +1195,34 @@ def api_assistant_salary_cuts():
     return jsonify(out)
 
 
+@app.route('/api/assistant/pay-list')
+def api_assistant_pay_list():
+    """The month's pay list, person by person - each slip's amount TO BE PAID with what made it (the owner's "pay salary", 18 Nov 2026). For the OWNER's
+    chat with the assistant, which puts the amounts on the bank payment sheet as they are (they are never handed to an AI model). The leave app's month
+    is fetched again first, so a leave decided a minute ago is in. With no month asked: this month from the 25th on, else last month."""
+    refused = _assistant_gate()
+    if refused:
+        return refused
+    asked = request.args.get('month') or ''
+    get_cached_data()
+    inputs = _salary_inputs['v']
+    months = salary_mod.months_available(inputs)
+    if not months:
+        return jsonify({'error': 'There are no salary months yet.'}), 404
+    month = salary_mod.pay_month(months, asked)
+    if not month:
+        return jsonify({'error': 'There are no salary slips for %s yet.' % asked, 'months': months}), 404
+    leave_err = _refresh_leave(month, force=True)
+    result = salary_mod.compute_slips(inputs, month)
+    if not leave_err:
+        threading.Thread(target=leave_absences.sync, args=(result['slips'], month), daemon=True).start()
+    out = salary_mod.pay_list(result['slips'], month)
+    until, complete = salary_mod.data_until(inputs, month)
+    out.update(month=month, asked=asked, months=months, leave_fetched=not leave_err, data_until=until, month_complete=complete,
+               needs_role=result.get('needs_role') or [])
+    return jsonify(out)
+
+
 @app.route('/api/assistant/shifts')
 def api_assistant_shifts():
     """Each person's agreed working hours (start and end) with their saved WhatsApp number, for the assistant: it does not answer a staff member once their

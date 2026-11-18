@@ -1168,6 +1168,69 @@ def cuts_list(slips, extra=None):
     return {'rows': rows, 'total': sum(r['total'] for r in rows), 'people': len(rows), 'no_base': no_base}
 
 
+def pay_month(months, asked='', today=None):
+    """Which month "pay salary" means (the owner, 18 Nov 2026: said at the end of the month). A month the owner named is used if it has slips; with
+    none named it is THIS month from the 25th on, else LAST month; if that one has no slips yet, the latest month that has. -> 'YYYY-MM' or None."""
+    if not months:
+        return None
+    if asked:
+        return asked if asked in months else None
+    today = today or datetime.date.today()
+    this = today.strftime('%Y-%m')
+    last = (today.replace(day=1) - datetime.timedelta(days=1)).strftime('%Y-%m')
+    for want in ((this, last) if today.day >= 25 else (last,)):
+        if want in months:
+            return want
+    return months[-1]
+
+
+def data_until(inputs, month):
+    """The last day of `month` anybody was seen billing or fetching in the data ('YYYY-MM-DD'), and whether that reaches the month's last working
+    day (a Sunday at the end does not count). A month whose data stops early is NOT complete: its performance and attendance are only up to that day."""
+    seen = (inputs or {}).get('seen_daily') if (inputs or {}).get('seen_daily') is not None else (inputs or {}).get('daily')
+    until = ''
+    if seen is not None and len(seen):
+        days = seen.loc[seen['Calendar_Month'] == month, 'Day']
+        if len(days):
+            until = str(pd.to_datetime(days, format='mixed').max())[:10]
+    y, m = int(month[:4]), int(month[5:7])
+    end = datetime.date(y, m, calendar.monthrange(y, m)[1])
+    while end.weekday() == 6:
+        end -= datetime.timedelta(days=1)
+    return until, bool(until) and until >= end.isoformat()
+
+
+def pay_list(slips, month):
+    """The month's PAY LIST for the owner's "pay salary" (18 Nov 2026): for every slip the amount TO BE PAID with what made it - the full monthly pay,
+    performance, discipline, target bonus, loss of pay (short, or a long leave's proration), days away with no notice, Sunday work - exactly the
+    figures of the slip the person is sent (slip_money), nothing worked out again here. -> {'rows': [...by name], 'total', 'people', 'no_base': people
+    with a slip but no base salary saved (nothing can be worked out), 'no_slip': people with a base salary but no slip this month (nothing of theirs
+    in the sales data - away all month, or not in the CRM)}. These are pay figures: they go to the owner only, never to an AI model."""
+    settings = load_settings()
+    salaries, roles = settings['salaries'], settings['roles']
+    rows, no_base = [], []
+    for s in slips:
+        m = s.get('money')
+        if not m:
+            no_base.append(s['employee'])
+            continue
+        lv = s.get('leave') or {}
+        un = lv.get('unnoticed') or {}
+        rows.append({'name': s['employee'], 'role': s.get('role') or '', 'days_worked': s.get('days_active', 0), 'payable': m['payable'], 'full': m['full'],
+                     'calculated': m['calculated'], 'trial': bool(s.get('trial')),
+                     'performance': {'score': s.get('perf_score'), 'pay': m['perf_pay'], 'max': m['perf_max']},
+                     'discipline': {'pay': m['disc_pay'], 'max': m['disc_max'], 'deduction': m['disc_deduction']},
+                     'bonus': m.get('commit_bonus', 0),
+                     'loss_of_pay': {'days': lop_days(lv.get('lop', [])), 'amount': m.get('lop_amount', 0), 'long_leave': bool(m.get('long_leave')),
+                                     'working_days': m.get('working_days')},
+                     'unnoticed': {'days': un.get('weight', 0), 'amount': m.get('unnoticed_amount', 0)},
+                     'sunday': {'sessions': (lv.get('sunday') or {}).get('sessions', 0), 'amount': m.get('sunday_pay', 0)}})
+    have = {s['employee'] for s in slips}
+    no_slip = sorted(n for n, base in salaries.items() if base and n not in have and n not in NOT_STAFF and roles.get(n) != 'Not staff')
+    rows.sort(key=lambda r: r['name'].lower())
+    return {'rows': rows, 'total': sum(r['payable'] for r in rows), 'people': len(rows), 'no_base': sorted(no_base), 'no_slip': no_slip}
+
+
 def compute_slips(inputs, month):
     settings = load_settings()
     rules, roles, salaries = settings['rules'], settings['roles'], settings['salaries']
