@@ -806,6 +806,31 @@ def leave_cut(basis, base, rules, month, holidays, lop_weight):
     return per_day * lop_weight, per_day, days, False
 
 
+def joiner_share(first, month, holidays, scored_months):
+    """A NEW JOINER's share of the month (the owner, 18 Nov 2026: the trial's "never below the full monthly pay" does not hold for someone who started
+    part-way through the month - they are paid for the working days from their first day). `first` = the first day they were ever seen in the data.
+    Only when that day is inside `month` (not its first day) AND the month before has employee data in the sales export (otherwise "first seen" only
+    means "named in the export from here on": Jun and Jul 2026 were exported without names, so everyone looked new in August).
+    -> {'from': 'YYYY-MM-DD', 'days': paid working days, 'of': the month's working days, 'share': days / of} or None."""
+    if not first or not MONTH_RE.match(str(month or '')) or not str(first).startswith(month) or str(first) == month + '-01':
+        return None
+    y, m = int(month[:4]), int(month[5:7])
+    prev = '%04d-%02d' % ((y - 1, 12) if m == 1 else (y, m - 1))
+    if prev not in (scored_months or ()):
+        return None
+    of = working_days_in_month(month, holidays)
+    off = set(holidays or ())
+    days = 0
+    for d in range(int(str(first)[8:]), calendar.monthrange(y, m)[1] + 1):
+        day = datetime.date(y, m, d)
+        if day.weekday() == 6 or day.isoformat() in off or day.strftime('%m-%d') in NATIONAL_HOLIDAYS:
+            continue
+        days += 1
+    if not of or days >= of:
+        return None
+    return {'from': str(first), 'days': days, 'of': of, 'share': days / of}
+
+
 def leave_for_month(month):
     """{reckoner name: {'paid': [dates], 'sick': [...], 'lop': [...], 'sunday': {...}}}
     from the saved leave-app export, and info (fetched_at, unmatched names)."""
@@ -1036,7 +1061,7 @@ def _leave_for(emp, month, leave_by_emp, info, logged, my_punches, inputs, open_
             'sunday': lv['sunday'], 'unnoticed': lv['unnoticed'], 'left': lv.get('left'), 'notes': notes}
 
 
-def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial):
+def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial, join=None):
     """One person's rupees for a month. `base` is the saved BASE SALARY - the fixed part (35%) of the full monthly pay (owner, 4 Nov 2026); the full pay it
     stands for is base / (fixed_pct / 100), and the performance, discipline and target shares are taken from that. A day's cut (loss of pay, away with no
     notice) is base / lop_divisor; a Sunday worked still pays from the full pay. In the trial nobody is paid below the full pay (loss of pay still cut)."""
@@ -1052,6 +1077,8 @@ def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, 
     calculated = fixed + perf_pay + disc_pay + commit_bonus
     # The trial protects the new scoring, not loss of pay (owner's choice A).
     pay_basis = max(calculated, full) if in_trial else calculated
+    if join:                                     # a new joiner (owner, 18 Nov 2026): only the working days from their first day, trial or not
+        pay_basis = pay_basis * join['share']
     # Short loss of pay is base / 30 a day; LONG loss of pay (more than rules['long_leave_days'] working days in the month) prorates the whole
     # month's pay by the working days present or on paid / sick leave (owner, 9 Nov 2026).
     lop_amount, lop_per_day, working_days, long_leave = leave_cut(pay_basis, base, rules, leave_info.get('month'), leave_info.get('holidays', ()),
@@ -1067,6 +1094,8 @@ def slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, 
         payable=payable, vs_base=calculated - full).items()}
     out['long_leave'] = long_leave
     out['working_days'] = working_days
+    if join:
+        out['join'] = {'from': join['from'], 'days': join['days'], 'of': join['of']}
     return out
 
 
@@ -1224,9 +1253,18 @@ def pay_list(slips, month):
                      'loss_of_pay': {'days': lop_days(lv.get('lop', [])), 'amount': m.get('lop_amount', 0), 'long_leave': bool(m.get('long_leave')),
                                      'working_days': m.get('working_days')},
                      'unnoticed': {'days': un.get('weight', 0), 'amount': m.get('unnoticed_amount', 0)},
-                     'sunday': {'sessions': (lv.get('sunday') or {}).get('sessions', 0), 'amount': m.get('sunday_pay', 0)}})
+                     'sunday': {'sessions': (lv.get('sunday') or {}).get('sessions', 0), 'amount': m.get('sunday_pay', 0)},
+                     'joined': m.get('join')})
     have = {s['employee'] for s in slips}
-    no_slip = sorted(n for n, base in salaries.items() if base and n not in have and n not in NOT_STAFF and roles.get(n) != 'Not staff')
+    # Not named as "no slip" (the owner, 18 Nov 2026: "remove or ignore"): people the Leave app lists as no longer active (they left), and saved names
+    # that are only a confirmed MISSPELLING (an alias): the person's own name carries their slip.
+    leave = load_leave(month) if MONTH_RE.match(str(month or '')) else None
+    employees = (leave or {}).get('employees') or []
+    matched = match_site_names(sorted({e['name'] for e in employees})) if employees else {}
+    left = {matched.get(e['name']) for e in employees if not e.get('active', 1)} - {None, '', '-'}
+    misspelt = {k for k in rk.EMPLOYEE_ALIASES}
+    no_slip = sorted(n for n, base in salaries.items() if base and n not in have and n not in NOT_STAFF and roles.get(n) != 'Not staff'
+                     and n not in left and n.strip().title() not in misspelt)
     rows.sort(key=lambda r: r['name'].lower())
     return {'rows': rows, 'total': sum(r['payable'] for r in rows), 'people': len(rows), 'no_base': sorted(no_base), 'no_slip': no_slip}
 
@@ -1459,7 +1497,8 @@ def compute_slips(inputs, month):
         perf_frac = 0 if (perf is None or floor_hit or gate_hit) else min(perf, rules['perf_cap_pct']) / 100
         if perf is None and not short_month:
             notes.append('Nothing measurable for performance this month.')
-        money = slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial) if base else None
+        join = joiner_share(_first_seen(seen_daily, emp), month, leave_info.get('holidays', ()), inputs.get('scored_months'))
+        money = slip_money(base, rules, perf_frac, charged, commit_info, leave, leave_info, in_trial, join) if base else None
         slips.append({
             'employee': emp, 'role': role, 'month': month, 'days_active': int(cur['Days_Active']),
             'groups': groups, 'items': items, 'perf_score': None if perf is None else round(perf),
@@ -1759,6 +1798,9 @@ def slip_message(x, rules):
          f"Days worked: {x['days_active']}"]
     if x['trial']:
         L.append('Trial month: you are paid at least your full monthly salary, less any loss-of-pay days. / ಪ್ರಯೋಗ ತಿಂಗಳು')
+    if m and m.get('join'):
+        j = m['join']
+        L.append(f"You joined on {int(j['from'][8:])} {_MONTHS[int(j['from'][5:7]) - 1]}: this month is paid for {j['days']} of the month's {j['of']} working days.")
 
     if m:
         L += ['', '*Salary / ಸಂಬಳ*',

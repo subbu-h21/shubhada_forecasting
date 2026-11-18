@@ -279,6 +279,19 @@ EMPLOYEE_ALIASES = {
     'Abhishek Seetaram Naik000000': 'Abhishek Seetaram Naik',
     'Narend Devadiga': 'Narendra Devadiga',
     'Sharath Nagendra Naik A': 'Sharath Nagendra Naik',
+    # Confirmed same person by the owner, 2026-11-18 (found while checking the salary pay list: a typo'd name that had been given its own role and
+    # base salary was paid as a second person, and one person's work was split between two spellings)
+    'Sudha Nagesh Devadiga': 'Sudha N Devadiga',
+    'Sharath Nagendra Naik As': 'Sharath Nagendra Naik',
+    'Manjunata D Gosavi0': 'Manjunata D Gosavi',
+    # one-line slips of the keyboard (owner-confirmed with the above)
+    'Abhishek Seetaram N': 'Abhishek Seetaram Naik',
+    'Abhishek Seetaram Naikg': 'Abhishek Seetaram Naik',
+    'Parashuram T Naik000': 'Parashuram T Naik',
+    'Manjunata D Gosavi[': 'Manjunata D Gosavi',
+    'Sharath Nagendra Naik 70364777': 'Sharath Nagendra Naik',
+    'Manjunata D Gosavi6': 'Manjunata D Gosavi',          # owner-confirmed 2026-11-18, from the upload that evening (2 lines on 17 Nov)
+    # NOT merged, on purpose (owner, 2026-11-18): 'Pooja Gowda' and 'Pooja Naik' are two different people - never confuse them.
 }
 
 

@@ -119,6 +119,46 @@ check('the leave app could not be read: the list still comes, marked', get('/api
 salary.months_available = lambda inputs: []
 check('no salary months at all: said so', get('/api/assistant/pay-list').status_code == 404)
 
+# --- the owner-confirmed spellings of 18 Nov 2026: a typo'd name is never a second person on the pay list ---------------------------------------
+import run_reckoner as rk  # noqa: E402
+
+typos = {'Sudha Nagesh Devadiga': 'Sudha N Devadiga', 'Sharath Nagendra Naik As': 'Sharath Nagendra Naik', 'Manjunata D Gosavi0': 'Manjunata D Gosavi',
+         'Abhishek Seetaram N': 'Abhishek Seetaram Naik', 'Abhishek Seetaram Naikg': 'Abhishek Seetaram Naik', 'Parashuram T Naik000': 'Parashuram T Naik',
+         'Manjunata D Gosavi[': 'Manjunata D Gosavi', 'Manjunata D Gosavi6': 'Manjunata D Gosavi', 'Sharath Nagendra Naik 70364777': 'Sharath Nagendra Naik'}
+check('each confirmed spelling becomes the one name the salary calculator knows (also in capitals and with spaces)',
+      list(rk._norm_name(pd.Series([' ' + k.upper() + ' ' for k in typos]))) == list(typos.values()))
+check('...and the real names are left alone, and no alias points at another alias', list(rk._norm_name(pd.Series(list(set(typos.values()))))) == list(set(typos.values()))
+      and not [v for v in rk.EMPLOYEE_ALIASES.values() if v in rk.EMPLOYEE_ALIASES])
+check('a different person who only looks alike is NOT merged (owner-confirmed 2026-09-29)', rk._norm_name(pd.Series(['Raghavendra C Shet'])).iloc[0] == 'Raghavendra C Shet')
+
+# --- a NEW JOINER is paid from their first day, trial or not (owner's exception, 18 Nov 2026) ---------------------------------------------------
+SCORED = ['2026-08', '2026-09', '2026-10', '2026-11']
+j = salary.joiner_share('2026-10-30', '2026-10', (), SCORED)
+check('started 30 Oct: 2 of the 26 working days of October (Sundays and Gandhi Jayanti are not working days)', j == {'from': '2026-10-30', 'days': 2, 'of': 26, 'share': 2 / 26}, j)
+check('no joiner: first seen on the 1st, an earlier month, or the month is not the first-seen month',
+      salary.joiner_share('2026-10-01', '2026-10', (), SCORED) is None and salary.joiner_share('2026-09-20', '2026-10', (), SCORED) is None
+      and salary.joiner_share(None, '2026-10', (), SCORED) is None and salary.joiner_share('2026-10-30', '2026-11', (), SCORED) is None)
+check('a month whose PREVIOUS month has no names in the sales export never makes anyone a joiner (Jun / Jul 2026 had none, so all looked new in August)',
+      salary.joiner_share('2026-08-03', '2026-08', (), ['2026-08', '2026-09']) is None)
+check('days off the leave app lists are not counted, and a joiner who starts on the last working day is paid that one day',
+      salary.joiner_share('2026-10-26', '2026-10', ('2026-10-27',), SCORED)['days'] == 5 and salary.joiner_share('2026-10-31', '2026-10', (), SCORED)['days'] == 1)
+RULES2 = salary.load_settings()['rules']
+NOLV2 = {'lop': [], 'sunday': {'sessions': 0}, 'unnoticed': {'weight': 0, 'items': []}}
+full_pay = salary.slip_money(7000, RULES2, 1.0, 0, None, NOLV2, {'month': '2026-10'}, True)
+joined = salary.slip_money(7000, RULES2, 0.0, 0, None, NOLV2, {'month': '2026-10'}, True, j)
+check('a normal trial slip pays the full monthly pay; a new joiner gets 2/26 of it, even in the trial',
+      full_pay['payable'] == full_pay['full'] and joined['payable'] == round(joined['full'] * 2 / 26) and 'join' not in full_pay
+      and joined['join'] == {'from': '2026-10-30', 'days': 2, 'of': 26}, (full_pay, joined))
+j_nov = salary.joiner_share('2026-11-06', '2026-11', (), SCORED)
+mid = salary.slip_money(7000, RULES2, 1.0, 0, None, NOLV2, {'month': '2026-11'}, False, j_nov)
+check('outside the trial it is the calculated pay for those days only', mid['payable'] == round(mid['calculated'] * j_nov['share']), mid)
+check('the slip the person is sent says when they joined and for how many days they are paid', "You joined on 30 Oct: this month is paid for 2 of the month's 26 working days."
+      in salary.slip_message({'employee': 'New Person', 'role': 'Biller', 'month': '2026-10', 'days_active': 2, 'trial': True, 'perf_score': None, 'floor_hit': False, 'gate': None,
+                              'items': [], 'groups': [], 'discipline': {'late': 0, 'long_lunch': 0, 'early_exit': 0, 'incidents': 0, 'free': 3, 'charged': 0, 'timed': False},
+                              'leave': dict(NOLV2, paid=[], sick=[], left=None, half={}), 'money': joined, 'notes': [], 'commitment': None, 'shift': None}, RULES2))
+check('the pay list carries it, so the owner sees it before paying', salary.pay_list([{'employee': 'New Person', 'role': 'Biller', 'days_active': 2, 'trial': True, 'perf_score': None,
+      'leave': NOLV2, 'money': joined}], '2026-10')['rows'][0]['joined'] == joined['join'])
+
 print()
 print('ALL PASSED' if not FAILS else '%d FAILED: %s' % (len(FAILS), '; '.join(FAILS)))
 sys.exit(1 if FAILS else 0)
