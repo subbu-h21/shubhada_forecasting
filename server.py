@@ -34,6 +34,7 @@ from werkzeug.utils import secure_filename
 import ask as ask_mod
 import ask_limits
 import assistant_bridge
+import assistant_chat
 import mrp_basket
 import run_reckoner as rk
 import salary as salary_mod
@@ -1311,10 +1312,9 @@ def api_ask():
     hit = ask_mod.basket_reply(question, token)
     if hit:
         return jsonify({'answer': hit['say'], 'cost': 0, 'basket': hit['basket']})
-    try:
-        ask_limits.check()   # daily + burst cap; this page is also the front door for order questions
-    except ask_limits.LimitReached as e:
-        return jsonify({'error': str(e)}), 429
+    greeting = ask_mod.name_call_greeting(question)
+    if greeting:         # just the name ("subbiii"): the instant, free greeting
+        return jsonify({'answer': greeting, 'cost': 0})
     # Optional: earlier turns of the same conversation (voice follow-ups like
     # "and last month?"), and the voice flag (spoken-answer rules, no
     # patient-identity tools - see ask.py's VOICE_PROMPT).
@@ -1323,6 +1323,21 @@ def api_ask():
                for h in history[-ask_mod.MAX_HISTORY_TURNS:] if isinstance(h, dict)]
     voice = body.get('voice') is True
     speak = body.get('speak') is True  # push-to-talk: answer is read aloud as-is
+    # The Shop Assistant (project-15) is the Ask page's brain when it is running: all of its jobs, typed or spoken. It has its own
+    # question limits. If it is off, the reckoner answers from its own tools as before (below).
+    if assistant_chat.enabled():
+        try:
+            out = assistant_chat.ask(question, token, mode='speak' if speak else 'voice' if voice else None)
+            return jsonify({'answer': out['answer'], 'cost': out['cost'], 'files': out['files'], 'source': 'assistant'})
+        except assistant_chat.Unavailable as e:
+            logger.warning('Ask: Shop Assistant not used (%s) - answering from the reckoner alone', e)
+        except assistant_chat.Failed as e:
+            logger.warning('Ask: Shop Assistant failed: %s', e)
+            return jsonify({'error': str(e)}), 502
+    try:
+        ask_limits.check()   # daily + burst cap; this page is also the front door for order questions
+    except ask_limits.LimitReached as e:
+        return jsonify({'error': str(e)}), 429
     cost = {}  # filled with OpenRouter's reported charge for this answer (USD)
     try:
         answer = ask_mod.ask(question, history=history, voice=voice, speak=speak, cost_out=cost, owner=token)
@@ -1332,7 +1347,33 @@ def api_ask():
         # page rather than a generic 500.
         logger.warning('Ask failed for "%s": %s: %s', question, type(e).__name__, e)
         return jsonify({'error': f'Could not reach the model ({type(e).__name__}: {e}).'}), 502
-    return jsonify({'answer': answer, 'cost': cost.get('usd')})
+    return jsonify({'answer': answer, 'cost': cost.get('usd'), 'source': 'reckoner'})
+
+
+@app.route('/api/ask/status')
+@requires_auth
+def api_ask_status():
+    """Which brain answers the Ask page right now: the Shop Assistant (all jobs) or the reckoner alone."""
+    on = assistant_chat.enabled() and assistant_chat.available()
+    return jsonify({'brain': 'assistant' if on else 'reckoner', 'assistant_switched_on': assistant_chat.enabled()})
+
+
+@app.route('/api/ask/file/<token>')
+@requires_auth
+def api_ask_file(token):
+    """A file the Shop Assistant sent into this Ask page's chat (a report, a picture, a DC table) - passed through, never kept here."""
+    try:
+        body, mime, name = assistant_chat.fetch_file(token)
+    except KeyError:
+        return jsonify({'error': 'This file is no longer kept - ask for it again.'}), 404
+    except assistant_chat.Unavailable:
+        return jsonify({'error': 'The Shop Assistant is not reachable.'}), 502
+    inline = mime.startswith(('image/', 'video/', 'audio/')) or mime == 'application/pdf'
+    resp = Response(body, mimetype=mime)
+    resp.headers['Content-Disposition'] = '%s; filename="%s"' % ('inline' if inline else 'attachment', name.replace('"', ''))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    return resp
 
 
 # --- MRP basket (mrp_basket.py) ------------------------------------------------------

@@ -236,6 +236,33 @@ numbers are identical. Patient lookups are switched off in voice mode.
 - What is sent to OpenAI: your voice, the transcript, and each answer it
   speaks.
 
+## The Ask page is the Shop Assistant (19 Nov 2026)
+
+The Ask page's brain is now the **Shop Assistant** ("Shubhada Brain", project-15, port 8030) whenever it is running, so the page can do all
+of the assistant's jobs - orders, racks, leave, the CRM reports (GST file, outstanding payable), the sales bill, DC checks, complaints, CCTV,
+quality checks - as well as every reckoner figure. `assistant_chat.py` sends each typed or spoken question into the assistant's **owner chat**
+(one chat per login, so it remembers the conversation) and waits for the reply. Typed answers show *bold* and any file the assistant sends
+(a report, a picture) as a button. Both voice modes use it too: 🗣 push-to-talk asks with `mode: speak` and the live 🎤 GPT-Live voice with
+`mode: voice`, so the assistant's own spoken-answer rules apply and patient lookups stay off by voice.
+
+- **Never money, never code.** Chats from the Ask page have the owner's access **except**: no bank payment, no "pay salary", no supplier
+  voucher and no Claude Code. Those get one fixed sentence ("not done from the Ask page - use WhatsApp or the phone app"), no AI, no cost.
+  This is enforced in the assistant (`chat_sim.lock_down`, chats whose id starts with `ask-`; tests in its `test_chat_api.py`), and
+  `assistant_chat.available()` refuses an assistant that does not advertise the lock-down (`ask_lockdown` on `/api/chat/who`), so an older
+  assistant is never used by mistake.
+- **If the assistant is off** the page answers from the reckoner's own tools exactly as before (the top of the page says which brain is
+  answering). If the assistant takes a question and then fails, an error is shown - the question is *not* silently asked again elsewhere.
+- **Instant, free replies stay here:** calling "subbiii" by name and MRP-basket items / commands ("eco 65.60, 30", "calculate") are answered
+  by rules in the reckoner before anything is sent.
+- **Limits:** the assistant's own question limits apply on this route; the reckoner's `ASK_DAILY_LIMIT_QUESTIONS` / `ASK_PER_10_MIN` apply when
+  the reckoner answers by itself.
+- **Switches (`.env`):** `ASK_VIA_ASSISTANT=0` turns it off (the old reckoner-only brain); `ASSISTANT_CHAT_URL` (default
+  `http://127.0.0.1:8030`); `ASSISTANT_CHAT_WAIT_S` (default 240 seconds per question - a CRM report needs up to 90).
+- **No key to store:** it uses the assistant's panel API, which answers only a program on this PC. A file or message the assistant sends *after*
+  an answer (a slow report) appears with the next question from that login.
+- **Tests:** `venv/Scripts/python.exe test_assistant_chat.py` (offline - a stub assistant). Tests that exercise the reckoner's own brain set
+  `ASK_VIA_ASSISTANT=0`.
+
 ## Dual mode: orders + sales on one Ask page
 
 The Ask page can answer **order** questions ("where is my Dolo order?", "what is

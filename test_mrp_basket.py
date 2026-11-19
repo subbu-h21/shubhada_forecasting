@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding='utf-8')
 os.environ.setdefault('OPENROUTER_API_KEY', 'sk-test-not-real')
 os.environ['OPENROUTER_MODEL_FAST'] = 'fake/fast-model'
+os.environ['ASK_VIA_ASSISTANT'] = '0'          # these tests are about the reckoner's own brain; never the live Shop Assistant
 os.environ['OPENROUTER_MODEL_REASONING'] = 'fake/reasoning-model'
 for v in ('ORDER_ASK_URL', 'ORDER_ASK_KEY'):
     os.environ.pop(v, None)

@@ -52,6 +52,13 @@
   .msg { max-width: 88%; padding: 10px 13px; border-radius: 14px; font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; }
   .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
   .msg.assistant { align-self: flex-start; background: var(--paper-raised); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.assistant b { font-weight: 700; }
+  .msg .files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; white-space: normal; }
+  .msg .file-btn { border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); border-radius: 10px; padding: 8px 12px; font-size: 13.5px; cursor: pointer; text-align: left; }
+  .msg .file-btn small { display: block; color: var(--ink-faint); font-size: 12px; }
+  .msg .file-btn:disabled { opacity: .6; cursor: default; }
+  .msg .file-pic { display: block; max-width: 100%; border-radius: 10px; margin-top: 10px; }
+  #brain-note { display: block; margin-top: 10px; font-size: 12.5px; color: var(--ink-faint); }
   .msg.error { align-self: flex-start; background: var(--danger-soft); color: var(--danger); border-bottom-left-radius: 4px; }
   .msg.pending { align-self: flex-start; background: var(--paper-raised); border: 1px solid var(--line); color: var(--ink-faint); font-style: italic; }
   #empty-hint { color: var(--ink-faint); font-size: 13.5px; text-align: center; margin-top: 24px; padding: 0 20px; line-height: 1.6; }
@@ -138,6 +145,7 @@
     <br>Pricing a bill? Say or type one item at a time - <b>eco 65.60, 30</b> - then <b>calculate</b>.
     <br>Tap &#128483; and just talk - it answers out loud<span class="live-only">,
     <br>or &#127908; for a live conversation</span>.
+    <span id="brain-note"></span>
   </div>
 </div>
 
@@ -193,11 +201,97 @@ function addMsg(text, cls) {
   return el;
 }
 
+// An answer from the Shop Assistant is WhatsApp-style text: *bold* markers become bold, and any files it sent
+// (a report, a picture, a table) become buttons that fetch them with this login and open them.
+function renderRich(el, text) {
+  el.textContent = '';
+  const re = /\*([^*\n]+)\*/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const b = document.createElement('b');
+    b.textContent = m[1];
+    el.appendChild(b);
+    last = re.lastIndex;
+  }
+  if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function formatSize(n) {
+  if (!n) return '';
+  return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+}
+
+async function openAnswerFile(f, btn, holder) {
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/ask/file/' + encodeURIComponent(f.token), { headers: { 'X-Session-Token': getToken() } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'The file could not be opened.');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    if (f.kind === 'photo' || blob.type.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.className = 'file-pic';
+      img.src = url;
+      holder.appendChild(img);
+    } else if (blob.type === 'application/pdf' || blob.type.startsWith('video/')) {
+      window.open(url, '_blank');
+    } else {
+      const a = document.createElement('a');
+      a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+    }
+  } catch (e) {
+    addMsg((e && e.message) || 'The file could not be opened.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function addAnswer(out, textOverride) {
+  const text = textOverride !== undefined ? textOverride : (out.answer || '(no answer)');
+  const el = addMsg('', 'assistant');
+  renderRich(el, text);
+  if (out.files && out.files.length) {
+    const holder = document.createElement('div');
+    holder.className = 'files';
+    for (const f of out.files) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'file-btn';
+      btn.textContent = (f.kind === 'photo' ? '\u{1F5BC} ' : '\u{1F4CE} ') + f.name;
+      if (f.caption || f.size) {
+        const small = document.createElement('small');
+        small.textContent = [f.caption, formatSize(f.size)].filter(Boolean).join(' · ');
+        btn.appendChild(small);
+      }
+      btn.addEventListener('click', () => openAnswerFile(f, btn, el));
+      holder.appendChild(btn);
+    }
+    el.appendChild(holder);
+  }
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+// Which brain answers: the Shop Assistant (all its jobs) or, when it is off, the reckoner alone.
+(async function showBrain() {
+  const note = document.getElementById('brain-note');
+  if (!note || !getToken()) return;
+  try {
+    const res = await fetch('/api/ask/status', { headers: { 'X-Session-Token': getToken() } });
+    if (!res.ok) return;
+    const out = await res.json();
+    note.textContent = out.brain === 'assistant'
+      ? 'Answering with the Shop Assistant - orders, racks, leave, CRM reports, bills and all the reckoner figures. (Bank payments stay on WhatsApp.)'
+      : "The Shop Assistant is off right now - answering from the reckoner's own figures only.";
+  } catch (e) { /* the note is only a hint */ }
+})();
+
 function askExample(el) { input.value = el.textContent; form.requestSubmit(); }
 
 async function ask(question) {
   addMsg(question, 'user');
-  const pending = addMsg('Thinking… (can take up to 30s)', 'pending');
+  const pending = addMsg('Thinking… (up to 30s; a CRM report or a bill step can take 2 minutes)', 'pending');
   sendBtn.disabled = true;
   try {
     const res = await fetch('/api/ask', {
@@ -214,7 +308,7 @@ async function ask(question) {
     const out = await res.json().catch(() => ({}));
     pending.remove();
     if (!res.ok) { addMsg(out.error || 'Something went wrong.', 'error'); return; }
-    addMsg(out.answer || '(no answer)', 'assistant');
+    addAnswer(out);
   } catch (e) {
     pending.remove();
     addMsg('Could not reach the server - check your connection and try again.', 'error');
@@ -476,7 +570,7 @@ async function handleDelegation(v, id) {
     const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
     v.history.push({ question: request, answer });
     pending.remove();
-    addMsg(answer, 'assistant');
+    addAnswer(out, answer);
     v.curBubble = null;
     // A newer question superseded this one while it ran - show the answer,
     // but don't have the voice read out a stale result.
@@ -722,7 +816,7 @@ async function talkProcess(t, hear) {
     const answer = (out.answer || '').trim() || 'The reckoner returned no answer.';
     t.history.push({ question, answer });
     t.lastAnswer = answer;
-    addMsg(answer, 'assistant');
+    addAnswer(out, answer);
     if (t.ended || qid !== t.qseq || t.utt) return;  // a newer question, or you're talking now
     await talkSpeak(t, answer);
   } catch (e) {
