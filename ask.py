@@ -326,6 +326,9 @@ Rules:
   leave), call get_employee_leave AND get_salary_slips (and
   get_employee_scorecard for the month-by-month trend) and combine them.
   Leave counts are days, never rupees; leave reasons are not available.
+- For the STAFF LIST - who works at which branch, seniors (Group A) and
+  juniors (Group B), "staff list branchwise" - use get_staff_list. Branch
+  and group come from the leave app's Employees page; say so if asked.
 - If a question asks which customers are due/overdue for a refill, or about
   repeat-purchase/reorder patterns for a product, use get_refill_due.
   Customers there are pseudonymous codes, same privacy rule as

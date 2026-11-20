@@ -1283,6 +1283,41 @@ def get_employee_leave(name=None):
             'employees': rows}
 
 
+def get_staff_list(branch=None, group=None):
+    """STAFF LIST BRANCHWISE: everyone working now, by branch (Hospet Road,
+    Shivaji Chowk) and group (A = seniors, B = juniors), with their employee
+    code - as the owner set them on the leave app's Employees page (the one
+    record; this reads it live). Use it for "staff list branchwise", "who
+    works at Shivaji Chowk", "who are the seniors at Hospet Road", "how many
+    juniors do we have". Optional filters: branch (contains-match, e.g.
+    'shivaji', 'hospet') and group ('A' or 'B'). No pay, no phone numbers."""
+    try:
+        data = leave_app.fetch_status(timeout=4)
+    except Exception as exc:
+        return {'available': False, 'reason': str(exc)}
+    staff = data.get('employees') or []
+    if staff and 'branch' not in staff[0]:
+        return {'available': False, 'reason': 'The leave app is an older version without branches - restart it with the new code.'}
+    want_branch = (branch or '').strip().lower()
+    want_group = (group or '').strip().upper()[:1]
+    out, total = {}, 0
+    for e in staff:
+        where = e.get('branch') or 'Branch not set'
+        grp = e.get('group') or '?'
+        if want_branch and want_branch not in where.lower():
+            continue
+        if want_group and grp != want_group:
+            continue
+        label = 'A (seniors)' if grp == 'A' else 'B (juniors)' if grp == 'B' else 'group not set'
+        out.setdefault(where, {}).setdefault(label, []).append('%s (%s)' % (e['name'], e['emp_code']))
+        total += 1
+    branches =[{'branch': b, 'people': sum(len(v) for v in groups.values()),
+                 'groups': {g: {'count': len(names), 'names': names} for g, names in sorted(groups.items())}}
+                for b, groups in sorted(out.items())]
+    return {'available': True, 'total_working': total, 'branches': branches,
+            'note': 'Set on the leave app\'s Employees page (Group and Branch columns); change it there.'}
+
+
 def get_employee_targets(name=None):
     """On-demand employee KPI/target report from the separate
     shubhadahealth.com system: target vs achieved quantity/amount, an
@@ -2870,6 +2905,9 @@ TOOLS = [
     {'name': 'get_employee_leave', 'fn': get_employee_leave,
      'description': get_employee_leave.__doc__,
      'parameters': _schema({'name': {'type': 'string'}})},
+    {'name': 'get_staff_list', 'fn': get_staff_list,
+     'description': get_staff_list.__doc__,
+     'parameters': _schema({'branch': {'type': 'string'}, 'group': {'type': 'string', 'enum': ['A', 'B']}})},
     {'name': 'get_employee_targets', 'fn': get_employee_targets,
      'description': get_employee_targets.__doc__,
      'parameters': _schema({'name': {'type': 'string'}})},
