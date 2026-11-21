@@ -913,7 +913,10 @@ def get_notes(n=20):
 
 
 def get_employee_performance():
-    """Staff performance, by whichever of these columns this export has:
+    """Staff performance OVER THE WHOLE DATA: every figure is a total of
+    every month together (`period` says which months), never one month - so
+    always say the period when quoting it, and for one month ('this month',
+    'November') use get_employee_monthly instead. By whichever of these columns this export has:
     'Billed By' (revenue/bills/avg-bill-value per employee - the till login
     that rang up the sale, auto-filled by the POS); 'Item Given By' (the
     rack-search-and-fetch role - who found the item in the rack and brought
@@ -942,6 +945,11 @@ def get_employee_performance():
     lines, _ = rk.compute_distributor_lines(p)
     perf = rk.build_employee_performance(s, p, lines)
     out = {'available': any(v is not None for v in perf.values())}
+    # 21 Nov 2026: Subbii gave the owner these all-history totals (1.37 crore) as if they were November's - so they say their period.
+    months = sorted(s['Calendar_Month'].dropna().unique()) if 'Calendar_Month' in s.columns else []
+    if months:
+        out['period'] = months[0] if len(months) == 1 else f'{months[0]} to {months[-1]}'
+        out['covers'] = 'totals of every month in the period together, not one month; for one month use get_employee_monthly'
     if perf['billed_by'] is not None:
         out['billed_by'] = _records(perf['billed_by'], ['Employee', 'Bills', 'Revenue', 'Patients', 'Avg_Bill_Value'])
     if perf['given_by'] is not None:
